@@ -1,0 +1,19 @@
+# Diffs of compilation artifacts of test contracts do not require review.
+crates/blockifier_test_utils/resources/feature_contracts/cairo0/compiled/*.json -diff
+
+# Hint coverage of specific test cases do not require review - we use these artifacts to compute the
+# list of all uncovered hints, which *should* be reviewed.
+crates/starknet_os/resources/hint_coverage/*.json -diff
+
+# Starknet tx prover proving resources - large binary/JSON files.
+crates/starknet_transaction_prover/resources/*.json -diff
+crates/starknet_transaction_prover/resources/*.bin -diff
+crates/starknet_transaction_prover/resources/*.zip -diff
+
+# Starknet system tests resources - large JSON files.
+crates/central_systest_blobs/resources/blobs.json -diff
+crates/central_systest_blobs/resources/preconfirmed_block.json -diff
+
+# Starknet OS flow tests resources - precompiled contracts.
+crates/starknet_os_flow_tests/resources/deployable_for_resource_measurement.casm.json -diff
+crates/starknet_os_flow_tests/resources/deployable_for_resource_measurement.sierra.json -diff

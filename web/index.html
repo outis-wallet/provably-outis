@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy-pool proof in the browser</title>
+<style>body{font:16px system-ui;margin:24px;background:#0b0b0b;color:#eee}pre{white-space:pre-wrap}</style>
+<h2>STRK20 privacy-pool proof (WebAssembly)</h2>
+<p>Keep this tab open and the screen on until it says done.</p>
+<pre id="log">starting…</pre>
+<script type="module">
+const log = (line) => { document.getElementById('log').textContent += '\n' + line; };
+const worker = new Worker('worker.js', { type: 'module' });
+worker.onmessage = (e) => {
+  log(e.data.line);
+  fetch('/result', { method: 'POST', body: e.data.line }).catch(() => {});
+};
+worker.onerror = (e) => { const line = 'worker error: ' + e.message; log(line); fetch('/result', { method: 'POST', body: line }); };
+</script>

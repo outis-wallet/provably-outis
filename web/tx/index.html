@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Starknet transaction proof in the browser</title>
+<style>body{font:15px system-ui;margin:1.2em;max-width:52em} pre{white-space:pre-wrap;background:#f4f4f4;padding:.8em}</style>
+<h3>Prove a Starknet privacy-pool transaction in this tab</h3>
+<p>State from the node over JSON-RPC, then execution, the virtual OS, the privacy prover and the
+verifier, all in WebAssembly. Add <code>?threads=8</code> for the threaded build.</p>
+<button id="go">Prove</button>
+<pre id="out"></pre>
+<script type="module">
+const out = document.getElementById("out");
+const show = (line) => { out.textContent += line + "\n"; };
+const report = (body) => fetch("/result", { method: "POST", body: JSON.stringify(body) });
+const start = () => {
+  out.textContent = "";
+  show(`starting (${navigator.userAgent})`);
+  const worker = new Worker("./worker.mjs", { type: "module" });
+  worker.onmessage = ({ data }) => {
+    if (data.log) { show(data.log); report({ page: "tx-log", line: data.log }); }
+    if (data.proof_result) report({ page: "tx-proof", result: JSON.parse(data.proof_result) });
+    if (data.done) { show("DONE " + JSON.stringify(data.done)); report({ page: "tx", ...data.done, ua: navigator.userAgent }); }
+    if (data.error) { show("ERROR " + data.error); report({ page: "tx", error: data.error, ua: navigator.userAgent }); }
+  };
+  worker.onerror = (event) => { show("worker error " + event.message); report({ page: "tx", error: event.message }); };
+  const threads = Number(new URLSearchParams(location.search).get("threads") || 0);
+  const trace = new URLSearchParams(location.search).has("trace");
+  worker.postMessage({ threads, trace });
+};
+document.getElementById("go").onclick = start;
+if (new URLSearchParams(location.search).has("auto")) start();
+</script>

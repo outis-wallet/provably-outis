@@ -1,0 +1,82 @@
+use apollo_infra::component_client::ClientError;
+use serde::{Deserialize, Serialize};
+use starknet_api::block::BlockNumber;
+use starknet_api::core::{GlobalRoot, StateDiffCommitment};
+use starknet_committer::db::forest_trait::ForestMetadataType;
+use starknet_committer::patricia_merkle_tree::types::StateCommitmentInfosCodecError;
+use thiserror::Error;
+
+#[derive(Clone, Debug, Deserialize, Error, Serialize)]
+pub enum CommitterError {
+    #[error(
+        "The next height to commit is {committer_offset}, but got greater height {input_height}."
+    )]
+    CommitHeightHole { input_height: BlockNumber, committer_offset: BlockNumber },
+    #[error("Failed to commit block number {height}: {message}")]
+    Internal { height: BlockNumber, message: String },
+    #[error(
+        "Height {height} already committed with state diff commitment {stored_commitment}, got \
+         {input_commitment}."
+    )]
+    InvalidStateDiffCommitment {
+        input_commitment: StateDiffCommitment,
+        stored_commitment: StateDiffCommitment,
+        height: BlockNumber,
+    },
+    #[error(
+        "Global root for the committed block number {height} is {stored_global_root}, got \
+         post-reverted root {input_global_root}."
+    )]
+    InvalidRevertedGlobalRoot {
+        input_global_root: GlobalRoot,
+        stored_global_root: GlobalRoot,
+        height: BlockNumber,
+    },
+    #[error("Failed to read metadata for {0:?}")]
+    MissingMetadata(ForestMetadataType),
+    #[error("State root for the committed block number {height} is missing.")]
+    MissingStateRoot { height: BlockNumber },
+    #[error(
+        "The next height to revert is {last_committed_block}, but got lower height {input_height}."
+    )]
+    RevertHeightHole { input_height: BlockNumber, last_committed_block: BlockNumber },
+    #[error(
+        "State diff hash mismatch for block number {height}. Provided commitment: \
+         {provided_commitment}, calculated commitment: {calculated_commitment}."
+    )]
+    StateDiffHashMismatch {
+        provided_commitment: StateDiffCommitment,
+        calculated_commitment: StateDiffCommitment,
+        height: BlockNumber,
+    },
+    /// Patricia trie path collection for OS input failed.
+    #[error("Failed Patricia paths collection at block {height}: {message}")]
+    PatriciaPathsCollectionFailed { height: BlockNumber, message: String },
+    /// Stored accessed-keys digest does not match the request (or no digest was stored).
+    #[error(
+        "Accessed-keys digest mismatch at block {height}: expected {expected:?}, stored {stored:?}"
+    )]
+    AccessedKeysDigestMismatch { height: BlockNumber, stored: Option<[u8; 32]>, expected: [u8; 32] },
+    /// Merged Patricia witness paths are missing for replay.
+    #[error("Missing Patricia paths for block {height}")]
+    MissingPatriciaPaths { height: BlockNumber },
+    #[error("Failed to compress state commitment infos: {0}")]
+    StateCommitmentInfosCompression(String),
+}
+impl From<StateCommitmentInfosCodecError> for CommitterError {
+    fn from(error: StateCommitmentInfosCodecError) -> Self {
+        CommitterError::StateCommitmentInfosCompression(error.to_string())
+    }
+}
+
+pub type CommitterResult<T> = Result<T, CommitterError>;
+
+#[derive(Clone, Debug, Error)]
+pub enum CommitterClientError {
+    #[error(transparent)]
+    ClientError(#[from] ClientError),
+    #[error(transparent)]
+    CommitterError(#[from] CommitterError),
+}
+
+pub type CommitterClientResult<T> = Result<T, CommitterClientError>;

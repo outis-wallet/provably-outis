@@ -1,0 +1,80 @@
+pub const DEFAULT_COMPILATION_REQUEST_CHANNEL_SIZE: usize = 2000;
+
+#[cfg(feature = "cairo_native")]
+pub use crate::state::native_class_manager::NativeClassManager as ContractClassManager;
+
+#[cfg(not(feature = "cairo_native"))]
+pub mod trivial_class_manager {
+    #[cfg(any(feature = "testing", test))]
+    use cached::Cached;
+    use starknet_api::class_cache::GlobalContractCache;
+    use starknet_api::core::{ClassHash, CompiledClassHash};
+
+    use crate::blockifier::config::{
+        CairoNativeMode,
+        ContractClassManagerConfig,
+        NativeClassesWhitelist,
+    };
+    use crate::execution::contract_class::RunnableCompiledClass;
+    use crate::state::global_cache::{CompiledClasses, RawClassCache};
+
+    #[derive(Clone)]
+    pub struct TrivialClassManager {
+        class_cache: RawClassCache,
+        compiled_class_hash_v2_cache: GlobalContractCache<CompiledClassHash>,
+    }
+
+    // Trivial implementation of the class manager for Native-less projects.
+    impl TrivialClassManager {
+        pub fn start(config: ContractClassManagerConfig) -> Self {
+            assert_eq!(
+                config.cairo_native_run_config.cairo_native_mode,
+                CairoNativeMode::Off,
+                "Trivial class manager does not support native compilation."
+            );
+            Self {
+                class_cache: RawClassCache::new(config.contract_cache_size),
+                compiled_class_hash_v2_cache: GlobalContractCache::new(config.contract_cache_size),
+            }
+        }
+
+        pub fn get_runnable(
+            &self,
+            class_hash: &ClassHash,
+            _native_classes_whitelist: &NativeClassesWhitelist,
+        ) -> Option<RunnableCompiledClass> {
+            Some(self.class_cache.get(class_hash)?.to_runnable())
+        }
+
+        pub fn set_and_compile(&self, class_hash: ClassHash, compiled_class: CompiledClasses) {
+            self.class_cache.set(class_hash, compiled_class);
+        }
+
+        pub fn clear(&mut self) {
+            self.class_cache.clear();
+        }
+
+        pub fn get_compiled_class_hash_v2(
+            &self,
+            class_hash: &ClassHash,
+        ) -> Option<CompiledClassHash> {
+            self.compiled_class_hash_v2_cache.get(class_hash)
+        }
+
+        pub fn set_compiled_class_hash_v2(
+            &self,
+            class_hash: ClassHash,
+            compiled_class_hash_v2: CompiledClassHash,
+        ) {
+            self.compiled_class_hash_v2_cache.set(class_hash, compiled_class_hash_v2);
+        }
+
+        #[cfg(any(feature = "testing", test))]
+        pub fn get_cache_size(&self) -> usize {
+            self.class_cache.lock().cache_size()
+        }
+    }
+}
+
+#[cfg(not(feature = "cairo_native"))]
+pub use trivial_class_manager::TrivialClassManager as ContractClassManager;

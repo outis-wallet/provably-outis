@@ -1,0 +1,14 @@
+warm-up   frontier   5.50 s  6.67 GiB  yours   5.71 s  3.33 GiB  ratio 1.0379  identical, verified
+pair 1    frontier   5.16 s  6.64 GiB  yours   5.85 s  3.33 GiB  ratio 1.1340  identical, verified
+pair 2    frontier   5.71 s  6.66 GiB  yours   6.30 s  3.33 GiB  ratio 1.1024  identical, verified
+pair 3    frontier   5.13 s  6.65 GiB  yours   5.70 s  3.33 GiB  ratio 1.1114  identical, verified
+pair 4    frontier   5.43 s  6.63 GiB  yours   6.01 s  3.33 GiB  ratio 1.1086  identical, verified
+pair 5    frontier   5.85 s  6.65 GiB  yours   6.44 s  3.34 GiB  ratio 1.1020  identical, verified
+pair 6    frontier   5.26 s  6.67 GiB  yours   5.83 s  3.33 GiB  ratio 1.1081  identical, verified
+pair 7    frontier   6.55 s  6.65 GiB  yours   7.15 s  3.33 GiB  ratio 1.0918  identical, verified
+pair 8    frontier   5.43 s  6.64 GiB  yours   6.01 s  3.33 GiB  ratio 1.1054  identical, verified
+pair 9    frontier   5.20 s  6.67 GiB  yours   5.77 s  3.33 GiB  ratio 1.1093  identical, verified
+pair 10   frontier   5.07 s  6.66 GiB  yours   5.70 s  3.33 GiB  ratio 1.1234  identical, verified
+
+time ratio 1.1096 (95% interval 1.1013 to 1.1180) over 10 pairs
+median peak: frontier 6.65 GiB (range 6.63 to 6.67), yours 3.33 GiB (range 3.33 to 3.34), -49.9%; fits: 10 GiB, 8 GiB, 6 GiB, 4 GiB

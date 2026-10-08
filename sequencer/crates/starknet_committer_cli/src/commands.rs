@@ -1,0 +1,625 @@
+use std::cmp::min;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::LazyLock;
+use std::time::{Duration, SystemTime};
+
+use apollo_storage::db::DbConfig;
+use apollo_storage::header::HeaderStorageReader;
+use apollo_storage::mmap_file::MmapFileConfig;
+use apollo_storage::state::StateStorageReader;
+use apollo_storage::{open_storage, StorageConfig, StorageReader, StorageScope};
+use blake2::digest::consts::U31;
+use blake2::{Blake2s, Digest};
+use rand::distr::Uniform;
+use rand::prelude::IteratorRandom;
+use rand::rngs::SmallRng;
+use rand::{RngExt, SeedableRng};
+use starknet_api::block::BlockNumber;
+use starknet_api::core::ChainId;
+use starknet_api::hash::HashOutput;
+use starknet_committer::block_committer::commit::commit_block;
+use starknet_committer::block_committer::input::{
+    Input,
+    ReaderConfig,
+    StarknetStorageKey,
+    StateDiff,
+};
+use starknet_committer::block_committer::measurements_util::{Action, MeasurementsTrait};
+use starknet_committer::block_committer::state_diff_generator::generate_random_state_diff;
+use starknet_committer::db::forest_trait::{ForestWriterWithMetadata, StorageInitializer};
+use starknet_committer::db::index_db::{IndexDb, IndexDbReadContext};
+use starknet_patricia_storage::storage_trait::{AsyncStorage, DbKey, Storage, StorageStats};
+use starknet_types_core::felt::Felt;
+use tokio::task::JoinSet;
+use tokio::time::sleep;
+use tracing::{error, info, warn};
+
+use crate::args::{
+    BenchmarkFlavor,
+    GlobalArgs,
+    InterferenceArgs,
+    InterferenceType,
+    ShortKeySizeArg,
+    StorageBenchmarkCommand,
+    StorageType,
+    DEFAULT_DATA_PATH,
+};
+use crate::utils::BenchmarkMeasurements;
+
+pub type InputImpl = Input<IndexDbReadContext>;
+
+// This is based on the batcher's storage configuration on mainnet.
+static BATCHER_STORAGE_CONFIG: LazyLock<StorageConfig> = LazyLock::new(|| StorageConfig {
+    db_config: DbConfig {
+        path_prefix: PathBuf::from_str("/core-data/batcher").unwrap(),
+        chain_id: ChainId::Mainnet,
+        enforce_file_exists: true,
+        min_size: 1048576,
+        max_size: 1099511627776,
+        growth_step: 67108864,
+        max_readers: 8192,
+    },
+    mmap_file_config: MmapFileConfig {
+        max_size: 1099511627776,
+        growth_step: 2147483648,
+        max_object_size: 1073741824,
+    },
+    scope: StorageScope::StateOnly,
+    batch_config: Default::default(),
+});
+
+// This is based on the state sync's storage configuration on mainnet.
+static STATE_SYNC_STORAGE_CONFIG: LazyLock<StorageConfig> = LazyLock::new(|| StorageConfig {
+    db_config: DbConfig {
+        path_prefix: PathBuf::from_str("/core-data/state_sync").unwrap(),
+        chain_id: ChainId::Mainnet,
+        enforce_file_exists: true,
+        min_size: 1048576,
+        max_size: 1099511627776,
+        growth_step: 67108864,
+        max_readers: 8192,
+    },
+    mmap_file_config: MmapFileConfig {
+        max_size: 1099511627776,
+        growth_step: 2147483648,
+        max_object_size: 1073741824,
+    },
+    scope: StorageScope::FullArchive,
+    batch_config: Default::default(),
+});
+
+const FLAVOR_PERIOD_MANY_WINDOW: usize = 10;
+const FLAVOR_PERIOD_PERIOD: usize = 500;
+
+const FLAVOR_OVERLAP_WARMUP_BLOCKS: usize = 100_000;
+
+const INTERFERENCE_READ_1K_EVERY_BLOCK_N_READS: usize = 1000;
+
+const MAINNET_BLOCK_NUMBER: usize = 5_463_337;
+
+/// Given a range, generates pseudorandom 31-byte storage keys hashed from the numbers in the range.
+fn leaf_preimages_to_storage_keys(
+    indices: impl IntoIterator<Item = usize>,
+) -> Vec<StarknetStorageKey> {
+    indices
+        .into_iter()
+        .map(|i| {
+            let mut hasher = Blake2s::<U31>::new();
+            hasher.update(i.to_be_bytes().as_slice());
+            let result = hasher.finalize();
+            StarknetStorageKey::try_from(Felt::from_bytes_be_slice(result.as_slice())).unwrap()
+        })
+        .collect()
+}
+
+impl BenchmarkFlavor {
+    /// Returns the total amount of nonzero leaves in the system up to (not including) the block
+    /// number.
+    fn total_nonzero_leaves_up_to(&self, n_updates_arg: usize, block_number: usize) -> usize {
+        let twenty_percent = n_updates_arg / 5;
+        match self {
+            Self::Constant | Self::Continuous => block_number * n_updates_arg,
+            Self::Overlap => {
+                if block_number < FLAVOR_OVERLAP_WARMUP_BLOCKS {
+                    block_number * n_updates_arg
+                } else {
+                    FLAVOR_OVERLAP_WARMUP_BLOCKS * n_updates_arg
+                        + (block_number - FLAVOR_OVERLAP_WARMUP_BLOCKS) * twenty_percent
+                }
+            }
+            Self::PeriodicPeaks => {
+                let updates_per_period = n_updates_arg * FLAVOR_PERIOD_MANY_WINDOW
+                    + twenty_percent * (FLAVOR_PERIOD_PERIOD - FLAVOR_PERIOD_MANY_WINDOW);
+                let mod_period = block_number % FLAVOR_PERIOD_PERIOD;
+                let is_many_window = mod_period < FLAVOR_PERIOD_MANY_WINDOW;
+
+                let total_leaves_added_in_period = if is_many_window {
+                    // We are still in the initial window with many updates.
+                    n_updates_arg * mod_period
+                } else {
+                    // We have passed the many-updates window.
+                    n_updates_arg * FLAVOR_PERIOD_MANY_WINDOW
+                        + twenty_percent * (mod_period - FLAVOR_PERIOD_MANY_WINDOW)
+                };
+                (block_number / FLAVOR_PERIOD_PERIOD) * updates_per_period
+                    + total_leaves_added_in_period
+            }
+            Self::Mainnet | Self::MainnetWithSleeps => unimplemented!(),
+        }
+    }
+
+    /// Returns the keys of the leaves that are updated in the given block.
+    /// Depending on the flavor, some of the leaves to be updated are chosen randomly from the
+    /// previous leaves, but all new leaf indices are deterministic.
+    fn leaf_update_keys(
+        &self,
+        n_updates_arg: usize,
+        block_number: usize,
+        rng: &mut SmallRng,
+    ) -> Vec<StarknetStorageKey> {
+        let twenty_percent = n_updates_arg / 5;
+        let total_leaves = self.total_nonzero_leaves_up_to(n_updates_arg, block_number);
+        match self {
+            Self::Constant => {
+                leaf_preimages_to_storage_keys(total_leaves..(total_leaves + n_updates_arg))
+            }
+            Self::Continuous => (total_leaves..(total_leaves + n_updates_arg))
+                .map(|i| StarknetStorageKey::try_from(Felt::from(i)).unwrap())
+                .collect(),
+            Self::Overlap => {
+                // Invariant: if there are a total of L leaves in the DB, then the nonzero keys are
+                // [hash(i) for i in 0..L].
+                // Warmup phase: all leaves should be new, until 100M nonzero leaves exist.
+                leaf_preimages_to_storage_keys(if block_number < FLAVOR_OVERLAP_WARMUP_BLOCKS {
+                    // Warmup phase: all leaves should be new.
+                    (total_leaves..(total_leaves + n_updates_arg)).collect()
+                } else {
+                    // We are warmed up, so only 20% of the leaves should be new.
+                    // The total number of updates remains constant in this flavor.
+                    // Sample (n_updates-new_leaves) old indices uniformly at random, from the
+                    // previous leaves. Choose leaves from the (overlap_warmup_blocks * n_updates)
+                    // most recent leaves.
+                    let start_index = total_leaves - (FLAVOR_OVERLAP_WARMUP_BLOCKS * n_updates_arg);
+                    let n_overlap_leaves = n_updates_arg - twenty_percent;
+                    let updated_keys = (start_index..total_leaves).sample(rng, n_overlap_leaves);
+                    let new_keys = (total_leaves..(total_leaves + twenty_percent)).collect();
+                    [updated_keys, new_keys].concat()
+                })
+            }
+            Self::PeriodicPeaks => {
+                let new_leaves = if block_number % FLAVOR_PERIOD_PERIOD < FLAVOR_PERIOD_MANY_WINDOW
+                {
+                    n_updates_arg
+                } else {
+                    twenty_percent
+                };
+                leaf_preimages_to_storage_keys(total_leaves..(total_leaves + new_leaves))
+            }
+            Self::Mainnet | Self::MainnetWithSleeps => unimplemented!(),
+        }
+    }
+
+    /// The nonzero leaf indices in the system are uniquely determined by the block number (see
+    /// [Self::leaf_update_keys]), however, the actual state diff can be random depending on the
+    /// flavor (nonzero leaf updates can be randomized).
+    fn generate_state_diff(
+        &self,
+        n_updates_arg: usize,
+        block_number: usize,
+        rng: &mut SmallRng,
+        batcher_storage_reader: Option<&StorageReader>,
+    ) -> StateDiff {
+        if self.is_mainnet_flavor() {
+            let block_number = u64::try_from(block_number).unwrap();
+            info!("Getting state diff for mainnet block number {block_number} from storage.");
+            let state_diff = batcher_storage_reader
+                .unwrap()
+                .begin_ro_txn()
+                .unwrap()
+                .get_state_diff(BlockNumber(block_number))
+                .unwrap()
+                .unwrap()
+                .into();
+            info!(
+                "Successfully retrieved state diff for mainnet block number {block_number} from \
+                 storage."
+            );
+            return state_diff;
+        }
+        let leaf_keys = self.leaf_update_keys(n_updates_arg, block_number, rng);
+        let n_updates = leaf_keys.len();
+        generate_random_state_diff(rng, n_updates, Some(leaf_keys))
+    }
+
+    fn n_iterations(&self, n_iterations: usize) -> usize {
+        match self {
+            Self::Constant | Self::Continuous | Self::Overlap | Self::PeriodicPeaks => n_iterations,
+            Self::Mainnet | Self::MainnetWithSleeps => min(n_iterations, MAINNET_BLOCK_NUMBER),
+        }
+    }
+
+    fn is_mainnet_flavor(&self) -> bool {
+        match self {
+            Self::Mainnet | Self::MainnetWithSleeps => true,
+            Self::Constant | Self::Continuous | Self::Overlap | Self::PeriodicPeaks => false,
+        }
+    }
+}
+
+/// Multiplexer to avoid dynamic dispatch.
+/// If the key_size is not None, wraps the storage in a key-shrinking storage before running the
+/// benchmark.
+macro_rules! generate_short_key_benchmark {
+    (
+        $key_size:expr,
+        $seed:expr,
+        $n_iterations:expr,
+        $flavor:expr,
+        $n_updates:expr,
+        $interference_type:expr,
+        $output_dir:expr,
+        $checkpoint_dir_arg:expr,
+        $storage:expr,
+        $checkpoint_interval:expr,
+        $build_storage_tries_concurrently:expr,
+        $( ($size:ident, $name:ident) ),+ $(,)?
+    ) => {
+        match $key_size {
+            None => {
+                run_storage_benchmark(
+                    $seed,
+                    $n_iterations,
+                    $flavor,
+                    $n_updates,
+                    $interference_type,
+                    &$output_dir,
+                    $checkpoint_dir_arg,
+                    $storage,
+                    $checkpoint_interval,
+                    $build_storage_tries_concurrently,
+                )
+                .await
+            }
+            $(
+                Some(ShortKeySizeArg::$size) => {
+                    let storage = starknet_patricia_storage::short_key_storage::$name::new($storage);
+                    run_storage_benchmark(
+                        $seed,
+                        $n_iterations,
+                        $flavor,
+                        $n_updates,
+                        $interference_type,
+                        &$output_dir,
+                        $checkpoint_dir_arg,
+                        storage,
+                        $checkpoint_interval,
+                        $build_storage_tries_concurrently,
+                    )
+                    .await
+                }
+            )+
+        }
+    }
+}
+
+/// Wrapper to reduce boilerplate and avoid having to use `Box<dyn Storage>`.
+/// Different invocations of this function are used with different concrete storage types.
+pub async fn run_storage_benchmark_wrapper<S: Storage>(
+    storage_benchmark_args: &StorageBenchmarkCommand,
+    storage: S,
+) {
+    let GlobalArgs {
+        seed,
+        n_iterations,
+        flavor,
+        checkpoint_interval,
+        output_dir,
+        checkpoint_dir,
+        key_size,
+        n_updates,
+        build_storage_tries_concurrently,
+        ..
+    } = storage_benchmark_args.global_args();
+
+    let data_path = storage_benchmark_args
+        .file_storage_args()
+        .map(|file_args| file_args.data_path.clone())
+        .unwrap_or(DEFAULT_DATA_PATH.to_string());
+    let storage_type = storage_benchmark_args.storage_type();
+    let output_dir = output_dir
+        .clone()
+        .unwrap_or_else(|| format!("{data_path}/{storage_type:?}/csvs/{n_iterations}"));
+    let checkpoint_dir = checkpoint_dir
+        .clone()
+        .unwrap_or_else(|| format!("{data_path}/{storage_type:?}/checkpoints/{n_iterations}"));
+
+    let checkpoint_dir_arg = match storage_type {
+        StorageType::Mdbx
+        | StorageType::CachedMdbx
+        | StorageType::Rocksdb
+        | StorageType::CachedRocksdb
+        | StorageType::Aerospike
+        | StorageType::CachedAerospike => Some(checkpoint_dir.as_str()),
+        StorageType::MapStorage | StorageType::CachedMapStorage => None,
+    };
+
+    generate_short_key_benchmark!(
+        key_size,
+        *seed,
+        *n_iterations,
+        *flavor,
+        *n_updates,
+        storage_benchmark_args.interference_args(),
+        output_dir,
+        checkpoint_dir_arg,
+        storage,
+        *checkpoint_interval,
+        *build_storage_tries_concurrently,
+        (U16, ShortKeyStorage16),
+        (U17, ShortKeyStorage17),
+        (U18, ShortKeyStorage18),
+        (U19, ShortKeyStorage19),
+        (U20, ShortKeyStorage20),
+        (U21, ShortKeyStorage21),
+        (U22, ShortKeyStorage22),
+        (U23, ShortKeyStorage23),
+        (U24, ShortKeyStorage24),
+        (U25, ShortKeyStorage25),
+        (U26, ShortKeyStorage26),
+        (U27, ShortKeyStorage27),
+        (U28, ShortKeyStorage28),
+        (U29, ShortKeyStorage29),
+        (U30, ShortKeyStorage30),
+        (U31, ShortKeyStorage31),
+        (U32, ShortKeyStorage32)
+    );
+}
+
+fn apply_interference<S: AsyncStorage>(
+    interference_type: InterferenceType,
+    benchmark_flavor: BenchmarkFlavor,
+    n_updates_arg: usize,
+    block_number: usize,
+    task_set: &mut JoinSet<()>,
+    mut storage: S,
+    rng: &mut SmallRng,
+) {
+    match interference_type {
+        InterferenceType::None => {}
+        InterferenceType::Read1KEveryBlock => {
+            // TODO(Nimrod): Implement interference for mainnet flavors.
+            if benchmark_flavor.is_mainnet_flavor() {
+                return;
+            }
+            let total_leaves =
+                benchmark_flavor.total_nonzero_leaves_up_to(n_updates_arg, block_number + 1);
+            // Avoid creating an iterator over the entire range - select random leaves, with
+            // possible repetition. Probability of repitition will decrease as the number of
+            // leaves increases.
+            let dist = Uniform::new(0, total_leaves).unwrap();
+            let preimages = (0..INTERFERENCE_READ_1K_EVERY_BLOCK_N_READS)
+                .map(|_| rng.sample(dist))
+                .collect::<Vec<_>>();
+            task_set.spawn(async move {
+                let keys = leaf_preimages_to_storage_keys(preimages)
+                    .iter()
+                    .map(|k| DbKey((**k.0).to_bytes_be().to_vec()))
+                    .collect::<Vec<_>>();
+                storage.mget_mut(&keys.iter().collect::<Vec<&DbKey>>()).await.unwrap();
+            });
+        }
+    }
+}
+
+/// Runs the committer on n_iterations random generated blocks.
+/// Prints the time measurement to the console and saves statistics to a CSV file in the given
+/// output directory.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_storage_benchmark<S: Storage>(
+    seed: u64,
+    n_iterations: usize,
+    flavor: BenchmarkFlavor,
+    n_updates_arg: usize,
+    InterferenceArgs { interference_type, interference_concurrency_limit }: InterferenceArgs,
+    output_dir: &str,
+    checkpoint_dir: Option<&str>,
+    storage: S,
+    checkpoint_interval: usize,
+    build_storage_tries_concurrently: bool,
+) {
+    let mut interference_task_set = JoinSet::new();
+    let mut measurements =
+        BenchmarkMeasurements::new(checkpoint_interval, S::Stats::column_titles());
+    let mut contracts_trie_root_hash = match checkpoint_dir {
+        Some(checkpoint_dir) => {
+            measurements.try_load_from_checkpoint(checkpoint_dir).unwrap_or_default()
+        }
+        None => HashOutput::default(),
+    };
+
+    let batcher_storage_reader: Option<StorageReader> = if flavor.is_mainnet_flavor() {
+        Some(open_storage(BATCHER_STORAGE_CONFIG.clone()).unwrap().0)
+    } else {
+        None
+    };
+
+    let curr_block_number = measurements.block_number;
+    let state_sync_storage_reader_and_time_offset: Option<(StorageReader, u64)> =
+        if flavor == BenchmarkFlavor::MainnetWithSleeps {
+            let storage_reader = open_storage(STATE_SYNC_STORAGE_CONFIG.clone()).unwrap().0;
+            let first_block_timestamp = storage_reader
+                .begin_ro_txn()
+                .unwrap()
+                .get_block_header(BlockNumber(u64::try_from(curr_block_number).unwrap()))
+                .unwrap()
+                .unwrap()
+                .block_header_without_hash
+                .timestamp
+                .0;
+            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+            let time_offset = now.checked_sub(first_block_timestamp).unwrap();
+            Some((storage_reader, time_offset))
+        } else {
+            None
+        };
+
+    let n_iterations = flavor.n_iterations(n_iterations);
+
+    let mut index_db = IndexDb::new(storage);
+    for block_number in curr_block_number..n_iterations {
+        info!("Committer storage benchmark iteration {}/{}", block_number + 1, n_iterations);
+        // Seed is created from block number, to be independent of restarts using checkpoints.
+        let mut rng = SmallRng::seed_from_u64(seed + u64::try_from(block_number).unwrap());
+        let warn_on_trivial_modifications = false;
+        let config =
+            ReaderConfig::new(warn_on_trivial_modifications, build_storage_tries_concurrently);
+        let input = InputImpl {
+            state_diff: flavor.generate_state_diff(
+                n_updates_arg,
+                block_number,
+                &mut rng,
+                batcher_storage_reader.as_ref(),
+            ),
+            initial_read_context: IndexDbReadContext,
+            config,
+        };
+
+        measurements.start_measurement(Action::EndToEnd);
+        let (filled_forest, deleted_nodes) = commit_block(input, &mut index_db, &mut measurements)
+            .await
+            .expect("Failed to commit the given block.");
+        measurements.start_measurement(Action::Write);
+        let n_new_facts = ForestWriterWithMetadata::write_with_metadata(
+            &mut index_db,
+            &filled_forest,
+            HashMap::new(),
+            deleted_nodes,
+        )
+        .await
+        .expect("failed to serialize db values");
+        info!("Written {n_new_facts} new facts to storage");
+        measurements.attempt_to_stop_measurement(Action::Write, n_new_facts).unwrap();
+
+        measurements.attempt_to_stop_measurement(Action::EndToEnd, 0).unwrap();
+
+        // Export to csv in the checkpoint interval and print the statistics of the storage.
+        if (block_number + 1) % checkpoint_interval == 0 {
+            let storage_stats = index_db.get_stats();
+            index_db.reset_stats().unwrap();
+            measurements.to_csv(
+                &format!("{}.csv", block_number + 1),
+                output_dir,
+                storage_stats.as_ref().ok().map(|s| s.column_values()),
+            );
+            if let Some(checkpoint_dir) = checkpoint_dir {
+                measurements.save_checkpoint(
+                    checkpoint_dir,
+                    block_number + 1,
+                    &contracts_trie_root_hash,
+                )
+            }
+            info!(
+                "{}",
+                storage_stats
+                    .map(|s| format!("{s}"))
+                    .unwrap_or_else(|e| format!("Failed to retrieve statistics: {e}"))
+            );
+        }
+
+        maybe_sleep_between_iterations(
+            flavor,
+            block_number,
+            &state_sync_storage_reader_and_time_offset,
+        )
+        .await;
+
+        contracts_trie_root_hash = filled_forest.get_contract_root_hash();
+
+        // If the storage supports interference (is async), apply interference.
+        if let Some(async_storage) = index_db.get_async_underlying_storage() {
+            // First, try joining all completed interference tasks.
+            // Log all failed tasks but do not panic - the benchmark is still running.
+            while let Some(result) = interference_task_set.try_join_next() {
+                if let Err(error) = result {
+                    error!("Interference task failed: {error}.");
+                }
+            }
+            // If the limit is not reached, spawn a new interference task.
+            if interference_task_set.len() < interference_concurrency_limit {
+                apply_interference(
+                    interference_type,
+                    flavor,
+                    n_updates_arg,
+                    block_number,
+                    &mut interference_task_set,
+                    async_storage,
+                    &mut rng,
+                );
+            } else if !matches!(interference_type, InterferenceType::None) {
+                warn!(
+                    "Interference concurrency limit ({interference_concurrency_limit}) reached. \
+                     Skipping interference task."
+                );
+            }
+        }
+    }
+
+    // Export to csv in the last iteration.
+    if !n_iterations.is_multiple_of(checkpoint_interval) {
+        measurements.to_csv(
+            &format!("{n_iterations}.csv"),
+            output_dir,
+            index_db.get_stats().ok().map(|s| s.column_values()),
+        );
+    }
+
+    measurements.pretty_print(50);
+
+    // Gather all interference tasks and wait for them to complete.
+    // At this point it is safe (and preferable) to panic if any remaining task fails, as the
+    // benchmark is complete.
+    info!("Waiting for {} interference tasks to complete.", interference_task_set.len());
+    interference_task_set.join_all().await;
+    info!("All interference tasks completed.");
+}
+
+/// Determines the time to sleep between iterations in milliseconds based on block timestamps.
+/// See [BenchmarkFlavor::MainnetWithSleeps] for more details.
+fn time_to_sleep_between_iterations(
+    block_number: usize,
+    state_sync_storage_reader: &StorageReader,
+    time_offset: u64,
+) -> u64 {
+    let next_block_number = BlockNumber(u64::try_from(block_number).unwrap() + 1);
+    let next_block_timestamp = state_sync_storage_reader
+        .begin_ro_txn()
+        .unwrap()
+        .get_block_header(next_block_number)
+        .unwrap()
+        .unwrap()
+        .block_header_without_hash
+        .timestamp
+        .0;
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+    (u128::from(next_block_timestamp + time_offset) * 1000_u128)
+        .saturating_sub(now)
+        .try_into()
+        .unwrap()
+}
+
+async fn maybe_sleep_between_iterations(
+    flavor: BenchmarkFlavor,
+    block_number: usize,
+    state_sync_storage_reader: &Option<(StorageReader, u64)>,
+) {
+    if flavor == BenchmarkFlavor::MainnetWithSleeps {
+        let (state_sync_storage_reader, time_offset) = state_sync_storage_reader.as_ref().unwrap();
+        let milliseconds_to_sleep =
+            time_to_sleep_between_iterations(block_number, state_sync_storage_reader, *time_offset);
+
+        info!("Sleeping for {milliseconds_to_sleep} milliseconds before next iteration.");
+        sleep(Duration::from_millis(milliseconds_to_sleep)).await;
+    }
+}

@@ -1,0 +1,767 @@
+use std::collections::HashMap;
+
+use ethnum::U256;
+use pretty_assertions::assert_eq;
+use rstest::rstest;
+use rstest_reuse::{apply, template};
+use serde::Deserialize;
+use starknet_api::hash::HashOutput;
+use starknet_patricia::db_layout::NodeLayout;
+use starknet_patricia::patricia_merkle_tree::external_test_utils::{
+    create_binary_entry,
+    create_binary_entry_from_u128,
+    create_edge_entry,
+    create_edge_entry_from_u128,
+    create_leaf_entry,
+    create_leaf_patricia_key,
+    small_tree_index_to_full,
+    AdditionHash,
+    MockLeaf,
+};
+use starknet_patricia::patricia_merkle_tree::node_data::inner_node::{
+    BinaryData,
+    EdgeData,
+    EdgePath,
+    EdgePathLength,
+    PathToBottom,
+    Preimage,
+    PreimageMap,
+};
+use starknet_patricia::patricia_merkle_tree::traversal::SubTreeTrait;
+use starknet_patricia::patricia_merkle_tree::types::{NodeIndex, SortedLeafIndices, SubTreeHeight};
+use starknet_patricia_storage::db_object::EmptyKeyContext;
+use starknet_patricia_storage::map_storage::MapStorage;
+use starknet_patricia_storage::storage_trait::{DbHashMap, DbKey, DbValue};
+use starknet_types_core::felt::Felt;
+use starknet_types_core::hash::Pedersen;
+
+use crate::db::facts_db::types::FactsSubTree;
+use crate::db::facts_db::FactsNodeLayout;
+use crate::db::index_db::test_utils::traverse_and_convert;
+use crate::db::index_db::IndexNodeLayout;
+use crate::db::trie_traversal::fetch_patricia_paths_inner;
+use crate::hash_function::mock_hash::MockTreeHashFunction;
+
+fn to_preimage_map(raw_preimages: HashMap<u32, Vec<u32>>) -> PreimageMap {
+    raw_preimages
+        .into_iter()
+        .map(|(hash, raw_preimage)| {
+            (
+                HashOutput(Felt::from(hash)),
+                Preimage::try_from(
+                    &raw_preimage.into_iter().map(Felt::from).collect::<Vec<Felt>>(),
+                )
+                .unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn compute_expected_leaves(
+    storage: &MapStorage,
+    leaf_indices: &[u128],
+    height: SubTreeHeight,
+) -> HashMap<NodeIndex, MockLeaf> {
+    leaf_indices
+        .iter()
+        .map(|&idx| {
+            let leaf = if storage.0.contains_key(&create_leaf_patricia_key::<MockLeaf>(idx)) {
+                MockLeaf(Felt::from(idx))
+            } else {
+                MockLeaf::default()
+            };
+            (small_tree_index_to_full(U256::from(idx), height), leaf)
+        })
+        .collect()
+}
+
+async fn convert_trie_to_index_storage(
+    facts_storage: &mut MapStorage,
+    root_hash: HashOutput,
+    root_index: NodeIndex,
+) -> MapStorage {
+    let mut index_storage = MapStorage(DbHashMap::new());
+    let subtree = FactsSubTree::create(SortedLeafIndices::default(), root_index, root_hash);
+    traverse_and_convert::<MockLeaf, MockLeaf, EmptyKeyContext>(
+        facts_storage,
+        &mut index_storage,
+        subtree,
+        &EmptyKeyContext,
+        &mut None,
+        false,
+    )
+    .await;
+    index_storage
+}
+
+/// Runs [`fetch_patricia_paths_inner`] on a small subtree of height `height`,
+/// then checks that every expected preimage appears in the result and that leaf values match.
+async fn fetch_patricia_paths_inner_tester<Layout>(
+    mut storage: MapStorage,
+    root_hash: HashOutput,
+    leaf_indices: Vec<u128>,
+    height: SubTreeHeight,
+    expected_nodes: PreimageMap,
+    expected_fetched_leaves: HashMap<NodeIndex, MockLeaf>,
+) where
+    for<'a> Layout: NodeLayout<'a, MockLeaf>,
+{
+    let root_index = small_tree_index_to_full(U256::ONE, height);
+
+    // Map indices from a small tree to a height 251 tree.
+    let mut leaf_indices_full = leaf_indices
+        .iter()
+        .map(|&idx| small_tree_index_to_full(U256::from(idx), height))
+        .collect::<Vec<_>>();
+
+    let main_subtree = <Layout as NodeLayout<'_, MockLeaf>>::SubTree::create(
+        SortedLeafIndices::new(&mut leaf_indices_full),
+        root_index,
+        root_hash.into(),
+    );
+    let mut nodes = HashMap::new();
+    let mut fetched_leaves = HashMap::new();
+
+    fetch_patricia_paths_inner::<MockLeaf, Layout>(
+        &mut storage,
+        vec![main_subtree],
+        &mut nodes,
+        Some(&mut fetched_leaves),
+        &EmptyKeyContext,
+    )
+    .await
+    .unwrap();
+
+    // The python facts-fetching logic is more accurate, so we only check that the expected nodes
+    // are a subset of the fetched nodes.
+    // TODO(Rotem): fix rust fetching logic and assert equality.
+    for (key, value) in expected_nodes.iter() {
+        match nodes.get(key) {
+            Some(node_value) => assert_eq!(node_value, value, "Value mismatch for key {key:?}"),
+            None => panic!("Expected key {key:?} is in expected nodes but missing in nodes"),
+        }
+    }
+    assert_eq!(fetched_leaves, expected_fetched_leaves);
+}
+
+#[template]
+#[rstest]
+// Some cases uses addition hash and others (generated in python) use pedersen hash.
+// For convenience, the leaves values are their NodeIndices.
+/// This test simulates the main function
+/// [`crate::patricia_merkle_tree::traversal::fetch_patricia_paths`], but with a tree of different
+/// height. SubTree structure:
+/// ```text
+///           92
+///       /        \
+///     38           54
+///    /   \       /    \
+///   17   21     25    29
+///  / \   / \   /  \   / \
+/// 8   9 10 11 12  13 14  15
+/// ```
+/// Modified leaf indices: `[13]`
+/// Expected nodes hashes: `[92, 54, 25]`
+/// Siblings hashes (in preimage of nodes): `[38, 29, 12]`
+#[case::binary_tree_one_leaf(
+    MapStorage(DbHashMap::from([
+        create_binary_entry_from_u128::<AdditionHash>(8, 9),
+        create_binary_entry_from_u128::<AdditionHash>(10, 11),
+        create_binary_entry_from_u128::<AdditionHash>(12, 13),
+        create_binary_entry_from_u128::<AdditionHash>(14, 15),
+        create_binary_entry_from_u128::<AdditionHash>(17, 21),
+        create_binary_entry_from_u128::<AdditionHash>(25, 29),
+        create_binary_entry_from_u128::<AdditionHash>(38, 54),
+        create_leaf_entry::<MockLeaf>(12),
+        create_leaf_entry::<MockLeaf>(13),
+    ])),
+    HashOutput(Felt::from(92_u128)),
+    vec![13],
+    SubTreeHeight::new(3),
+    to_preimage_map(HashMap::from([
+        (92, vec![38, 54]),
+        (54, vec![25, 29]),
+        (25, vec![12, 13]),
+    ])),
+)]
+/// Modified leaf indices: `[12, 13]`
+/// Expected nodes hashes: `[92, 54, 25]`
+/// Siblings hashes (in preimage of nodes): `[38, 29]`
+#[case::binary_tree_two_siblings(
+    MapStorage(DbHashMap::from([
+        create_binary_entry_from_u128::<AdditionHash>(8, 9),
+        create_binary_entry_from_u128::<AdditionHash>(10, 11),
+        create_binary_entry_from_u128::<AdditionHash>(12, 13),
+        create_binary_entry_from_u128::<AdditionHash>(14, 15),
+        create_binary_entry_from_u128::<AdditionHash>(17, 21),
+        create_binary_entry_from_u128::<AdditionHash>(25, 29),
+        create_binary_entry_from_u128::<AdditionHash>(38, 54),
+        create_leaf_entry::<MockLeaf>(12),
+        create_leaf_entry::<MockLeaf>(13),
+    ])),
+    HashOutput(Felt::from(92_u128)),
+    vec![12, 13],
+    SubTreeHeight::new(3),
+    to_preimage_map(HashMap::from([
+        (92, vec![38, 54]),
+        (54, vec![25, 29]),
+        (25, vec![12, 13]),
+    ])),
+)]
+/// Modified leaf indices: `[11, 14]`
+/// Expected nodes hashes: `[92, 38, 54, 21, 29]`
+/// Siblings hashes (in preimage of nodes): `[17, 25, 10, 15]`
+#[case::binary_tree_two_leaves(
+    MapStorage(DbHashMap::from([
+        create_binary_entry_from_u128::<AdditionHash>(8, 9),
+        create_binary_entry_from_u128::<AdditionHash>(10, 11),
+        create_binary_entry_from_u128::<AdditionHash>(12, 13),
+        create_binary_entry_from_u128::<AdditionHash>(14, 15),
+        create_binary_entry_from_u128::<AdditionHash>(17, 21),
+        create_binary_entry_from_u128::<AdditionHash>(25, 29),
+        create_binary_entry_from_u128::<AdditionHash>(38, 54),
+        create_leaf_entry::<MockLeaf>(10),
+        create_leaf_entry::<MockLeaf>(11),
+        create_leaf_entry::<MockLeaf>(14),
+        create_leaf_entry::<MockLeaf>(15),
+    ])),
+    HashOutput(Felt::from(92_u128)),
+    vec![11, 14],
+    SubTreeHeight::new(3),
+    to_preimage_map(HashMap::from([
+        (92, vec![38, 54]),
+        (38, vec![17, 21]),
+        (54, vec![25, 29]),
+        (21, vec![10, 11]),
+        (29, vec![14, 15]),
+    ])),
+)]
+/// Modified leaf indices: `[8, 11, 12, 14]`
+/// Expected nodes hashes: `[92, 38, 54, 17, 21, 25, 29]`
+/// Siblings hashes (in preimage of nodes): `[9, 10, 13, 15]`
+#[case::binary_many_leaves(
+    MapStorage(DbHashMap::from([
+        create_binary_entry_from_u128::<AdditionHash>(8, 9),
+        create_binary_entry_from_u128::<AdditionHash>(10, 11),
+        create_binary_entry_from_u128::<AdditionHash>(12, 13),
+        create_binary_entry_from_u128::<AdditionHash>(14, 15),
+        create_binary_entry_from_u128::<AdditionHash>(17, 21),
+        create_binary_entry_from_u128::<AdditionHash>(25, 29),
+        create_binary_entry_from_u128::<AdditionHash>(38, 54),
+        create_leaf_entry::<MockLeaf>(8),
+        create_leaf_entry::<MockLeaf>(9),
+        create_leaf_entry::<MockLeaf>(10),
+        create_leaf_entry::<MockLeaf>(11),
+        create_leaf_entry::<MockLeaf>(12),
+        create_leaf_entry::<MockLeaf>(13),
+        create_leaf_entry::<MockLeaf>(14),
+        create_leaf_entry::<MockLeaf>(15),
+    ])),
+    HashOutput(Felt::from(92_u128)),
+    vec![8, 11, 12, 14],
+    SubTreeHeight::new(3),
+    to_preimage_map(HashMap::from([
+        (92, vec![38, 54]),
+        (38, vec![17, 21]),
+        (54, vec![25, 29]),
+        (17, vec![8, 9]),
+        (21, vec![10, 11]),
+        (25, vec![12, 13]),
+        (29, vec![14, 15]),
+    ])),
+)]
+/// SubTree structure:
+/// ```text
+///          62
+///        /    \
+///      18      44
+///     /      /    \
+///    17     15    29
+///   / \      \    / \
+///  8   9     13  14  15
+/// ```
+/// Modified leaf indices: `[13]`
+/// Expected nodes hashes: `[62, 44, 15]`
+/// Siblings hashes (in preimage of nodes): `[18, 29]`
+#[case::edge_one_leaf_edge(
+    MapStorage(DbHashMap::from([
+        create_binary_entry_from_u128::<AdditionHash>(8, 9),
+        create_binary_entry_from_u128::<AdditionHash>(14, 15),
+        create_binary_entry_from_u128::<AdditionHash>(15, 29),
+        create_binary_entry_from_u128::<AdditionHash>(18, 44),
+        create_edge_entry_from_u128::<AdditionHash>(17, 0, 1),
+        create_edge_entry_from_u128::<AdditionHash>(13, 1, 1),
+        create_leaf_entry::<MockLeaf>(13),
+    ])),
+    HashOutput(Felt::from(62_u128)),
+    vec![13],
+    SubTreeHeight::new(3),
+    // edge: [length, path, bottom]
+    to_preimage_map(HashMap::from([
+        (62, vec![18, 44]),
+        (44, vec![15, 29]),
+        (15, vec![1, 1, 13]),
+    ])),
+)]
+/// Modified leaf indices: `[14]`
+/// Expected nodes hashes: `[62, 44, 29]`
+/// Siblings hashes (in preimage of nodes): `[18, 15(node), 15(leaf)]`
+#[case::edge_one_leaf_binary(
+    MapStorage(DbHashMap::from([
+        create_binary_entry_from_u128::<AdditionHash>(8, 9),
+        create_binary_entry_from_u128::<AdditionHash>(14, 15),
+        create_binary_entry_from_u128::<AdditionHash>(15, 29),
+        create_binary_entry_from_u128::<AdditionHash>(18, 44),
+        create_edge_entry_from_u128::<AdditionHash>(17, 0, 1),
+        create_edge_entry_from_u128::<AdditionHash>(13, 1, 1),
+        create_leaf_entry::<MockLeaf>(14),
+        create_leaf_entry::<MockLeaf>(15),
+    ])),
+    HashOutput(Felt::from(62_u128)),
+    vec![14],
+    SubTreeHeight::new(3),
+    to_preimage_map(HashMap::from([
+        (62, vec![18, 44]),
+        (44, vec![15, 29]),
+        (29, vec![14, 15]),
+    ])),
+)]
+/// SubTree structure:
+/// ```text
+///         54
+///        /  \
+///      10    44
+///     /     /   \
+///    *     15    29
+///   /        \   / \
+///  8         13 14  15
+/// ```
+/// Modified leaf indices: `[8]`
+/// Expected nodes hashes: `[54, 10]`
+/// Siblings hashes (in preimage of nodes): `[44]`
+#[case::long_edge_one_leaf_edge(
+    MapStorage(DbHashMap::from([
+        create_binary_entry_from_u128::<AdditionHash>(14, 15),
+        create_binary_entry_from_u128::<AdditionHash>(15, 29),
+        create_binary_entry_from_u128::<AdditionHash>(10, 44),
+        create_edge_entry_from_u128::<AdditionHash>(8, 0, 2),
+        create_edge_entry_from_u128::<AdditionHash>(13, 1, 1),
+        create_leaf_entry::<MockLeaf>(8),
+    ])),
+    HashOutput(Felt::from(54_u128)),
+    vec![8],
+    SubTreeHeight::new(3),
+    // edge: [length, path, bottom]
+    to_preimage_map(HashMap::from([
+        (54, vec![10, 44]),
+        (10, vec![2, 0, 8]),
+    ])),
+)]
+/// SubTree structure:
+/// ```text
+/// 
+///         38
+///        /  \
+///      18    20
+///      /      \
+///    17        *
+///    / \        \
+///   8   9       15
+/// ```
+/// Modified leaf indices: `[8]`
+/// Expected nodes hashes: `[38, 18, 17]`
+/// Siblings hashes (in preimage of nodes): `[20, 9]`
+#[case::edge_and_binary(
+    MapStorage(DbHashMap::from([
+        create_binary_entry_from_u128::<AdditionHash>(8, 9),
+        create_edge_entry_from_u128::<AdditionHash>(17, 0, 1),
+        create_edge_entry_from_u128::<AdditionHash>(15, 3, 2),
+        create_binary_entry_from_u128::<AdditionHash>(18, 20),
+        create_leaf_entry::<MockLeaf>(8),
+        create_leaf_entry::<MockLeaf>(9),
+    ])),
+    HashOutput(Felt::from(38_u128)),
+    vec![8],
+    SubTreeHeight::new(3),
+    // edge: [length, path, bottom]
+    to_preimage_map(HashMap::from([
+        (38, vec![18, 20]),
+        (18, vec![1, 0, 17]),
+        (17, vec![8, 9]),
+    ])),
+)]
+/// Test old tree with new leaves.
+/// Old SubTree structure:
+/// ```text
+///          24
+///         /
+///         *
+///          \
+///          21
+///          / \
+///         10 11
+/// ```
+/// New SubTree structure:
+/// ```text
+///            52
+///         /      \
+///        38       14
+///       / \       /
+///     17   21    *
+///     / \  / \  /
+///    8  9 10 11 12
+///   new new    new
+/// ```
+/// Modified leaf indices: `[8, 9, 12]`
+/// Expected nodes hashes: `[24, 21]`
+/// 21 is a binary node that its parent is an edge node, so it should be fetched.
+/// Siblings hashes (in preimage of nodes): `[21]`
+#[case::should_return_empty_leaves(
+    MapStorage(DbHashMap::from([
+        create_binary_entry_from_u128::<AdditionHash>(10, 11),
+        create_edge_entry_from_u128::<AdditionHash>(21, 1, 2),
+        create_leaf_entry::<MockLeaf>(10),
+        create_leaf_entry::<MockLeaf>(11),
+    ])),
+    HashOutput(Felt::from(24_u128)),
+    vec![8, 9, 12],
+    SubTreeHeight::new(3),
+    // edge: [length, path, bottom]
+    to_preimage_map(HashMap::from([
+        (24, vec![2, 1, 21]),
+        (21, vec![10, 11]),
+    ])),
+)]
+/// Test new tree with deleted leaves.
+/// Old SubTree structure:
+/// ```text
+///            58
+///         /     \
+///        38     20
+///       /  \     \
+///     17   21    *
+///     / \  / \    \
+///    8  9 10 11   15
+/// ```
+/// /// New SubTree structure:
+/// ```text
+///              38
+///            /   \
+///          18    20
+///          /      \
+///         17       *
+///        / \       \
+///       8  9      15
+/// ```
+/// Modified leaf indices: `[10, 11]`
+/// Expected nodes hashes: `[38, 18, 17]`
+/// 17 is a binary node that its parent is an edge node, so it should be fetched.
+/// Siblings hashes (in preimage of nodes): `[20, 17]`
+#[case::binary_child_of_edge(
+    MapStorage(DbHashMap::from([
+        create_binary_entry_from_u128::<AdditionHash>(8, 9),
+        create_edge_entry_from_u128::<AdditionHash>(17, 0, 1),
+        create_edge_entry_from_u128::<AdditionHash>(15, 3, 2),
+        create_binary_entry_from_u128::<AdditionHash>(18, 20),
+        create_leaf_entry::<MockLeaf>(8),
+        create_leaf_entry::<MockLeaf>(9),
+        create_leaf_entry::<MockLeaf>(15),
+    ])),
+    HashOutput(Felt::from(38_u128)),
+    vec![10, 11],
+    SubTreeHeight::new(3),
+    // edge: [length, path, bottom]
+    to_preimage_map(HashMap::from([
+        (38, vec![18, 20]),
+        (18, vec![1, 0, 17]),
+        (17, vec![8, 9]),
+    ])),
+)]
+/// Python generated cases.
+#[case::python_sparse_tree_1(
+    MapStorage(DbHashMap::from([
+    create_edge_entry_from_u128::<AdditionHash>(1471, 447, 9),
+    create_edge_entry_from_u128::<AdditionHash>(1645, 109, 7),
+    create_edge_entry_from_u128::<AdditionHash>(1757, 93, 7),
+    create_edge_entry_from_u128::<AdditionHash>(1853, 61, 7),
+    create_edge_entry_from_u128::<AdditionHash>(2000, 80, 7),
+    create_binary_entry_from_u128::<AdditionHash>(1761, 1857),
+    create_binary_entry_from_u128::<AdditionHash>(1921, 2087),
+    create_binary_entry_from_u128::<AdditionHash>(3618, 4008),
+    create_binary_entry_from_u128::<AdditionHash>(1927, 7626),
+    create_leaf_entry::<MockLeaf>(1471),
+    create_leaf_entry::<MockLeaf>(1645),
+    create_leaf_entry::<MockLeaf>(1757),
+    create_leaf_entry::<MockLeaf>(1853),
+    create_leaf_entry::<MockLeaf>(2000),
+ ])),
+    HashOutput(Felt::from(9553_u128)),
+    vec![1757, 1853],
+    SubTreeHeight::new(10),
+    // edge: [length, path, bottom]
+    to_preimage_map(HashMap::from([
+        (9553, vec![1927, 7626]),
+        (7626, vec![3618, 4008]),
+        (3618, vec![1761, 1857]),
+        (1857, vec![7, 93, 1757]),
+        (4008, vec![1921, 2087]),
+        (1921, vec![7, 61, 1853]),
+    ])),
+)]
+#[case::python_sparse_tree_2(
+    MapStorage(DbHashMap::from([
+    create_edge_entry_from_u128::<AdditionHash>(1106, 82, 9),
+    create_edge_entry_from_u128::<AdditionHash>(1554, 18, 8),
+    create_edge_entry_from_u128::<AdditionHash>(2019, 99, 7),
+    create_edge_entry_from_u128::<AdditionHash>(1812, 20, 6),
+    create_edge_entry_from_u128::<AdditionHash>(1885, 29, 6),
+    create_binary_entry_from_u128::<AdditionHash>(1838, 1920),
+    create_binary_entry_from_u128::<AdditionHash>(3758, 2125),
+    create_binary_entry_from_u128::<AdditionHash>(1580, 5883),
+    create_binary_entry_from_u128::<AdditionHash>(1197, 7463),
+    create_leaf_entry::<MockLeaf>(1812),
+    create_leaf_entry::<MockLeaf>(1885),
+    create_leaf_entry::<MockLeaf>(1106),
+    create_leaf_entry::<MockLeaf>(1554),
+    create_leaf_entry::<MockLeaf>(2019),
+ ])),
+    HashOutput(Felt::from(8660_u128)),
+    vec![
+        1554,
+        1106,
+    ],
+    SubTreeHeight::new(10),
+    // edge: [length, path, bottom]
+    to_preimage_map(HashMap::from([
+        (8660, vec![1197, 7463]),
+        (1197, vec![9, 82, 1106]),
+        (7463, vec![1580, 5883]),
+        (1580, vec![8, 18, 1554]),
+    ])),
+)]
+#[case::python_pedersen(
+    MapStorage(DbHashMap::from([
+    create_edge_entry::<Pedersen>(Felt::from_hex_unchecked("0x8"), 0, 1),
+    create_edge_entry::<Pedersen>(Felt::from_hex_unchecked("0xb"), 1, 1),
+    create_binary_entry::<Pedersen>(Felt::from_hex_unchecked("0xe"), Felt::from_hex_unchecked("0xf")),
+    create_binary_entry::<Pedersen>(Felt::from_hex_unchecked("0x610eec7d913ae704e188746bc82767430e39e6f096188f4671712791c563a67"), Felt::from_hex_unchecked("0x25177dfc7f358239f3b7c4c1771ddcd7eaf74a1b2b2ac952f2c2dd52f5b860d")),
+    create_edge_entry::<Pedersen>(Felt::from_hex_unchecked("0x54509ffe4af5d8674d8afbb218c8cb76554e12e96e9f0c97eb1c42b1e14edac"), 1, 1),
+    create_binary_entry::<Pedersen>(Felt::from_hex_unchecked("0x111afbf8374248dc3a584bbd5f7c868f1dd76c3f17a326b5c77e692d736ece5"), Felt::from_hex_unchecked("0x20eec267afb39fcff7c97f9aa9e46ab73f61bf2e7db51c85a8f17cc313447fe")),
+    create_leaf_entry::<MockLeaf>(14),
+    create_leaf_entry::<MockLeaf>(15),
+    create_leaf_entry::<MockLeaf>(11),
+    create_leaf_entry::<MockLeaf>(8),
+ ])),
+    HashOutput(Felt::from_hex_unchecked("0xdd6634d8228819c6b4aec64cf4e5a39a420c77b75cdf08a85f73ae2f7afcc1")),
+    vec![
+        11,
+        8,
+    ],
+    SubTreeHeight::new(3),
+    PreimageMap::from([
+        (HashOutput(Felt::from_hex_unchecked("0xdd6634d8228819c6b4aec64cf4e5a39a420c77b75cdf08a85f73ae2f7afcc1")),
+        Preimage::Binary(BinaryData {
+            left_data: HashOutput(Felt::from_hex_unchecked("0x111afbf8374248dc3a584bbd5f7c868f1dd76c3f17a326b5c77e692d736ece5")),
+            right_data: HashOutput(Felt::from_hex_unchecked("0x20eec267afb39fcff7c97f9aa9e46ab73f61bf2e7db51c85a8f17cc313447fe")),
+        })),
+        (HashOutput(Felt::from_hex_unchecked("0x111afbf8374248dc3a584bbd5f7c868f1dd76c3f17a326b5c77e692d736ece5")),
+        Preimage::Binary(BinaryData {
+            left_data: HashOutput(Felt::from_hex_unchecked("0x610eec7d913ae704e188746bc82767430e39e6f096188f4671712791c563a67")),
+            right_data: HashOutput(Felt::from_hex_unchecked("0x25177dfc7f358239f3b7c4c1771ddcd7eaf74a1b2b2ac952f2c2dd52f5b860d")),
+        })),
+        (HashOutput(Felt::from_hex_unchecked("0x610eec7d913ae704e188746bc82767430e39e6f096188f4671712791c563a67")),
+        Preimage::Edge(EdgeData {
+            bottom_data: HashOutput(Felt::from_hex_unchecked("0x8")),
+            path_to_bottom: PathToBottom::new(EdgePath(U256::from(0_u128)),
+            EdgePathLength::new(1).unwrap())
+            .unwrap()
+        })),
+        (HashOutput(Felt::from_hex_unchecked("0x25177dfc7f358239f3b7c4c1771ddcd7eaf74a1b2b2ac952f2c2dd52f5b860d")),
+        Preimage::Edge(EdgeData {
+            bottom_data: HashOutput(Felt::from_hex_unchecked("0xb")),
+            path_to_bottom: PathToBottom::new(EdgePath(U256::from(1_u128)),
+            EdgePathLength::new(1).unwrap())
+            .unwrap()
+        })),
+    ]),
+)]
+fn fetch_patricia_paths_inner_cases(
+    #[case] _storage: MapStorage,
+    #[case] _root_hash: HashOutput,
+    #[case] _leaf_indices: Vec<u128>,
+    #[case] _height: SubTreeHeight,
+    #[case] _expected_nodes: PreimageMap,
+) {
+}
+
+#[apply(fetch_patricia_paths_inner_cases)]
+#[rstest]
+#[tokio::test]
+async fn test_fetch_patricia_paths_inner_facts_layout(
+    #[case] storage: MapStorage,
+    #[case] root_hash: HashOutput,
+    #[case] leaf_indices: Vec<u128>,
+    #[case] height: SubTreeHeight,
+    #[case] expected_nodes: PreimageMap,
+) {
+    let expected_fetched_leaves = compute_expected_leaves(&storage, &leaf_indices, height);
+    fetch_patricia_paths_inner_tester::<FactsNodeLayout>(
+        storage,
+        root_hash,
+        leaf_indices,
+        height,
+        expected_nodes,
+        expected_fetched_leaves,
+    )
+    .await;
+}
+
+#[apply(fetch_patricia_paths_inner_cases)]
+#[rstest]
+#[tokio::test]
+async fn test_fetch_patricia_paths_inner_index_layout(
+    #[case] mut storage: MapStorage,
+    #[case] root_hash: HashOutput,
+    #[case] leaf_indices: Vec<u128>,
+    #[case] height: SubTreeHeight,
+    #[case] expected_nodes: PreimageMap,
+) {
+    let expected_fetched_leaves = compute_expected_leaves(&storage, &leaf_indices, height);
+    let root_index = small_tree_index_to_full(U256::ONE, height);
+    let index_storage = convert_trie_to_index_storage(&mut storage, root_hash, root_index).await;
+    fetch_patricia_paths_inner_tester::<IndexNodeLayout<MockTreeHashFunction>>(
+        index_storage,
+        root_hash,
+        leaf_indices,
+        height,
+        expected_nodes,
+        expected_fetched_leaves,
+    )
+    .await;
+}
+
+#[derive(Deserialize, Debug)]
+struct TestPatriciaPathsInput {
+    facts_storage: HashMap<Felt, Vec<Felt>>,
+    initial_leaves: Vec<u128>,
+    root_hash: Felt,
+    modified_leaves_indices: Vec<u128>,
+    height: u8,
+    expected_nodes: HashMap<Felt, Vec<Felt>>,
+}
+
+/// Deserializes a Python-generated `PatriciaTree.update()`.
+///
+/// Returns, in order:
+/// 1. `MapStorage` — facts-db entries: inner nodes decoded from JSON preimages plus leaf rows for
+///    `initial_leaves`.
+/// 2. `Vec<u128>` — `modified_leaves_indices` shifted from Python bottom-layer-relative indices to
+///    absolute full-tree indices (each value plus `2^height`).
+/// 3. `HashOutput` — subtree root hash.
+/// 4. `SubTreeHeight` — tree height.
+/// 5. `PreimageMap` — expected fetched node preimages keyed by hash, for asserting traversal.
+fn parse_json_test_input(
+    input_data: &str,
+) -> (MapStorage, Vec<u128>, HashOutput, SubTreeHeight, PreimageMap) {
+    let input: TestPatriciaPathsInput = serde_json::from_str(input_data)
+        .unwrap_or_else(|error| panic!("JSON was not well-formatted: {error:?}"));
+
+    let first_leaf = 2u128.pow(u32::from(input.height));
+
+    let storage: HashMap<DbKey, DbValue> = input
+        .facts_storage
+        .values()
+        .map(|preimage| match preimage.as_slice() {
+            [left, right] => create_binary_entry::<Pedersen>(*left, *right),
+            [length, path, bottom] => create_edge_entry::<Pedersen>(
+                *bottom,
+                (*path).try_into().unwrap(),
+                (*length).try_into().unwrap(),
+            ),
+            _ => panic!("Preimage should be of length 2 or 3."),
+        })
+        .chain(
+            input
+                .initial_leaves
+                .iter()
+                .map(|&leaf_value| create_leaf_entry::<MockLeaf>(leaf_value + first_leaf)),
+        )
+        .collect();
+
+    // In Python the indices are relative to the first leaf (indices in the bottom layer).
+    // In Rust the indices are absolute (indices in the full tree).
+    let leaf_indices: Vec<u128> =
+        input.modified_leaves_indices.iter().map(|&idx| idx + first_leaf).collect();
+
+    let expected_nodes: PreimageMap = input
+        .expected_nodes
+        .iter()
+        .map(|(hash, preimage)| {
+            let hash = HashOutput(*hash);
+            let preimage = Preimage::try_from(preimage).unwrap();
+            (hash, preimage)
+        })
+        .collect();
+
+    (
+        MapStorage(DbHashMap::from(storage)),
+        leaf_indices,
+        HashOutput(input.root_hash),
+        SubTreeHeight::new(input.height),
+        expected_nodes,
+    )
+}
+
+#[template]
+#[rstest]
+/// Test cases generated using Python `PatriciaTree.update()`.
+/// The files names indicate the tree height, number of initial leaves and number of modified
+/// leaves. The hash function used in the python tests is Pedersen.
+/// The leaves values are their NodeIndices.
+#[case(include_str!("../../resources/fetch_patricia_paths_test_10_200_50.json"))]
+#[case(include_str!("../../resources/fetch_patricia_paths_test_10_5_2.json"))]
+#[case(include_str!("../../resources/fetch_patricia_paths_test_10_100_30.json"))]
+#[case(include_str!("../../resources/fetch_patricia_paths_test_8_120_70.json"))]
+#[case(include_str!("../../resources/fetch_patricia_paths_test_delete_leaves_10_200_50.json"))]
+#[case(include_str!("../../resources/fetch_patricia_paths_test_delete_leaves_10_5_2.json"))]
+#[case(include_str!("../../resources/fetch_patricia_paths_test_delete_leaves_10_100_30.json"))]
+#[case(include_str!("../../resources/fetch_patricia_paths_test_delete_leaves_8_120_70.json"))]
+fn fetch_patricia_paths_inner_from_json_cases(#[case] _input_data: &str) {}
+
+#[apply(fetch_patricia_paths_inner_from_json_cases)]
+#[rstest]
+#[tokio::test]
+async fn test_fetch_patricia_paths_inner_from_json_facts_layout(#[case] input_data: &str) {
+    let (storage, leaf_indices, root_hash, height, expected_nodes) =
+        parse_json_test_input(input_data);
+    let expected_fetched_leaves = compute_expected_leaves(&storage, &leaf_indices, height);
+    fetch_patricia_paths_inner_tester::<FactsNodeLayout>(
+        storage,
+        root_hash,
+        leaf_indices,
+        height,
+        expected_nodes,
+        expected_fetched_leaves,
+    )
+    .await;
+}
+
+#[apply(fetch_patricia_paths_inner_from_json_cases)]
+#[rstest]
+#[tokio::test]
+async fn test_fetch_patricia_paths_inner_from_json_index_layout(#[case] input_data: &str) {
+    let (mut storage, leaf_indices, root_hash, height, expected_nodes) =
+        parse_json_test_input(input_data);
+    let expected_fetched_leaves = compute_expected_leaves(&storage, &leaf_indices, height);
+    let root_index = small_tree_index_to_full(U256::ONE, height);
+    let index_storage = convert_trie_to_index_storage(&mut storage, root_hash, root_index).await;
+    fetch_patricia_paths_inner_tester::<IndexNodeLayout<MockTreeHashFunction>>(
+        index_storage,
+        root_hash,
+        leaf_indices,
+        height,
+        expected_nodes,
+        expected_fetched_leaves,
+    )
+    .await;
+}

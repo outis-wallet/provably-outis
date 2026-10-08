@@ -1,0 +1,262 @@
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/cairo-program-runner-lib/Cargo.toml s144-wasm/crates/cairo-program-runner-lib/Cargo.toml
+--- s144/crates/cairo-program-runner-lib/Cargo.toml	2026-10-08 13:56:45.868390703 +0800
++++ s144-wasm/crates/cairo-program-runner-lib/Cargo.toml	2026-10-08 17:49:53.742137225 +0800
+@@ -21,7 +21,6 @@
+ regex.workspace = true
+ serde.workspace = true
+ serde_json.workspace = true
+-sonic-rs.workspace = true
+ starknet-crypto.workspace = true
+ starknet-types-core.workspace = true
+ thiserror.workspace = true
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/cairo-program-runner-lib/src/hints/mod.rs s144-wasm/crates/cairo-program-runner-lib/src/hints/mod.rs
+--- s144/crates/cairo-program-runner-lib/src/hints/mod.rs	2026-10-08 13:56:46.081390690 +0800
++++ s144-wasm/crates/cairo-program-runner-lib/src/hints/mod.rs	2026-10-08 18:26:26.646272794 +0800
+@@ -15,6 +15,8 @@
+ mod mock_cairo_verifier_hints;
+ mod pedersen_merkle_hints;
+ mod privacy_simple_bootloader_hints;
++#[cfg(target_arch = "wasm32")]
++pub use privacy_simple_bootloader_hints::take_output_preimage_dump;
+ mod program_hash;
+ mod program_loader;
+ mod select_builtins;
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/cairo-program-runner-lib/src/hints/privacy_simple_bootloader_hints.rs s144-wasm/crates/cairo-program-runner-lib/src/hints/privacy_simple_bootloader_hints.rs
+--- s144/crates/cairo-program-runner-lib/src/hints/privacy_simple_bootloader_hints.rs	2026-10-08 13:56:46.081390690 +0800
++++ s144-wasm/crates/cairo-program-runner-lib/src/hints/privacy_simple_bootloader_hints.rs	2026-10-08 18:26:26.645966185 +0800
+@@ -45,6 +45,9 @@
+     let json = serde_json::to_string_pretty(&elements).map_err(|e| {
+         HintError::CustomHint(format!("Failed to serialize output preimage: {e}").into())
+     })?;
++    #[cfg(target_arch = "wasm32")]
++    OUTPUT_PREIMAGE_DUMPS.lock().unwrap().push((dump_path, json));
++    #[cfg(not(target_arch = "wasm32"))]
+     std::fs::write(&dump_path, json).map_err(|e| {
+         HintError::CustomHint(
+             format!("Failed to write output preimage to {dump_path:?}: {e}").into(),
+@@ -54,6 +57,20 @@
+     Ok(())
+ }
+ 
++/// wasm32-unknown-unknown has no file system, so there the output preimage dumps are kept here,
++/// keyed by their path.
++#[cfg(target_arch = "wasm32")]
++static OUTPUT_PREIMAGE_DUMPS: std::sync::Mutex<Vec<(PathBuf, String)>> =
++    std::sync::Mutex::new(Vec::new());
++
++/// Takes the output preimage the bootloader dumped to `path` (wasm32 only).
++#[cfg(target_arch = "wasm32")]
++pub fn take_output_preimage_dump(path: &std::path::Path) -> Option<String> {
++    let mut dumps = OUTPUT_PREIMAGE_DUMPS.lock().unwrap();
++    let index = dumps.iter().position(|(dump_path, _)| dump_path == path)?;
++    Some(dumps.remove(index).1)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use std::path::PathBuf;
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/cairo-program-runner-lib/src/utils.rs s144-wasm/crates/cairo-program-runner-lib/src/utils.rs
+--- s144/crates/cairo-program-runner-lib/src/utils.rs	2026-10-08 13:56:46.082390690 +0800
++++ s144-wasm/crates/cairo-program-runner-lib/src/utils.rs	2026-10-08 17:49:53.742281176 +0800
+@@ -128,6 +128,6 @@
+                 .map_err(|_| anyhow::anyhow!("Failed to parse output line as Felt decimal: {line}"))
+         })
+         .collect::<Result<Vec<Felt252>, anyhow::Error>>()?;
+-    std::fs::write(&output_path, sonic_rs::to_string_pretty(&output_lines)?)?;
++    std::fs::write(&output_path, serde_json::to_string_pretty(&output_lines)?)?;
+     Ok(())
+ }
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/privacy_prove/src/lib.rs s144-wasm/crates/privacy_prove/src/lib.rs
+--- s144/crates/privacy_prove/src/lib.rs	2026-10-08 16:37:33.154276645 +0800
++++ s144-wasm/crates/privacy_prove/src/lib.rs	2026-10-08 18:26:46.429056764 +0800
+@@ -379,8 +379,13 @@
+ fn run_privacy_bootloader(pie: CairoPie) -> Result<(ProverInput, Vec<Felt>), Box<dyn Error>> {
+     let _span = span!(Level::INFO, "get_prover_input").entered();
+ 
++    // wasm32-unknown-unknown has no file system: the dump hint keeps the preimage in memory.
++    #[cfg(not(target_arch = "wasm32"))]
+     let output_preimage_file = NamedTempFile::new()?;
++    #[cfg(not(target_arch = "wasm32"))]
+     let output_preimage_path = output_preimage_file.path();
++    #[cfg(target_arch = "wasm32")]
++    let output_preimage_path = Path::new("/privacy-bootloader-output-preimage.json");
+     let bootloader_input = build_privacy_bootloader_input(pie, output_preimage_path);
+     let bootloader_program = get_privacy_bootloader_program()?;
+ 
+@@ -393,7 +398,11 @@
+     )?;
+ 
+     info!("Reading the bootloader output preimage");
++    #[cfg(not(target_arch = "wasm32"))]
+     let output_preimage_content = read_to_string(output_preimage_path)?;
++    #[cfg(target_arch = "wasm32")]
++    let output_preimage_content = cairo_program_runner_lib::take_output_preimage_dump(output_preimage_path)
++        .ok_or("the bootloader dumped no output preimage")?;
+     let output_preimage: Vec<Felt> = from_str(&output_preimage_content)?;
+ 
+     info!("Adapting the runner output for the prover");
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/prover/src/witness/components/cube_252.rs s144-wasm/crates/prover/src/witness/components/cube_252.rs
+--- s144/crates/prover/src/witness/components/cube_252.rs	2026-10-08 13:56:46.115390688 +0800
++++ s144-wasm/crates/prover/src/witness/components/cube_252.rs	2026-10-08 17:49:53.742570153 +0800
+@@ -38,8 +38,8 @@
+         // TODO(Ohad): remove.
+         const RAYON_THREAD_STACK_SIZE: usize = 1024 * 1024 * 8;
+         let pool =
+-            rayon::ThreadPoolBuilder::new().stack_size(RAYON_THREAD_STACK_SIZE).build().unwrap();
+-        let (trace, lookup_data, sub_component_inputs) = pool.install(|| {
++            rayon::ThreadPoolBuilder::new().stack_size(RAYON_THREAD_STACK_SIZE).build().ok();
++        let (trace, lookup_data, sub_component_inputs) = run_in(pool.as_ref(), || {
+             write_trace_simd(
+                 packed_inputs,
+                 n_active_rows,
+@@ -3818,3 +3818,11 @@
+         (trace, InteractionClaim { claimed_sum })
+     }
+ }
++
++/// Runs `f` in `pool`, or on the current thread where no thread pool can be built (WebAssembly).
++fn run_in<R: Send>(pool: Option<&rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
++    match pool {
++        Some(pool) => pool.install(f),
++        None => f(),
++    }
++}
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/prover/src/witness/components/partial_ec_mul_window_bits_18.rs s144-wasm/crates/prover/src/witness/components/partial_ec_mul_window_bits_18.rs
+--- s144/crates/prover/src/witness/components/partial_ec_mul_window_bits_18.rs	2026-10-08 13:56:46.120390688 +0800
++++ s144-wasm/crates/prover/src/witness/components/partial_ec_mul_window_bits_18.rs	2026-10-08 17:49:53.743458677 +0800
+@@ -43,8 +43,8 @@
+         // TODO(Ohad): remove.
+         const RAYON_THREAD_STACK_SIZE: usize = 1024 * 1024 * 8;
+         let pool =
+-            rayon::ThreadPoolBuilder::new().stack_size(RAYON_THREAD_STACK_SIZE).build().unwrap();
+-        let (trace, lookup_data, sub_component_inputs) = pool.install(|| {
++            rayon::ThreadPoolBuilder::new().stack_size(RAYON_THREAD_STACK_SIZE).build().ok();
++        let (trace, lookup_data, sub_component_inputs) = run_in(pool.as_ref(), || {
+             write_trace_simd(
+                 packed_inputs,
+                 n_active_rows,
+@@ -6134,3 +6134,11 @@
+         (trace, InteractionClaim { claimed_sum })
+     }
+ }
++
++/// Runs `f` in `pool`, or on the current thread where no thread pool can be built (WebAssembly).
++fn run_in<R: Send>(pool: Option<&rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
++    match pool {
++        Some(pool) => pool.install(f),
++        None => f(),
++    }
++}
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/prover/src/witness/components/partial_ec_mul_window_bits_9.rs s144-wasm/crates/prover/src/witness/components/partial_ec_mul_window_bits_9.rs
+--- s144/crates/prover/src/witness/components/partial_ec_mul_window_bits_9.rs	2026-10-08 13:56:46.121390688 +0800
++++ s144-wasm/crates/prover/src/witness/components/partial_ec_mul_window_bits_9.rs	2026-10-08 17:49:53.743862026 +0800
+@@ -43,8 +43,8 @@
+         // TODO(Ohad): remove.
+         const RAYON_THREAD_STACK_SIZE: usize = 1024 * 1024 * 8;
+         let pool =
+-            rayon::ThreadPoolBuilder::new().stack_size(RAYON_THREAD_STACK_SIZE).build().unwrap();
+-        let (trace, lookup_data, sub_component_inputs) = pool.install(|| {
++            rayon::ThreadPoolBuilder::new().stack_size(RAYON_THREAD_STACK_SIZE).build().ok();
++        let (trace, lookup_data, sub_component_inputs) = run_in(pool.as_ref(), || {
+             write_trace_simd(
+                 packed_inputs,
+                 n_active_rows,
+@@ -6190,3 +6190,11 @@
+         (trace, InteractionClaim { claimed_sum })
+     }
+ }
++
++/// Runs `f` in `pool`, or on the current thread where no thread pool can be built (WebAssembly).
++fn run_in<R: Send>(pool: Option<&rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
++    match pool {
++        Some(pool) => pool.install(f),
++        None => f(),
++    }
++}
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/stwo/src/prover/backend/simd/column.rs s144-wasm/crates/stwo/src/prover/backend/simd/column.rs
+--- s144/crates/stwo/src/prover/backend/simd/column.rs	2026-10-08 16:37:03.633817440 +0800
++++ s144-wasm/crates/stwo/src/prover/backend/simd/column.rs	2026-10-08 17:49:53.744767568 +0800
+@@ -1028,7 +1028,7 @@
+ /// The class of a block the cache serves, or `None` for one the system allocator serves.
+ fn large_class(layout: Layout) -> Option<usize> {
+     let size = layout.size();
+-    if size < 1 << LARGE_MIN_LOG || size > 1 << LARGE_MAX_LOG || layout.align() > 4096 {
++    if size < 1 << LARGE_MIN_LOG || size as u64 > 1u64 << LARGE_MAX_LOG || layout.align() > 4096 {
+         return None;
+     }
+     if size == 1 << LARGE_MIN_LOG {
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/stwo/src/prover/mempool.rs s144-wasm/crates/stwo/src/prover/mempool.rs
+--- s144/crates/stwo/src/prover/mempool.rs	2026-10-08 16:37:03.634817440 +0800
++++ s144-wasm/crates/stwo/src/prover/mempool.rs	2026-10-08 19:33:27.395701973 +0800
+@@ -91,8 +91,12 @@
+         }
+         // Fresh buffers close to the largest size seen are allocated with room for the next
+         // size: the capacity is only reserved, its pages are not touched before they are used.
+-        let capacity_log_size =
+-            if log_size + 3 >= largest { (log_size + 1).min(largest) } else { log_size };
++        // Not on wasm, though: there reserved capacity is memory taken, whether touched or not.
++        let capacity_log_size = if log_size + 3 >= largest && !cfg!(target_arch = "wasm32") {
++            (log_size + 1).min(largest)
++        } else {
++            log_size
++        };
+         unsafe {
+             let mut buffer = Col::<B, BaseField>::uninitialized(1 << capacity_log_size);
+             if capacity_log_size > log_size && !buffer.truncate(1 << log_size) {
+diff -ru '--exclude=target' '--exclude=target-*' '--exclude=.codex' s144/crates/stwo/src/prover/pcs/mod.rs s144-wasm/crates/stwo/src/prover/pcs/mod.rs
+--- s144/crates/stwo/src/prover/pcs/mod.rs	2026-10-08 16:37:03.634817440 +0800
++++ s144-wasm/crates/stwo/src/prover/pcs/mod.rs	2026-10-08 19:33:27.395563370 +0800
+@@ -565,7 +565,8 @@
+ 
+         // The evaluations of every column on one stripe of its domain.
+         let evaluate_stripe = |polynomials: &[CircleCoefficients<B>],
+-                               stripe: usize|
++                               stripe: usize,
++                               reused: Vec<Option<Col<B, BaseField>>>|
+          -> Vec<Col<B, BaseField>> {
+             let stripe_twiddles: HashMap<u32, TwiddleTree<B>> = domains
+                 .iter()
+@@ -579,7 +580,12 @@
+                 .collect();
+             let buffers = domains
+                 .iter()
+-                .map(|domain| base_column_pool.take_or_alloc(domain.log_size() - log_blowup_factor))
++                .zip(reused)
++                .map(|(domain, reused)| {
++                    reused.unwrap_or_else(|| {
++                        base_column_pool.take_or_alloc(domain.log_size() - log_blowup_factor)
++                    })
++                })
+                 .collect_vec();
+             let evaluate =
+                 |((poly, domain), buffer): ((&CircleCoefficients<B>, &CircleDomain), _)| {
+@@ -614,10 +620,19 @@
+         // The first stripe, the one that is kept, goes last: the coefficients go as soon as it is
+         // evaluated, so that a column never holds more than its coefficients and one stripe, its
+         // buffer passed on from stripe to stripe through the pool.
++        // Each column's buffer goes straight on to the column's next stripe. Going through the
++        // pool instead let columns of other sizes take (and grow) them in between, so every
++        // stripe allocated some buffers afresh while the pool filled with idle ones.
++        let no_buffers = || (0..n_columns).map(|_| None).collect_vec();
++        let mut reused = no_buffers();
+         let mut polynomials = Some(polynomials);
+         for stripe in (1..n_stripes).chain([0]) {
+             let _span = span!(Level::INFO, "Extension and Merkle", stripe).entered();
+-            let values = evaluate_stripe(polynomials.as_ref().unwrap(), stripe);
++            let values = evaluate_stripe(
++                polynomials.as_ref().unwrap(),
++                stripe,
++                std::mem::replace(&mut reused, no_buffers()),
++            );
+             if stripe == 0 {
+                 drop(polynomials.take());
+             }
+@@ -630,7 +645,7 @@
+                 if whole[i] {
+                     whole_stripes[i].push(column);
+                 } else {
+-                    base_column_pool.give_back(column.len().ilog2(), column);
++                    reused[i] = Some(column);
+                 }
+             }
+         }

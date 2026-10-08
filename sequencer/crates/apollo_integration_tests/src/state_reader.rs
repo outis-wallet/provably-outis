@@ -1,0 +1,710 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use apollo_class_manager::test_utils::FsClassStorageBuilderForTesting;
+use apollo_class_manager::{ClassStorage, FsClassStorage};
+use apollo_class_manager_config::config::FsClassStorageConfig;
+use apollo_proof_manager::test_utils::FsProofStorageBuilderForTesting;
+use apollo_proof_manager_config::config::ProofManagerConfig;
+use apollo_storage::block_hash::BlockHashStorageWriter;
+use apollo_storage::body::BodyStorageWriter;
+use apollo_storage::class::ClassStorageWriter;
+use apollo_storage::compiled_class::CasmStorageWriter;
+use apollo_storage::global_root::GlobalRootStorageWriter;
+use apollo_storage::global_root_marker::GlobalRootMarkerStorageWriter;
+use apollo_storage::header::HeaderStorageWriter;
+use apollo_storage::partial_block_hash::PartialBlockHashComponentsStorageWriter;
+use apollo_storage::state::StateStorageWriter;
+use apollo_storage::test_utils::{create_dir_for_testing, TestStorageBuilder};
+use apollo_storage::{StorageConfig, StorageScope, StorageWriter};
+use assert_matches::assert_matches;
+use blockifier::context::ChainInfo;
+use blockifier_test_utils::cairo_versions::{CairoVersion, RunnableCairo1};
+use blockifier_test_utils::contracts::FeatureContract;
+use blockifier_test_utils::fee_token_addresses::EXPECTED_STRK_FEE_TOKEN_ADDRESS;
+use cairo_lang_starknet_classes::casm_contract_class::CasmContractClass;
+use expect_test::{expect, Expect};
+use indexmap::IndexMap;
+use mempool_test_utils::starknet_api_test_utils::{AccountTransactionGenerator, Contract};
+use starknet_api::abi::abi_utils::get_fee_token_var_address;
+use starknet_api::block::{
+    BlockBody,
+    BlockHash,
+    BlockHeader,
+    BlockHeaderWithoutHash,
+    BlockNumber,
+    BlockTimestamp,
+    FeeType,
+    GasPricePerToken,
+};
+use starknet_api::block_hash::block_hash_calculator::{
+    calculate_block_hash,
+    BlockHeaderCommitments,
+    PartialBlockHashComponents,
+};
+use starknet_api::block_hash::state_diff_hash::calculate_state_diff_hash;
+use starknet_api::contract_class::compiled_class_hash::HashVersion;
+use starknet_api::contract_class::ContractClass;
+use starknet_api::core::{
+    ClassHash,
+    ContractAddress,
+    EventCommitment,
+    GlobalRoot,
+    Nonce,
+    ReceiptCommitment,
+    SequencerContractAddress,
+    StateDiffCommitment,
+    TransactionCommitment,
+};
+use starknet_api::deprecated_contract_class::ContractClass as DeprecatedContractClass;
+use starknet_api::state::{SierraContractClass, StorageKey, ThinStateDiff};
+use starknet_api::test_utils::{
+    CURRENT_BLOCK_TIMESTAMP,
+    DEFAULT_ETH_L1_DATA_GAS_PRICE,
+    DEFAULT_ETH_L1_GAS_PRICE,
+    DEFAULT_ETH_L2_GAS_PRICE,
+    DEFAULT_STRK_L1_DATA_GAS_PRICE,
+    DEFAULT_STRK_L1_GAS_PRICE,
+    DEFAULT_STRK_L2_GAS_PRICE,
+    TEST_SEQUENCER_ADDRESS,
+    VALID_ACCOUNT_BALANCE,
+};
+use starknet_api::{contract_address, felt};
+use starknet_types_core::felt::Felt;
+use strum::IntoEnumIterator;
+use tempfile::TempDir;
+
+use crate::storage::StorageExecutablePaths;
+use crate::utils::seed_committer_offset;
+
+pub type TempDirHandlePair = (TempDir, TempDir);
+type ContractClassesMap = (
+    Vec<(ClassHash, DeprecatedContractClass)>,
+    Vec<(ClassHash, (SierraContractClass, CasmContractClass))>,
+);
+
+pub(crate) const BATCHER_DB_PATH_SUFFIX: &str = "batcher";
+pub(crate) const CLASS_MANAGER_DB_PATH_SUFFIX: &str = "class_manager";
+pub(crate) const CLASS_HASH_STORAGE_DB_PATH_SUFFIX: &str = "class_hash_storage";
+pub(crate) const CLASSES_STORAGE_DB_PATH_SUFFIX: &str = "classes";
+pub(crate) const STATE_SYNC_DB_PATH_SUFFIX: &str = "state_sync";
+pub(crate) const CONSENSUS_DB_PATH_SUFFIX: &str = "consensus";
+pub(crate) const PROOF_MANAGER_DB_PATH_SUFFIX: &str = "proof_manager";
+pub(crate) const COMMITTER_DB_PATH_SUFFIX: &str = "committer";
+
+#[derive(Debug, Clone)]
+pub struct StorageTestConfig {
+    pub batcher_storage_config: StorageConfig,
+    pub state_sync_storage_config: StorageConfig,
+    pub class_manager_storage_config: FsClassStorageConfig,
+    pub consensus_storage_config: StorageConfig,
+    pub proof_manager_config: ProofManagerConfig,
+    pub committer_db_path: PathBuf,
+}
+
+impl StorageTestConfig {
+    pub fn new(
+        batcher_storage_config: StorageConfig,
+        state_sync_storage_config: StorageConfig,
+        class_manager_storage_config: FsClassStorageConfig,
+        consensus_storage_config: StorageConfig,
+        proof_manager_config: ProofManagerConfig,
+        committer_db_path: PathBuf,
+    ) -> Self {
+        Self {
+            batcher_storage_config,
+            state_sync_storage_config,
+            class_manager_storage_config,
+            consensus_storage_config,
+            proof_manager_config,
+            committer_db_path,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct StorageTestHandles {
+    pub batcher_storage_handle: Option<TempDir>,
+    pub state_sync_storage_handle: Option<TempDir>,
+    pub class_manager_storage_handles: Option<TempDirHandlePair>,
+    pub consensus_storage_handle: Option<TempDir>,
+    pub proof_manager_storage_handle: Option<TempDir>,
+    pub committer_storage_handle: Option<TempDir>,
+}
+
+impl StorageTestHandles {
+    pub fn new(
+        batcher_storage_handle: Option<TempDir>,
+        state_sync_storage_handle: Option<TempDir>,
+        class_manager_storage_handles: Option<TempDirHandlePair>,
+        consensus_storage_handle: Option<TempDir>,
+        proof_manager_storage_handle: Option<TempDir>,
+        committer_storage_handle: Option<TempDir>,
+    ) -> Self {
+        Self {
+            batcher_storage_handle,
+            state_sync_storage_handle,
+            class_manager_storage_handles,
+            consensus_storage_handle,
+            proof_manager_storage_handle,
+            committer_storage_handle,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct StorageTestSetup {
+    pub storage_config: StorageTestConfig,
+    pub storage_handles: StorageTestHandles,
+}
+
+impl StorageTestSetup {
+    pub fn new(
+        test_defined_accounts: Vec<AccountTransactionGenerator>,
+        chain_info: &ChainInfo,
+        storage_exec_paths: Option<StorageExecutablePaths>,
+        preset_test_contracts: PresetTestContracts,
+        initial_state_diff_commitment: Option<StateDiffCommitment>,
+    ) -> Self {
+        // TODO(yair): Avoid cloning.
+        let classes = TestClasses::new(&test_defined_accounts, preset_test_contracts.clone());
+
+        let batcher_db_path =
+            storage_exec_paths.as_ref().map(|p| p.get_batcher_path_with_db_suffix());
+        let ((_, mut batcher_storage_writer), batcher_storage_config, batcher_storage_handle) =
+            TestStorageBuilder::new(batcher_db_path)
+                .scope(StorageScope::StateOnly)
+                .chain_id(chain_info.chain_id.clone())
+                .build();
+        initialize_papyrus_test_state(
+            &mut batcher_storage_writer,
+            chain_info,
+            &test_defined_accounts,
+            preset_test_contracts.clone(),
+            &classes,
+            initial_state_diff_commitment,
+        );
+
+        let state_sync_db_path =
+            storage_exec_paths.as_ref().map(|p| p.get_state_sync_path_with_db_suffix());
+        let (
+            (_, mut state_sync_storage_writer),
+            state_sync_storage_config,
+            state_sync_storage_handle,
+        ) = TestStorageBuilder::new(state_sync_db_path)
+            .scope(StorageScope::FullArchive)
+            .chain_id(chain_info.chain_id.clone())
+            .build();
+        initialize_papyrus_test_state(
+            &mut state_sync_storage_writer,
+            chain_info,
+            &test_defined_accounts,
+            preset_test_contracts,
+            &classes,
+            initial_state_diff_commitment,
+        );
+
+        let fs_class_storage_db_path =
+            storage_exec_paths.as_ref().map(|p| p.get_class_manager_path_with_db_suffix());
+        let mut fs_class_storage_builder = FsClassStorageBuilderForTesting::default();
+        if let Some(class_manager_path) = fs_class_storage_db_path.as_ref() {
+            let class_hash_storage_path_prefix =
+                class_manager_path.join(CLASS_HASH_STORAGE_DB_PATH_SUFFIX);
+            let persistent_root = class_manager_path.join(CLASSES_STORAGE_DB_PATH_SUFFIX);
+            // The paths will be created in the first time the storage is opened (passing
+            // `enforce_file_exists: false`).
+            fs_class_storage_builder = fs_class_storage_builder
+                .with_existing_paths(class_hash_storage_path_prefix, persistent_root);
+        }
+        let (
+            mut class_manager_storage,
+            class_manager_storage_config,
+            class_manager_storage_handles,
+        ) = fs_class_storage_builder.with_chain_id(chain_info.chain_id.clone()).build();
+
+        let proof_manager_db_path =
+            storage_exec_paths.as_ref().map(|p| p.get_proof_manager_path_with_db_suffix());
+        let mut proof_storage_builder = FsProofStorageBuilderForTesting::default();
+        if let Some(proof_manager_path) = proof_manager_db_path.as_ref() {
+            proof_storage_builder =
+                proof_storage_builder.with_existing_path(proof_manager_path.clone());
+        }
+        let (proof_manager_config, proof_manager_storage_handle) = proof_storage_builder.build();
+
+        initialize_class_manager_test_state(&mut class_manager_storage, classes);
+
+        let consensus_db_path =
+            storage_exec_paths.as_ref().map(|p| p.get_consensus_path_with_db_suffix());
+        let (_, consensus_storage_config, consensus_storage_handle) =
+            TestStorageBuilder::new(consensus_db_path)
+                .scope(StorageScope::StateOnly)
+                .chain_id(chain_info.chain_id.clone())
+                .build();
+        let committer_db_path =
+            storage_exec_paths.as_ref().map(|p| p.get_committer_path_with_db_suffix());
+        let (committer_db_path, committer_storage_handle) =
+            create_dir_for_testing(committer_db_path);
+        if initial_state_diff_commitment.is_some() {
+            let seed_db_path = committer_db_path.clone();
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(seed_committer_offset(seed_db_path, BlockNumber(1)));
+            })
+            .join()
+            .unwrap();
+        }
+        Self {
+            storage_config: StorageTestConfig::new(
+                batcher_storage_config,
+                state_sync_storage_config,
+                class_manager_storage_config,
+                consensus_storage_config,
+                proof_manager_config,
+                committer_db_path,
+            ),
+            storage_handles: StorageTestHandles::new(
+                batcher_storage_handle,
+                state_sync_storage_handle,
+                class_manager_storage_handles,
+                consensus_storage_handle,
+                proof_manager_storage_handle,
+                committer_storage_handle,
+            ),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PresetTestContracts {
+    pub default_test_contracts: Vec<Contract>,
+    pub erc20_contract: Contract,
+}
+
+impl Default for PresetTestContracts {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PresetTestContracts {
+    pub fn new() -> Self {
+        let into_contract = |contract: FeatureContract| Contract {
+            contract,
+            sender_address: contract.get_instance_address(0),
+        };
+        let default_test_contracts = [
+            FeatureContract::TestContract(CairoVersion::Cairo0),
+            FeatureContract::TestContract(CairoVersion::Cairo1(RunnableCairo1::Casm)),
+        ]
+        .into_iter()
+        .map(into_contract)
+        .collect();
+
+        let erc20_contract = FeatureContract::ERC20(CairoVersion::Cairo1(RunnableCairo1::Casm));
+        let erc20_contract = into_contract(erc20_contract);
+
+        Self { default_test_contracts, erc20_contract }
+    }
+}
+
+struct TestClasses {
+    pub cairo0_contract_classes: Vec<(ClassHash, DeprecatedContractClass)>,
+    pub cairo1_contract_classes: Vec<(ClassHash, (SierraContractClass, CasmContractClass))>,
+}
+
+impl TestClasses {
+    pub fn new(
+        test_defined_accounts: &[AccountTransactionGenerator],
+        preset_test_contracts: PresetTestContracts,
+    ) -> TestClasses {
+        let PresetTestContracts { default_test_contracts, erc20_contract } = preset_test_contracts;
+        let contract_classes_to_retrieve = test_defined_accounts
+            .iter()
+            .map(|acc| acc.account)
+            .chain(default_test_contracts)
+            .chain([erc20_contract]);
+        let (cairo0_contract_classes, cairo1_contract_classes) =
+            prepare_contract_classes(contract_classes_to_retrieve);
+
+        Self { cairo0_contract_classes, cairo1_contract_classes }
+    }
+}
+
+fn initialize_class_manager_test_state(
+    class_manager_storage: &mut FsClassStorage,
+    classes: TestClasses,
+) {
+    let TestClasses { cairo0_contract_classes, cairo1_contract_classes } = classes;
+
+    for (class_hash, casm) in cairo0_contract_classes {
+        let casm = ContractClass::V0(casm).try_into().unwrap();
+        class_manager_storage.set_deprecated_class(class_hash, casm).unwrap();
+    }
+    for (class_hash, (sierra, casm)) in cairo1_contract_classes {
+        let sierra_version = sierra.get_sierra_version().unwrap();
+        let class = ContractClass::V1((casm, sierra_version));
+        class_manager_storage
+            .set_class(
+                class_hash,
+                sierra.try_into().unwrap(),
+                class.compiled_class_hash(),
+                class.try_into().unwrap(),
+            )
+            .unwrap();
+    }
+}
+
+// TODO(Yair): Make the storage setup part of [MultiAccountTransactionGenerator] and remove this
+// functionality.
+/// A variable number of identical accounts and test contracts are initialized and funded.
+fn initialize_papyrus_test_state(
+    storage_writer: &mut StorageWriter,
+    chain_info: &ChainInfo,
+    test_defined_accounts: &[AccountTransactionGenerator],
+    preset_test_contracts: PresetTestContracts,
+    classes: &TestClasses,
+    initial_state_diff_commitment: Option<StateDiffCommitment>,
+) {
+    let state_diff = prepare_state_diff(chain_info, test_defined_accounts, &preset_test_contracts);
+
+    write_state_to_apollo_storage(
+        storage_writer,
+        state_diff,
+        classes,
+        initial_state_diff_commitment,
+    );
+}
+
+/// Global root that matches the proof flow fixtures.
+/// Any change to this value requires regenerating the proof fixtures by running
+/// `cargo +nightly-2026-01-15 test -p starknet_os_flow_tests --features
+/// starknet_transaction_prover/stwo_proving --release generate_proof_fixtures -- --ignored`.
+pub const EXPECTED_PROOF_FLOW_GENESIS_GLOBAL_ROOT: Expect =
+    expect!["0x36d11bd674ab644d337ce4564f79492bc51d5370c80389e442b06b6e6ba5d8d"];
+
+pub fn integration_test_genesis_global_root() -> GlobalRoot {
+    GlobalRoot(Felt::from_hex_unchecked(EXPECTED_PROOF_FLOW_GENESIS_GLOBAL_ROOT.data()))
+}
+
+/// The genesis block hash the proof-flow integration test seeds into storage. Derived from
+/// `EXPECTED_PROOF_FLOW_GENESIS_GLOBAL_ROOT`, so it changes whenever the genesis global root (and
+/// hence the STRK fee token address) changes. Must match the base block hash baked into the
+/// proof-flow fixtures (`resources/proof_flow/proof_facts.json`); see the
+/// `proof_flow_fixtures_match_genesis_block_hash` test.
+pub fn integration_test_genesis_block_hash() -> BlockHash {
+    // The genesis header's state diff length does not affect the block hash components.
+    let genesis_block_header = test_block_header(BlockNumber(0), 0);
+    let partial_block_hash_components = genesis_partial_block_hash_components(
+        &genesis_block_header,
+        // The proof flow seeds the genesis block with a default state diff commitment.
+        StateDiffCommitment::default(),
+    );
+    calculate_block_hash(
+        &partial_block_hash_components,
+        integration_test_genesis_global_root(),
+        BlockHash::GENESIS_PARENT_HASH,
+    )
+    .expect("Integration test genesis block hash must be computable from seeded components.")
+}
+
+fn genesis_partial_block_hash_components(
+    block_header: &BlockHeader,
+    state_diff_commitment: StateDiffCommitment,
+) -> PartialBlockHashComponents {
+    PartialBlockHashComponents {
+        block_number: block_header.block_header_without_hash.block_number,
+        l1_gas_price: block_header.block_header_without_hash.l1_gas_price,
+        l1_data_gas_price: block_header.block_header_without_hash.l1_data_gas_price,
+        l2_gas_price: block_header.block_header_without_hash.l2_gas_price,
+        sequencer: block_header.block_header_without_hash.sequencer,
+        header_commitments: BlockHeaderCommitments { state_diff_commitment, ..Default::default() },
+        ..Default::default()
+    }
+}
+
+fn prepare_state_diff(
+    chain_info: &ChainInfo,
+    test_defined_accounts: &[AccountTransactionGenerator],
+    preset_test_contracts: &PresetTestContracts,
+) -> ThinStateDiff {
+    let mut state_diff_builder = ThinStateDiffBuilder::new(chain_info);
+    let PresetTestContracts { default_test_contracts, erc20_contract } = preset_test_contracts;
+
+    // Setup the common test contracts that are used by default in all test invokes.
+    // TODO(batcher): this does nothing until we actually start excuting stuff in the batcher.
+    state_diff_builder.set_contracts(default_test_contracts).declare(&HashVersion::V2).deploy();
+
+    // Declare and deploy and the ERC20 contract, so that transfers from it can be made.
+    state_diff_builder
+        .set_contracts(std::slice::from_ref(erc20_contract))
+        .declare(&HashVersion::V2)
+        .deploy();
+
+    // TODO(deploy_account_support): once we have batcher with execution, replace with:
+    // ```
+    // state_diff_builder.set_contracts(accounts_defined_in_the_test).declare().fund();
+    // ```
+    // or use declare txs and transfers for both.
+    let (deployed_accounts, undeployed_accounts): (Vec<_>, Vec<_>) =
+        test_defined_accounts.iter().partition(|account| account.is_deployed());
+
+    let deployed_accounts_contracts: Vec<_> =
+        deployed_accounts.iter().map(|acc| acc.account).collect();
+    let undeployed_accounts_contracts: Vec<_> =
+        undeployed_accounts.iter().map(|acc| acc.account).collect();
+
+    state_diff_builder.inject_deployed_accounts_into_state(deployed_accounts_contracts.as_slice());
+    state_diff_builder
+        .inject_undeployed_accounts_into_state(undeployed_accounts_contracts.as_slice());
+
+    state_diff_builder.build()
+}
+
+fn prepare_contract_classes(
+    contract_classes_to_retrieve: impl Iterator<Item = Contract>,
+) -> ContractClassesMap {
+    let mut cairo0_contract_classes = HashMap::new();
+    let mut cairo1_contract_classes = HashMap::new();
+    for contract in contract_classes_to_retrieve {
+        match contract.cairo_version() {
+            CairoVersion::Cairo0 => {
+                cairo0_contract_classes.insert(
+                    contract.class_hash(),
+                    serde_json::from_str(&contract.raw_class()).unwrap(),
+                );
+            }
+            // todo(rdr): including both Cairo1 and Native versions for now. Temporal solution to
+            // avoid compilation errors when using the "cairo_native" feature
+            _ => {
+                let sierra = contract.sierra();
+                let casm = serde_json::from_str(&contract.raw_class()).unwrap();
+                cairo1_contract_classes.insert(contract.class_hash(), (sierra, casm));
+            }
+        }
+    }
+
+    (cairo0_contract_classes.into_iter().collect(), cairo1_contract_classes.into_iter().collect())
+}
+
+fn write_state_to_apollo_storage(
+    storage_writer: &mut StorageWriter,
+    state_diff: ThinStateDiff,
+    classes: &TestClasses,
+    initial_state_diff_commitment: Option<StateDiffCommitment>,
+) {
+    let is_proof_flow = initial_state_diff_commitment.is_some();
+    let state_diff_commitment =
+        initial_state_diff_commitment.unwrap_or_else(|| calculate_state_diff_hash(&state_diff));
+
+    let block_number = BlockNumber(0);
+    let block_header = test_block_header(block_number, state_diff.len());
+    let TestClasses { cairo0_contract_classes, cairo1_contract_classes } = classes;
+    let cairo0_contract_classes: Vec<_> =
+        cairo0_contract_classes.iter().map(|(hash, contract)| (*hash, contract)).collect();
+    let partial_block_hash =
+        genesis_partial_block_hash_components(&block_header, state_diff_commitment);
+
+    let mut write_txn = storage_writer.begin_rw_txn().unwrap();
+
+    let mut sierras = Vec::with_capacity(cairo1_contract_classes.len());
+    for (class_hash, (sierra, casm)) in cairo1_contract_classes {
+        write_txn = write_txn.append_casm(class_hash, casm).unwrap();
+        sierras.push((*class_hash, sierra));
+    }
+
+    write_txn = write_txn
+        .append_header(block_number, &block_header)
+        .unwrap()
+        .append_body(block_number, BlockBody::default())
+        .unwrap()
+        .append_state_diff(block_number, state_diff)
+        .unwrap()
+        .append_classes(block_number, &sierras, &cairo0_contract_classes)
+        .unwrap()
+        .set_partial_block_hash_components(&block_number, &partial_block_hash)
+        .unwrap();
+
+    if is_proof_flow {
+        let global_root = integration_test_genesis_global_root();
+        let genesis_block_hash =
+            calculate_block_hash(&partial_block_hash, global_root, BlockHash::GENESIS_PARENT_HASH)
+                .expect(
+                    "Integration test genesis block hash must be computable from seeded \
+                     components.",
+                );
+        write_txn = write_txn
+            .set_global_root(&block_number, global_root)
+            .unwrap()
+            .checked_increment_global_root_marker(block_number)
+            .unwrap()
+            .set_block_hash(&block_number, genesis_block_hash)
+            .unwrap();
+    }
+
+    write_txn.commit().unwrap();
+}
+
+fn test_block_header(block_number: BlockNumber, state_diff_length: usize) -> BlockHeader {
+    BlockHeader {
+        block_header_without_hash: BlockHeaderWithoutHash {
+            block_number,
+            sequencer: SequencerContractAddress(contract_address!(TEST_SEQUENCER_ADDRESS)),
+            l1_gas_price: GasPricePerToken {
+                price_in_wei: DEFAULT_ETH_L1_GAS_PRICE.into(),
+                price_in_fri: DEFAULT_STRK_L1_GAS_PRICE.into(),
+            },
+            l1_data_gas_price: GasPricePerToken {
+                price_in_wei: DEFAULT_ETH_L1_DATA_GAS_PRICE.into(),
+                price_in_fri: DEFAULT_STRK_L1_DATA_GAS_PRICE.into(),
+            },
+            l2_gas_price: GasPricePerToken {
+                price_in_wei: DEFAULT_ETH_L2_GAS_PRICE.into(),
+                price_in_fri: DEFAULT_STRK_L2_GAS_PRICE.into(),
+            },
+            timestamp: BlockTimestamp(CURRENT_BLOCK_TIMESTAMP),
+            ..Default::default()
+        },
+        transaction_commitment: Some(TransactionCommitment::default()),
+        event_commitment: Some(EventCommitment::default()),
+        receipt_commitment: Some(ReceiptCommitment::default()),
+        state_diff_commitment: Some(StateDiffCommitment::default()),
+        state_diff_length: Some(state_diff_length),
+        ..Default::default()
+    }
+}
+
+/// Constructs a thin state diff from lists of contracts, where each contract can be declared,
+/// deployed, and in case it is an account, funded.
+#[derive(Default)]
+struct ThinStateDiffBuilder<'a> {
+    contracts: &'a [Contract],
+    deprecated_declared_classes: Vec<ClassHash>,
+    // TODO(Aviv): Rename it to class_hash_to_compiled_class_hash.
+    declared_classes: IndexMap<ClassHash, starknet_api::core::CompiledClassHash>,
+    deployed_contracts: IndexMap<ContractAddress, ClassHash>,
+    storage_diffs: IndexMap<ContractAddress, IndexMap<StorageKey, Felt>>,
+    // TODO(deploy_account_support): delete field once we have batcher with execution.
+    nonces: IndexMap<ContractAddress, Nonce>,
+    chain_info: ChainInfo,
+    initial_account_balance: Felt,
+}
+
+impl<'a> ThinStateDiffBuilder<'a> {
+    fn new(chain_info: &ChainInfo) -> Self {
+        let erc20 = FeatureContract::ERC20(CairoVersion::Cairo1(RunnableCairo1::Casm));
+        let erc20_class_hash = erc20.get_class_hash();
+
+        let deployed_contracts: IndexMap<ContractAddress, ClassHash> = FeeType::iter()
+            .map(|fee_type| (chain_info.fee_token_address(&fee_type), erc20_class_hash))
+            .collect();
+
+        Self {
+            chain_info: chain_info.clone(),
+            initial_account_balance: felt!(VALID_ACCOUNT_BALANCE.0 * 5),
+            deployed_contracts,
+            ..Default::default()
+        }
+    }
+
+    fn set_contracts(&mut self, contracts: &'a [Contract]) -> &mut Self {
+        self.contracts = contracts;
+        self
+    }
+
+    fn declare(&mut self, hash_version: &HashVersion) -> &mut Self {
+        for contract in self.contracts {
+            match contract.cairo_version() {
+                CairoVersion::Cairo0 => {
+                    self.deprecated_declared_classes.push(contract.class_hash())
+                }
+                // todo(rdr): including both Cairo1 and Native versions for now. Temporal solution
+                // to avoid compilation errors when using the "cairo_native" feature
+                _ => {
+                    self.declared_classes.insert(
+                        contract.class_hash(),
+                        contract.contract.get_compiled_class_hash(hash_version),
+                    );
+                }
+            }
+        }
+        self
+    }
+
+    fn deploy(&mut self) -> &mut Self {
+        for contract in self.contracts {
+            self.deployed_contracts.insert(contract.sender_address, contract.class_hash());
+        }
+        self
+    }
+
+    /// Only applies for contracts that are accounts, for non-accounts only declare and deploy work.
+    fn fund(&mut self) -> &mut Self {
+        for account in self.contracts {
+            assert_matches!(
+                account.contract,
+                FeatureContract::AccountWithLongValidate(_)
+                    | FeatureContract::AccountWithoutValidations(_)
+                    | FeatureContract::FaultyAccount(_),
+                "Only Accounts can be funded, {account:?} is not an account",
+            );
+
+            let fee_token_address = get_fee_token_var_address(account.sender_address);
+            for fee_type in FeeType::iter() {
+                self.storage_diffs
+                    .entry(self.chain_info.fee_token_address(&fee_type))
+                    .or_default()
+                    .insert(fee_token_address, self.initial_account_balance);
+            }
+        }
+
+        self
+    }
+
+    fn inject_deployed_accounts_into_state(
+        &mut self,
+        deployed_accounts_defined_in_the_test: &'a [Contract],
+    ) {
+        self.set_contracts(deployed_accounts_defined_in_the_test)
+            .declare(&HashVersion::V2)
+            .deploy()
+            .fund();
+
+        // Set nonces as 1 in the state so that subsequent invokes can pass validation.
+        self.nonces = self
+            .deployed_contracts
+            .iter()
+            .map(|(&address, _)| (address, Nonce(Felt::ONE)))
+            .collect();
+    }
+
+    fn inject_undeployed_accounts_into_state(
+        &mut self,
+        undeployed_accounts_defined_in_the_test: &'a [Contract],
+    ) {
+        // Imitate the behavior of a class that was declared before the migration
+        // with casm v1 (poseidon) to trigger migration in the integration tests.
+        self.set_contracts(undeployed_accounts_defined_in_the_test)
+            .declare(&HashVersion::V1)
+            .fund();
+    }
+
+    fn build(self) -> ThinStateDiff {
+        ThinStateDiff {
+            storage_diffs: self.storage_diffs,
+            deployed_contracts: self.deployed_contracts,
+            class_hash_to_compiled_class_hash: self.declared_classes,
+            deprecated_declared_classes: self.deprecated_declared_classes,
+            nonces: self.nonces,
+        }
+    }
+}
+
+pub fn proof_flow_chain_info() -> ChainInfo {
+    let mut chain_info = ChainInfo::create_for_testing();
+    chain_info.fee_token_addresses.strk_fee_token_address =
+        ContractAddress::try_from(Felt::from_hex_unchecked(EXPECTED_STRK_FEE_TOKEN_ADDRESS.data()))
+            .unwrap();
+    chain_info
+}

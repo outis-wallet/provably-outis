@@ -1,0 +1,102 @@
+use std::sync::Arc;
+
+use apollo_batcher_types::communication::BatcherClientError;
+use apollo_protobuf::consensus::Round;
+use apollo_state_sync_types::communication::StateSyncClientError;
+use async_trait::async_trait;
+use starknet_api::block::BlockNumber;
+use starknet_api::core::ContractAddress;
+use starknet_api::staking::StakingWeight;
+use starknet_types_core::felt::Felt;
+use thiserror::Error;
+
+use crate::staking_contract::StakingContractError;
+
+/// A generous upper bound on the committee size, used by consumers that need a static bound on
+/// committee-derived quantities (e.g. sizing caches) without fetching the live committee. The
+/// configured committee size is operationally ~100; this leaves ample headroom.
+pub const MAX_COMMITTEE_SIZE: usize = 1000;
+
+pub type StakerSet = Vec<Staker>;
+
+#[cfg_attr(test, derive(Clone))]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct Staker {
+    // A contract address of the staker, to which rewards are sent.
+    pub address: ContractAddress,
+    // The staker's weight, which determines the staker's influence in the consensus (its voting
+    // power).
+    pub weight: StakingWeight,
+    // The public key of the staker, used to verify the staker's identity.
+    pub public_key: Felt,
+}
+
+#[derive(Debug, Error)]
+pub enum CommitteeProviderError {
+    #[error("Committee is empty.")]
+    EmptyCommittee,
+    #[error("Committee info unavailable for height {height}.")]
+    InvalidHeight { height: BlockNumber },
+    #[error("Missing epoch information for epoch {epoch_id}.")]
+    MissingInformation { epoch_id: u64 },
+    #[error("Staking contract returned a duplicate staker address: {address}.")]
+    DuplicateStakerAddress { address: ContractAddress },
+    #[error("Staking contract returned no usable stakers (empty or all zero-weight).")]
+    EmptyStakerSet,
+    #[error(transparent)]
+    StakingContractError(#[from] StakingContractError),
+    #[error(
+        "Failed retrieving block hash for block {block_number:?}, because both Batcher and State \
+         Sync returned errors. Batcher error: {batcher_error:?}, State sync error: \
+         {state_sync_error:?}"
+    )]
+    BlockHashFetchFailed {
+        block_number: BlockNumber,
+        batcher_error: BatcherClientError,
+        state_sync_error: StateSyncClientError,
+    },
+}
+
+pub type CommitteeProviderResult<T> = Result<T, CommitteeProviderError>;
+
+#[derive(Debug, Error)]
+pub enum CommitteeError {
+    #[error("Committee is empty.")]
+    EmptyCommittee,
+}
+
+pub type CommitteeResult<T> = Result<T, CommitteeError>;
+
+/// Trait for committee operations including proposer selection.
+/// This trait is implemented by committee instances and provides synchronous methods
+/// for determining proposers based on height and round.
+#[cfg_attr(feature = "testing", mockall::automock)]
+pub trait CommitteeTrait: Send + Sync {
+    /// Returns a reference to the committee members.
+    fn members(&self) -> &StakerSet;
+
+    /// Returns the address of the proposer for the specified height and round.
+    ///
+    /// The proposer is deterministically selected for a given height and round using
+    /// weighted random selection based on staker weights.
+    fn get_proposer(&self, height: BlockNumber, round: Round) -> CommitteeResult<ContractAddress>;
+
+    /// Returns the address of the actual proposer for the specified height and round.
+    ///
+    /// Uses deterministic round-robin selection from eligible proposers:
+    /// `(height + round) % eligible_count`.
+    fn get_actual_proposer(&self, height: BlockNumber, round: Round) -> ContractAddress;
+}
+
+/// Trait for managing committee operations including fetching committee instances.
+/// The committee is a subset of nodes (proposer and validators) that are selected to participate in
+/// the consensus at a given epoch, responsible for proposing blocks and voting on them.
+#[async_trait]
+#[cfg_attr(feature = "testing", mockall::automock)]
+pub trait CommitteeProvider: Send + Sync {
+    /// Returns a committee instance for the epoch of the given height.
+    async fn get_committee(
+        &self,
+        height: BlockNumber,
+    ) -> CommitteeProviderResult<Arc<dyn CommitteeTrait>>;
+}

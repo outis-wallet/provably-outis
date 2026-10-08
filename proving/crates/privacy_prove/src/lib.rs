@@ -1,0 +1,412 @@
+pub mod consts;
+#[cfg(test)]
+mod tests;
+
+use std::cmp::max;
+use std::error::Error;
+use std::fs::read_to_string;
+use std::path::Path;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use anyhow::Result;
+use cairo_air::flat_claims::FlatClaim;
+use cairo_program_runner_lib::types::{
+    HashFunc, PrivacySimpleBootloaderInput, SimpleBootloaderInput,
+};
+use cairo_program_runner_lib::{ProgramInput, Task, TaskSpec, cairo_run_program};
+use cairo_vm::vm::runners::cairo_pie::CairoPie;
+use circuit_cairo_verifier::verify::{
+    CairoVerifierConfig, build_and_fill_cairo_verifier_circuit,
+    prepare_cairo_proof_for_circuit_verifier,
+};
+use circuit_common::finalize::pad_context;
+use circuit_common::preprocessed::PreprocessedCircuit;
+use circuit_prover::prover::{
+    prepare_circuit_proof_for_circuit_verifier, prove_circuit_with_precompute,
+};
+use circuit_serialize::serialize::CircuitSerialize;
+use circuit_verifier::verify::CircuitConfig;
+use circuits::utils::bytes_from_le_u32s;
+use circuits_stark_verifier::proof::ProofConfig;
+use itertools::chain;
+use leaf_proof_format::{DigestHex, SerializedLeafProof};
+use leaf_prover::prove_leaf::prove_leaf;
+use privacy_circuit_verify::consts::{
+    CAIRO_PCS_CONFIG, CIRCUIT_FRI_CONFIG, CIRCUIT_PCS_CONFIG,
+    PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
+};
+use privacy_circuit_verify::utils::ProofHeader;
+use privacy_circuit_verify::{
+    PrivacyProofOutput, Version, compute_privacy_bootloader_output_hash,
+    get_cairo_preprocessed_circuit, get_cairo_verifier_config, get_large_proofs_circuit_registry,
+    get_leaf_bootloader_program, get_privacy_bootloader_program, get_proof_config,
+    get_recursive_circuit_config,
+};
+use serde_json::from_str;
+use starknet_types_core::felt::Felt;
+use stwo::core::poly::circle::CanonicCoset;
+use stwo::core::utils::MaybeOwned;
+use stwo::core::vcs_lifted::blake2_merkle::Blake2sM31MerkleChannel;
+use stwo::prover::CommitmentTreeProver;
+use stwo::prover::backend::simd::SimdBackend;
+#[cfg(unix)]
+use stwo::prover::backend::simd::column::LargeBlockCache;
+use stwo::prover::mempool::BaseColumnPool;
+use stwo::prover::poly::circle::PolyOps;
+use stwo::prover::poly::twiddles::TwiddleTree;
+use stwo_cairo_adapter::ProverInput;
+use stwo_cairo_adapter::adapter::adapt;
+use stwo_cairo_common::preprocessed_columns::preprocessed_trace::PreProcessedTrace;
+use stwo_cairo_prover::prover::{
+    LiftingSizePolicy, prove_cairo, prove_cairo_with_precompute, warm_pedersen_pp_trace,
+};
+use stwo_cairo_prover::witness::preprocessed_trace::gen_trace;
+use tempfile::NamedTempFile;
+use tracing::{Level, info, span};
+
+use crate::consts::{CAIRO_PROVER_PARAMS, CAIRO_RUN_CONFIG};
+
+/// The precomputes of a prover process.
+///
+/// The large members (the pool with its buffers, the twiddles, the preprocessed trees and the
+/// circuit) live as long as the process and are not freed when the precomputes are dropped: a
+/// prover drops them only on its way out, where unmapping several gigabytes buffer by buffer
+/// costs tens of milliseconds for nothing, while the operating system reclaims the whole address
+/// space at once at exit.
+pub struct RecursiveProverPrecomputes {
+    pub base_column_pool: std::mem::ManuallyDrop<Arc<BaseColumnPool<SimdBackend>>>,
+    pub twiddles: std::mem::ManuallyDrop<Arc<TwiddleTree<SimdBackend>>>,
+    pub cairo_preprocessed_trace: Arc<PreProcessedTrace>,
+    pub cairo_preprocessed_tree:
+        std::mem::ManuallyDrop<CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>>,
+    pub cairo_verifier_config: CairoVerifierConfig,
+    /// Built on first use, which is after the Cairo proof: its committed evaluations are not
+    /// resident while that proof runs, its columns reuse that proof's idle buffers, and the
+    /// circuit proof needs them only when it starts.
+    pub circuit_preprocessed_tree: std::mem::ManuallyDrop<LazyCommitmentTree>,
+    pub preprocessed_circuit: std::mem::ManuallyDrop<PreprocessedCircuit>,
+    pub circuit_config: CircuitConfig,
+    pub proof_config: ProofConfig,
+}
+
+type PrecomputedTree = CommitmentTreeProver<SimdBackend, Blake2sM31MerkleChannel>;
+
+/// A committed preprocessed tree that is built the first time it is dereferenced.
+pub struct LazyCommitmentTree {
+    tree: std::sync::OnceLock<PrecomputedTree>,
+    build: std::sync::Mutex<Option<Box<dyn FnOnce() -> PrecomputedTree + Send>>>,
+}
+
+impl LazyCommitmentTree {
+    pub fn new(build: impl FnOnce() -> PrecomputedTree + Send + 'static) -> Self {
+        Self {
+            tree: std::sync::OnceLock::new(),
+            build: std::sync::Mutex::new(Some(Box::new(build))),
+        }
+    }
+}
+
+impl std::ops::Deref for LazyCommitmentTree {
+    type Target = PrecomputedTree;
+
+    fn deref(&self) -> &PrecomputedTree {
+        self.tree.get_or_init(|| {
+            let build = self.build.lock().unwrap().take().expect("the tree is built once");
+            build()
+        })
+    }
+}
+
+/// Large blocks come from a cache every thread shares instead of each thread's malloc arena, so
+/// the temporaries one worker frees are reused by the others; see [`LargeBlockCache`].
+#[cfg(unix)]
+#[global_allocator]
+static ALLOCATOR: LargeBlockCache = LargeBlockCache;
+
+fn compress_proof(proof_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
+    Ok(zstd::encode_all(proof_bytes, 3)?)
+}
+
+/// Compresses the proof and prepends the serialized current [`Version`] to the compressed proof
+/// bytes. The verifier strips this prefix before decompressing (see `split_proof_version`).
+fn build_privacy_proof_output(
+    uncompressed_bytes: Vec<u8>,
+    preprocessed_root: &[u32; 8],
+    output_preimage: Vec<Felt>,
+) -> Result<PrivacyProofOutput, Box<dyn Error>> {
+    let compressed_proof = compress_proof(&uncompressed_bytes)?;
+    let header = ProofHeader {
+        version: Version::current(),
+        preprocessed_root: bytes_from_le_u32s(*preprocessed_root),
+    };
+    let proof = chain!(header.serialize(), compressed_proof).collect();
+
+    Ok(PrivacyProofOutput { proof, output_preimage })
+}
+
+/// Runs the program and generates a proof for it with params, bootloader and output format suitable
+/// for the privacy circuit verifier.
+pub fn privacy_prove(pie: CairoPie) -> Result<PrivacyProofOutput, Box<dyn Error>> {
+    let _span = span!(Level::INFO, "privacy_prove").entered();
+
+    info!("Run privacy bootloader and get the prover input and output preimage");
+    let (prover_input, output_preimage) = run_privacy_bootloader(pie)?;
+
+    info!("Generate the cairo proof");
+    let cairo_proof = prove_cairo::<Blake2sM31MerkleChannel>(prover_input, CAIRO_PROVER_PARAMS)?;
+    let FlatClaim { component_enable_bits, component_log_sizes: _, public_data: _ } =
+        cairo_proof.claim.flatten_claim();
+
+    info!("Prepare the proof for the circuit verifier");
+    let (proof, serialized_aux_data) =
+        prepare_cairo_proof_for_circuit_verifier(&cairo_proof, &component_enable_bits);
+
+    info!("Serialize and compress the proof and public data");
+    let mut proof_bytes: Vec<u8> = vec![];
+    proof.serialize(&mut proof_bytes);
+    let serialized_aux_bytes: Vec<u8> =
+        serialized_aux_data.iter().flat_map(|x| x.0.to_le_bytes()).collect();
+    let combined_bytes: Vec<u8> = chain!(serialized_aux_bytes, proof_bytes).collect();
+    build_privacy_proof_output(
+        combined_bytes,
+        &PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
+        output_preimage,
+    )
+}
+
+pub fn prepare_recursive_prover_precomputes()
+-> Result<Arc<RecursiveProverPrecomputes>, Box<dyn Error>> {
+    let _span = span!(Level::INFO, "prepare_privacy_recursiveprover_precomputes").entered();
+
+    let cairo_verifier_config = get_cairo_verifier_config()?;
+    // The preprocessed circuit is built below, concurrently with the Cairo side.
+    let circuit_config =
+        get_recursive_circuit_config(&PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT)?;
+    let proof_config = get_proof_config(&PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT)?;
+
+    let base_column_pool = BaseColumnPool::<SimdBackend>::new();
+    let LiftingSizePolicy::Fixed(cairo_lifting_log_size) = CAIRO_PROVER_PARAMS.lifting_size_policy
+    else {
+        panic!("Only LiftingSizePolicy::Fixed is supported with a precomputed preprocessed tree");
+    };
+    let circuit_lifting_log_size = CIRCUIT_PCS_CONFIG.trace_lifting_log_size;
+
+    let max_domain_size = max(cairo_lifting_log_size, circuit_lifting_log_size);
+
+    // The circuit-side preprocessing is sequential and independent of the Cairo-side twiddles,
+    // preprocessed trace and tree, so the two run concurrently.
+    let (preprocessed_circuit, (twiddles, cairo_preprocessed_trace, cairo_preprocessed_tree)) =
+        rayon::join(
+            || get_cairo_preprocessed_circuit(&cairo_verifier_config),
+            || {
+                // The twiddles and the Cairo preprocessed trace are independent as well.
+                let (twiddles, (cairo_preprocessed_trace, cairo_preprocessed_evals)) = rayon::join(
+                    || {
+                        info!("Prepare the twiddles");
+                        SimdBackend::precompute_twiddles(
+                            CanonicCoset::new(max_domain_size).circle_domain().half_coset,
+                        )
+                    },
+                    || {
+                        info!("Prepare the cairo prover preprocessed trace");
+                        let cairo_preprocessed_trace = Arc::new(
+                            CAIRO_PROVER_PARAMS.preprocessed_trace.to_preprocessed_trace(),
+                        );
+                        // Warm the Pedersen points table before gen_trace reads it.
+                        warm_pedersen_pp_trace(CAIRO_PROVER_PARAMS.preprocessed_trace);
+                        let evals = gen_trace(cairo_preprocessed_trace.clone());
+                        (cairo_preprocessed_trace, evals)
+                    },
+                );
+                info!("Prepare the cairo prover preprocessed tree");
+                let cairo_preprocessed_trace_polys =
+                    SimdBackend::interpolate_columns(cairo_preprocessed_evals, &twiddles);
+                // Committed as the Cairo prover commits its own trees: only the first stripe stays.
+                let cairo_preprocessed_tree =
+                    CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
+                        cairo_preprocessed_trace_polys,
+                        CAIRO_PCS_CONFIG.fri_config.log_blowup_factor,
+                        &twiddles,
+                        cairo_lifting_log_size,
+                        &base_column_pool,
+                    );
+                (twiddles, cairo_preprocessed_trace, cairo_preprocessed_tree)
+            },
+        );
+
+    info!("Prepare the circuit prover preprocessed trace and tree (built on first use)");
+    let base_column_pool = Arc::new(base_column_pool);
+    let twiddles = Arc::new(twiddles);
+    let circuit_preprocessed_tree = {
+        let preprocessed_trace = preprocessed_circuit.preprocessed_trace.clone();
+        let twiddles = twiddles.clone();
+        let base_column_pool = base_column_pool.clone();
+        let preprocessed_lifting_log_size = circuit_config.config.preprocessed_lifting_log_size;
+        LazyCommitmentTree::new(move || {
+            let _span = span!(Level::INFO, "prepare_circuit_preprocessed_tree").entered();
+            let circuit_preprocessed_trace = preprocessed_trace.get_trace::<SimdBackend>();
+            let circuit_preprocessed_trace_polys =
+                SimdBackend::interpolate_columns(circuit_preprocessed_trace, &twiddles);
+            // Committed as the circuit prover commits its own trees: only the first stripe stays.
+            CommitmentTreeProver::<SimdBackend, Blake2sM31MerkleChannel>::new_striped(
+                circuit_preprocessed_trace_polys,
+                CIRCUIT_FRI_CONFIG.log_blowup_factor,
+                &twiddles,
+                preprocessed_lifting_log_size,
+                &base_column_pool,
+            )
+        })
+    };
+
+    Ok(Arc::new(RecursiveProverPrecomputes {
+        base_column_pool: std::mem::ManuallyDrop::new(base_column_pool),
+        twiddles: std::mem::ManuallyDrop::new(twiddles),
+        cairo_preprocessed_trace,
+        cairo_preprocessed_tree: std::mem::ManuallyDrop::new(cairo_preprocessed_tree),
+        cairo_verifier_config,
+        circuit_preprocessed_tree: std::mem::ManuallyDrop::new(circuit_preprocessed_tree),
+        preprocessed_circuit: std::mem::ManuallyDrop::new(preprocessed_circuit),
+        circuit_config,
+        proof_config,
+    }))
+}
+
+pub fn privacy_recursive_prove_large(pie: CairoPie) -> Result<PrivacyProofOutput, Box<dyn Error>> {
+    let leaf_bootloader = get_leaf_bootloader_program()?;
+    let circuit_registry = get_large_proofs_circuit_registry();
+    let output_preimage_file = NamedTempFile::new()?;
+    let output_preimage_path = output_preimage_file.path();
+
+    // The leaf bootloader and the privacy bootloader have the same input format
+    let leaf_bootloader_input = build_privacy_bootloader_input(pie, output_preimage_path);
+
+    // Prove
+    let SerializedLeafProof {
+        circuit_preprocessed_root: DigestHex(preprocessed_root),
+        circuit_hash: _,
+        proof,
+    }: SerializedLeafProof = prove_leaf(
+        &leaf_bootloader,
+        Some(ProgramInput::Value(Box::new(leaf_bootloader_input))),
+        &circuit_registry,
+    );
+    // Read the output preimage
+    let output_preimage_content = read_to_string(output_preimage_path)?;
+    let output_preimage: Vec<Felt> = from_str(&output_preimage_content)?;
+
+    build_privacy_proof_output(proof, &preprocessed_root, output_preimage)
+}
+
+pub fn privacy_recursive_prove(
+    pie: CairoPie,
+    precomputes: Arc<RecursiveProverPrecomputes>,
+) -> Result<PrivacyProofOutput, Box<dyn Error>> {
+    let _span = span!(Level::INFO, "privacy_recursive_prove").entered();
+
+    info!("Run privacy bootloader and get the prover input and output preimage");
+    let (prover_input, output_preimage) = run_privacy_bootloader(pie)?;
+
+    info!("Generate the cairo proof");
+    let cairo_proof = prove_cairo_with_precompute(
+        &precomputes.base_column_pool,
+        &precomputes.twiddles,
+        precomputes.cairo_preprocessed_trace.clone(),
+        MaybeOwned::Borrowed(&precomputes.cairo_preprocessed_tree),
+        prover_input,
+        CAIRO_PROVER_PARAMS,
+    )?;
+    let FlatClaim { component_enable_bits, component_log_sizes: _, public_data: _ } =
+        cairo_proof.claim.flatten_claim();
+    info!("Prepare the cairo proof for the cairo-circuit verifier");
+    let (proof, serialized_aux_data) =
+        prepare_cairo_proof_for_circuit_verifier(&cairo_proof, &component_enable_bits);
+
+    info!("Build the cairo-circuit verifier context");
+    let output_hash = compute_privacy_bootloader_output_hash(&output_preimage);
+    let mut context = build_and_fill_cairo_verifier_circuit(
+        &precomputes.cairo_verifier_config,
+        proof,
+        serialized_aux_data,
+        output_hash,
+    );
+    if !context.is_circuit_valid() {
+        return Err("Circuit is not valid".into());
+    };
+    pad_context(&mut context);
+    let context_values = context.values();
+
+    info!("Prove the cairo-circuit verifier");
+    let circuit_proof = prove_circuit_with_precompute(
+        &precomputes.base_column_pool,
+        &precomputes.twiddles,
+        &precomputes.preprocessed_circuit,
+        MaybeOwned::Borrowed(&precomputes.circuit_preprocessed_tree),
+        context_values,
+        precomputes.circuit_config.config,
+    )?;
+
+    info!("Prepare the circuit proof for the circuit verifier");
+    let (proof_qm31s, _public_data) = prepare_circuit_proof_for_circuit_verifier(circuit_proof);
+
+    info!("Serialize and compress the proof");
+    let mut proof_bytes: Vec<u8> = vec![];
+    proof_qm31s.serialize(&mut proof_bytes);
+
+    build_privacy_proof_output(
+        proof_bytes,
+        &PRIVACY_RECURSION_CIRCUIT_PREPROCESSED_ROOT,
+        output_preimage,
+    )
+}
+
+fn build_privacy_bootloader_input(
+    pie: CairoPie,
+    output_preimage_path: &Path,
+) -> PrivacySimpleBootloaderInput {
+    let pie_task_spec =
+        TaskSpec { task: Rc::new(Task::Pie(pie)), program_hash_function: HashFunc::Blake };
+    PrivacySimpleBootloaderInput {
+        simple_bootloader_input: SimpleBootloaderInput {
+            fact_topologies_path: None,
+            single_page: true,
+            tasks: vec![pie_task_spec],
+        },
+        output_preimage_dump_path: output_preimage_path.to_path_buf(),
+    }
+}
+
+fn run_privacy_bootloader(pie: CairoPie) -> Result<(ProverInput, Vec<Felt>), Box<dyn Error>> {
+    let _span = span!(Level::INFO, "get_prover_input").entered();
+
+    // wasm32-unknown-unknown has no file system: the dump hint keeps the preimage in memory.
+    #[cfg(not(target_arch = "wasm32"))]
+    let output_preimage_file = NamedTempFile::new()?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let output_preimage_path = output_preimage_file.path();
+    #[cfg(target_arch = "wasm32")]
+    let output_preimage_path = Path::new("/privacy-bootloader-output-preimage.json");
+    let bootloader_input = build_privacy_bootloader_input(pie, output_preimage_path);
+    let bootloader_program = get_privacy_bootloader_program()?;
+
+    info!("Running the program");
+    let runner = cairo_run_program(
+        &bootloader_program,
+        Some(ProgramInput::Value(Box::new(bootloader_input))),
+        CAIRO_RUN_CONFIG,
+        None,
+    )?;
+
+    info!("Reading the bootloader output preimage");
+    #[cfg(not(target_arch = "wasm32"))]
+    let output_preimage_content = read_to_string(output_preimage_path)?;
+    #[cfg(target_arch = "wasm32")]
+    let output_preimage_content = cairo_program_runner_lib::take_output_preimage_dump(output_preimage_path)
+        .ok_or("the bootloader dumped no output preimage")?;
+    let output_preimage: Vec<Felt> = from_str(&output_preimage_content)?;
+
+    info!("Adapting the runner output for the prover");
+    let prover_input = adapt(&runner)?;
+
+    Ok((prover_input, output_preimage))
+}

@@ -1,0 +1,213 @@
+empty_dashboard = {
+    "annotations": {
+        "list": [
+            {
+                "builtIn": 1,
+                "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+                "enable": True,
+                "hide": True,
+                "iconColor": "rgba(0, 211, 255, 1)",
+                "name": "Annotations & Alerts",
+                "type": "dashboard",
+            }
+        ]
+    },
+    "editable": True,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 0,
+    "links": [],
+    "liveNow": False,
+    "panels": [],
+    "refresh": "5s",
+    "schemaVersion": 38,
+    "style": "dark",
+    "tags": [],
+    "templating": {"list": []},
+    "time": {"from": "now-5m", "to": "now"},
+    "timepicker": {},
+    "timezone": "",
+    "title": "New dashboard",
+    "version": 0,
+    "weekStart": "",
+}
+
+POD_SUFFIX_OPTIONAL_RE = r"(?:-(?:[0-9]+|(?:[a-f0-9]{8,}|[a-z0-9]{5})(?:-[a-z0-9]{5})?))?"
+
+templating_object = {
+    "list": [
+        {
+            "type": "query",
+            "name": "gcp_project",
+            "datasource": {"type": "prometheus", "uid": "Prometheus"},
+            "query": 'label_values(batcher_proposal_started{namespace=~"$namespace", cluster=~"$cluster"}, project_id)',
+            "query": {
+                "qryType": 1,
+                "query": 'label_values(batcher_proposal_started{namespace=~"$namespace", cluster=~"$cluster"}, project_id)',
+                "refId": "PrometheusVariableQueryEditor-VariableQuery",
+            },
+            "hide": 2,
+            "includeAll": False,
+            "multi": False,
+            "skipUrlSync": True,
+            "refresh": 1,
+        },
+        {
+            "allValue": ".*",
+            "current": {"selected": True, "text": [], "value": []},
+            "datasource": {"type": "prometheus", "uid": "Prometheus"},
+            "definition": "label_values(batcher_proposal_started,namespace)",
+            "hide": 0,
+            "includeAll": True,
+            "multi": True,
+            "name": "namespace",
+            "title": "Namespace",
+            "options": [],
+            "query": {
+                "qryType": 1,
+                "query": "label_values(batcher_proposal_started,namespace)",
+                "refId": "PrometheusVariableQueryEditor-VariableQuery",
+            },
+            "refresh": 1,
+            "regex": "",
+            "skipUrlSync": False,
+            "sort": 1,
+            "type": "query",
+        },
+        {
+            "allValue": ".*",
+            "current": {"selected": True, "text": [], "value": []},
+            "datasource": {"type": "prometheus", "uid": "Prometheus"},
+            "definition": "label_values(batcher_proposal_started,cluster)",
+            "hide": 0,
+            "includeAll": True,
+            "multi": True,
+            "name": "cluster",
+            "title": "Cluster",
+            "options": [],
+            "query": {
+                "qryType": 1,
+                "query": "label_values(batcher_proposal_started,cluster)",
+                "refId": "PrometheusVariableQueryEditor-VariableQuery",
+            },
+            "refresh": 1,
+            "regex": "",
+            "skipUrlSync": False,
+            "sort": 1,
+            "type": "query",
+        },
+        {
+            "allValue": ".*",
+            "current": {"selected": True, "text": [], "value": []},
+            "datasource": {"type": "prometheus", "uid": "Prometheus"},
+            "hide": 0,
+            "includeAll": True,
+            "multi": True,
+            "name": "pod_base",
+            "title": "Pod",
+            "label": "pod",
+            "options": [],
+            "query": {
+                "qryType": 1,
+                "query": 'query_result(sum by (clean_pod) (label_replace(up{namespace=~"${namespace:regex}"}, "clean_pod", "$1", "pod", "'
+                + r"^(?:sequencer-)?(.+?)(?:-(?:dep|stat).*)?"
+                + POD_SUFFIX_OPTIONAL_RE
+                + r"$"
+                + '")))',
+                "refId": "PrometheusVariableQueryEditor-VariableQuery",
+            },
+            "refresh": 1,
+            "regex": '.*clean_pod=\\"([^\\"]+)\\".*',
+            "skipUrlSync": False,
+            "sort": 1,
+            "type": "query",
+        },
+        {
+            "type": "constant",
+            "name": "pod",
+            "query": r"^(?:${pod_base:regex}|sequencer-(?:${pod_base:regex})-(?:dep|stat).*)"
+            + POD_SUFFIX_OPTIONAL_RE
+            + r"$",
+        },
+        {
+            "type": "constant",
+            "name": "gcp_logs_prefix",
+            "query": (
+                "https://console.cloud.google.com/logs/query;\n"
+                "query=resource.labels.namespace_name=~%22^%28"
+            ),
+        },
+        {
+            "type": "constant",
+            "name": "gcp_logs_mid",
+            "query": (
+                ";\nsummaryFields=resource%252Flabels%252Fnamespace_name,"
+                "resource%252Flabels%252Fcontainer_name;\n"
+                "timeRange="
+            ),
+        },
+    ]
+}
+
+row_object = {
+    "collapsed": True,
+    "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+    "id": 1,
+    "panels": [],
+    "title": "Row title 1",
+    "type": "row",
+}
+
+
+alert_query_model_condition_object = {
+    "evaluator": {"params": [0], "type": "gt"},
+    "operator": {"type": "and"},
+    "query": {"params": ["C"]},
+    "reducer": {"params": [], "type": "last"},
+    "type": "query",
+}
+
+alert_expression_model_object = {
+    "conditions": [],
+    "datasource": {"name": "Expression", "type": "__expr__", "uid": "__expr__"},
+    "expression": "A",
+    "hide": False,
+    "intervalMs": 1000,
+    "maxDataPoints": 43200,
+    "refId": "B",
+    "type": "threshold",
+}
+
+alert_query_model_object = {
+    "editorMode": "code",
+    "instant": True,
+    "intervalMs": 1000,
+    "legendFormat": "__auto",
+    "maxDataPoints": 43200,
+    "range": False,
+    "refId": "A",
+    "expr": "",
+}
+
+alert_query_object = {
+    "refId": "A",
+    "queryType": "",
+    "relativeTimeRange": {"from": 600, "to": 0},
+    "datasourceUid": "PBFA97CFB590B2093",
+    "model": {},
+}
+
+alert_rule_object = {
+    "name": "",
+    "title": "",
+    "orgId": 1,
+    "condition": "B",
+    "data": [],
+    "for": "5m",
+    "execErrState": "Error",
+    "noDataState": "NoData",
+    "folderUID": "",
+    "ruleGroup": "",
+    "annotations": {},
+    "labels": {},
+    "isPaused": False,
+}

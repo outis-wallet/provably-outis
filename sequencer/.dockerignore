@@ -1,0 +1,19 @@
+/data
+/deployments
+/logs
+**/target/
+**/.git
+**/.github
+
+# Python artifacts
+__pycache__/
+**/.venv
+*.pyc
+
+# IDE files
+.idea/
+.vscode/
+
+# Generated/temporary files
+echonet/k8s/echonet/generated/
+integration_test_temporary_logs

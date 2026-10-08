@@ -1,0 +1,430 @@
+use cairo_vm::types::relocatable::MaybeRelocatable;
+#[cfg(any(test, feature = "testing"))]
+use num_traits::ToPrimitive;
+use starknet_api::core::{ClassHash, CompiledClassHash, ContractAddress, Nonce};
+use starknet_api::state::StorageKey;
+use starknet_types_core::felt::{Felt, NonZeroFelt};
+
+use crate::hints::hint_implementation::aggregator::utils::ToMaybeRelocatables;
+use crate::hints::hint_implementation::state_diff_encryption::utils::maybe_decrypt_iter;
+use crate::hints::hint_implementation::stateless_compression::utils::decompress;
+use crate::io::os_output::{
+    felt_as_bool,
+    try_into_custom_error,
+    wrap_missing,
+    wrap_missing_as,
+    OsKzgCommitmentInfo,
+    OsOutputError,
+};
+
+#[cfg(test)]
+#[path = "os_output_types_test.rs"]
+mod os_output_types_test;
+
+// Defined in output.cairo
+const N_UPDATES_BOUND: NonZeroFelt =
+    NonZeroFelt::from_felt_unchecked(Felt::from_hex_unchecked("10000000000000000")); // 2^64.
+pub(crate) const N_UPDATES_SMALL_PACKING_BOUND: NonZeroFelt =
+    NonZeroFelt::from_felt_unchecked(Felt::from_hex_unchecked("100")); // 2^8.
+const FLAG_BOUND: NonZeroFelt = NonZeroFelt::TWO;
+
+pub trait TryFromOutputIter {
+    /// Tries to parse an item from the Felt iterator.
+    /// Assumes input data is encrypted if and only if (at least one) private keys are provided.
+    fn try_from_output_iter<It: Iterator<Item = Felt>>(
+        iter: &mut It,
+        private_keys: Option<&Vec<Felt>>,
+    ) -> Result<Self, OsOutputError>
+    where
+        Self: Sized;
+}
+
+impl<T: TryFromOutputIter> TryFromOutputIter for Vec<T> {
+    fn try_from_output_iter<It: Iterator<Item = Felt>>(
+        iter: &mut It,
+        private_keys: Option<&Vec<Felt>>,
+    ) -> Result<Self, OsOutputError> {
+        let n_items =
+            wrap_missing_as(iter.next(), &format!("n_items of {}", std::any::type_name::<T>()))?;
+        let mut items = Vec::with_capacity(n_items);
+        for _ in 0..n_items {
+            items.push(T::try_from_output_iter(iter, private_keys)?);
+        }
+        Ok(items)
+    }
+}
+
+/// Corresponds to the Cairo DictAccess struct.
+pub(crate) trait DictEntry {
+    type Key: Copy;
+    type Value: Copy;
+
+    fn key(&self) -> Self::Key;
+    fn prev_value(&self) -> Self::Value;
+    fn new_value(&self) -> Self::Value;
+}
+
+impl<T: DictEntry> ToMaybeRelocatables for T
+where
+    Felt: From<<T as DictEntry>::Key>,
+    Felt: From<<T as DictEntry>::Value>,
+{
+    fn to_maybe_relocatables(&self) -> Vec<MaybeRelocatable> {
+        vec![
+            Felt::from(self.key()).into(),
+            Felt::from(self.prev_value()).into(),
+            Felt::from(self.new_value()).into(),
+        ]
+    }
+}
+
+// Cairo DictAccess types for concrete objects.
+
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Debug, PartialEq)]
+/// Represents a full contract storage update.
+pub struct FullContractStorageUpdate {
+    pub(crate) key: StorageKey,
+    pub(crate) prev_value: Felt,
+    pub(crate) new_value: Felt,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl FullContractStorageUpdate {
+    pub fn encode(&self, full_output: bool) -> Vec<Felt> {
+        if full_output {
+            vec![self.key.into(), self.prev_value, self.new_value]
+        } else {
+            vec![self.key.into(), self.new_value]
+        }
+    }
+}
+
+impl DictEntry for FullContractStorageUpdate {
+    type Key = StorageKey;
+    type Value = Felt;
+
+    fn key(&self) -> Self::Key {
+        self.key
+    }
+
+    fn prev_value(&self) -> Self::Value {
+        self.prev_value
+    }
+
+    fn new_value(&self) -> Self::Value {
+        self.new_value
+    }
+}
+
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Debug, PartialEq)]
+pub(crate) struct PartialContractStorageUpdate {
+    pub(crate) key: StorageKey,
+    pub(crate) new_value: Felt,
+}
+
+impl TryFromOutputIter for FullContractStorageUpdate {
+    fn try_from_output_iter<It: Iterator<Item = Felt>>(
+        iter: &mut It,
+        _private_keys: Option<&Vec<Felt>>,
+    ) -> Result<Self, OsOutputError> {
+        Ok(Self {
+            key: wrap_missing_as(iter.next(), "storage key")?,
+            prev_value: wrap_missing_as(iter.next(), "previous storage value")?,
+            new_value: wrap_missing_as(iter.next(), "storage value")?,
+        })
+    }
+}
+
+impl TryFromOutputIter for PartialContractStorageUpdate {
+    fn try_from_output_iter<It: Iterator<Item = Felt>>(
+        iter: &mut It,
+        _private_keys: Option<&Vec<Felt>>,
+    ) -> Result<Self, OsOutputError> {
+        Ok(Self {
+            key: wrap_missing_as(iter.next(), "storage key")?,
+            new_value: wrap_missing(iter.next(), "storage value")?,
+        })
+    }
+}
+
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Debug, PartialEq)]
+pub struct FullCompiledClassHashUpdate {
+    pub class_hash: ClassHash,
+    pub prev_compiled_class_hash: CompiledClassHash,
+    pub next_compiled_class_hash: CompiledClassHash,
+}
+
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Debug, PartialEq)]
+pub struct PartialCompiledClassHashUpdate {
+    pub(crate) class_hash: ClassHash,
+    pub(crate) next_compiled_class_hash: CompiledClassHash,
+}
+
+impl TryFromOutputIter for FullCompiledClassHashUpdate {
+    fn try_from_output_iter<It: Iterator<Item = Felt>>(
+        iter: &mut It,
+        _private_keys: Option<&Vec<Felt>>,
+    ) -> Result<Self, OsOutputError> {
+        Ok(Self {
+            class_hash: ClassHash(wrap_missing_as(iter.next(), "class_hash")?),
+            prev_compiled_class_hash: CompiledClassHash(wrap_missing_as(
+                iter.next(),
+                "prev_compiled_class_hash",
+            )?),
+            next_compiled_class_hash: CompiledClassHash(wrap_missing_as(
+                iter.next(),
+                "next_compiled_class_hash",
+            )?),
+        })
+    }
+}
+
+impl TryFromOutputIter for PartialCompiledClassHashUpdate {
+    fn try_from_output_iter<It: Iterator<Item = Felt>>(
+        iter: &mut It,
+        _private_keys: Option<&Vec<Felt>>,
+    ) -> Result<Self, OsOutputError> {
+        Ok(Self {
+            class_hash: ClassHash(wrap_missing_as(iter.next(), "class_hash")?),
+            next_compiled_class_hash: CompiledClassHash(wrap_missing_as(
+                iter.next(),
+                "new_compiled_class_hash",
+            )?),
+        })
+    }
+}
+
+impl DictEntry for FullCompiledClassHashUpdate {
+    type Key = ClassHash;
+    type Value = CompiledClassHash;
+
+    fn key(&self) -> Self::Key {
+        self.class_hash
+    }
+
+    fn prev_value(&self) -> Self::Value {
+        self.prev_compiled_class_hash
+    }
+
+    fn new_value(&self) -> Self::Value {
+        self.next_compiled_class_hash
+    }
+}
+
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Debug, PartialEq)]
+/// Represents the changes in a contract instance, in a full format.
+pub struct FullContractChanges {
+    // The address of the contract.
+    pub addr: ContractAddress,
+    // The previous nonce of the contract.
+    pub prev_nonce: Nonce,
+    // The new nonce of the contract.
+    pub new_nonce: Nonce,
+    // The previous class hash.
+    pub prev_class_hash: ClassHash,
+    // The new class hash.
+    pub new_class_hash: ClassHash,
+    // The storage changes of the contract (includes the previous and new value).
+    pub storage_changes: Vec<FullContractStorageUpdate>,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl FullContractChanges {
+    pub fn encode(&self, full_output: bool) -> Vec<Felt> {
+        let encoded_storage_changes_iter =
+            self.storage_changes.iter().flat_map(|update| update.encode(full_output));
+
+        if full_output {
+            return [
+                **self.addr,
+                self.prev_nonce.0,
+                self.new_nonce.0,
+                self.prev_class_hash.into(),
+                self.new_class_hash.into(),
+                self.storage_changes.len().into(),
+            ]
+            .into_iter()
+            .chain(encoded_storage_changes_iter)
+            .collect();
+        }
+
+        // Encode packed output.
+        let n_updates = self.storage_changes.len();
+        let nonce_changed = self.prev_nonce != self.new_nonce;
+        let class_changed = self.prev_class_hash != self.new_class_hash;
+        let is_n_updates_small =
+            n_updates < Felt::from(N_UPDATES_SMALL_PACKING_BOUND).to_usize().unwrap();
+        let n_updates_bound =
+            if is_n_updates_small { N_UPDATES_SMALL_PACKING_BOUND } else { N_UPDATES_BOUND };
+
+        let mut header_packed_word = if nonce_changed { self.new_nonce.0 } else { Felt::ZERO };
+        header_packed_word =
+            header_packed_word * Felt::from(n_updates_bound) + Felt::from(n_updates);
+        header_packed_word =
+            header_packed_word * Felt::from(FLAG_BOUND) + Felt::from(is_n_updates_small);
+        header_packed_word =
+            header_packed_word * Felt::from(FLAG_BOUND) + Felt::from(class_changed);
+
+        let mut result = vec![**self.addr, header_packed_word];
+        if class_changed {
+            result.push(self.new_class_hash.0);
+        }
+        result.extend(encoded_storage_changes_iter);
+        result
+    }
+}
+
+impl TryFromOutputIter for FullContractChanges {
+    fn try_from_output_iter<It: Iterator<Item = Felt>>(
+        iter: &mut It,
+        private_keys: Option<&Vec<Felt>>,
+    ) -> Result<Self, OsOutputError> {
+        Ok(Self {
+            addr: wrap_missing_as(iter.next(), "addr")?,
+            prev_nonce: Nonce(wrap_missing(iter.next(), "prev_nonce")?),
+            new_nonce: Nonce(wrap_missing_as(iter.next(), "new_nonce")?),
+            prev_class_hash: ClassHash(wrap_missing_as(iter.next(), "prev_class_hash")?),
+            new_class_hash: ClassHash(wrap_missing_as(iter.next(), "new_class_hash")?),
+            storage_changes: Vec::<FullContractStorageUpdate>::try_from_output_iter(
+                iter,
+                private_keys,
+            )?,
+        })
+    }
+}
+
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Debug, PartialEq)]
+/// Represents the changes in a contract instance, in a partial format.
+pub struct PartialContractChanges {
+    // The address of the contract.
+    pub(crate) addr: ContractAddress,
+    // The new nonce of the contract (for account contracts, if changed).
+    pub(crate) new_nonce: Option<Nonce>,
+    // The new class hash (if changed).
+    pub(crate) new_class_hash: Option<ClassHash>,
+    // The storage changes of the contract (includes only the new value).
+    pub(crate) storage_changes: Vec<PartialContractStorageUpdate>,
+}
+
+impl TryFromOutputIter for PartialContractChanges {
+    fn try_from_output_iter<It: Iterator<Item = Felt>>(
+        iter: &mut It,
+        private_keys: Option<&Vec<Felt>>,
+    ) -> Result<Self, OsOutputError> {
+        let addr = wrap_missing_as(iter.next(), "addr")?;
+        // Parse packed info.
+        let nonce_n_changes_two_flags = wrap_missing(iter.next(), "nonce_n_changes_two_flags")?;
+
+        // Parse flags.
+        let (nonce_n_changes_one_flag, class_updated_felt) =
+            nonce_n_changes_two_flags.div_rem(&FLAG_BOUND);
+        let class_updated = felt_as_bool(class_updated_felt, "class_updated")?;
+        let (nonce_n_changes, is_n_updates_small_felt) =
+            nonce_n_changes_one_flag.div_rem(&FLAG_BOUND);
+        let is_n_updates_small = felt_as_bool(is_n_updates_small_felt, "is_n_updates_small")?;
+
+        // Parse n_changes.
+        let n_updates_bound =
+            if is_n_updates_small { N_UPDATES_SMALL_PACKING_BOUND } else { N_UPDATES_BOUND };
+        let (nonce, n_changes) = nonce_n_changes.div_rem(&n_updates_bound);
+
+        // Parse nonce.
+        let new_nonce = if nonce == Felt::ZERO { None } else { Some(Nonce(nonce)) };
+
+        let new_class_hash = if class_updated {
+            Some(ClassHash(wrap_missing(iter.next(), "new_class_hash")?))
+        } else {
+            None
+        };
+        Ok(Self {
+            addr,
+            new_nonce,
+            new_class_hash,
+            storage_changes: {
+                let n_changes = try_into_custom_error(n_changes, "n_changes")?;
+                let mut storage_changes = Vec::with_capacity(n_changes);
+                for _ in 0..n_changes {
+                    storage_changes.push(PartialContractStorageUpdate::try_from_output_iter(
+                        iter,
+                        private_keys,
+                    )?);
+                }
+                storage_changes
+            },
+        })
+    }
+}
+
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Debug, PartialEq)]
+// An explicit state diff (no KZG commitment applied) in the full output format (with previous
+// values for every storage/class hash change). The expected input format for the aggregator.
+/// Matches the SquashedOsStateUpdate cairo struct.
+pub struct FullOsStateDiff {
+    // Changed contracts.
+    pub contracts: Vec<FullContractChanges>,
+    // Declared classes. Represents the updates of a mapping from class hash to previous and new
+    // compiled class hash.
+    pub classes: Vec<FullCompiledClassHashUpdate>,
+}
+
+impl TryFromOutputIter for FullOsStateDiff {
+    fn try_from_output_iter<It: Iterator<Item = Felt>>(
+        iter: &mut It,
+        private_keys: Option<&Vec<Felt>>,
+    ) -> Result<Self, OsOutputError> {
+        Ok(Self {
+            contracts: Vec::<FullContractChanges>::try_from_output_iter(iter, private_keys)?,
+            classes: Vec::<FullCompiledClassHashUpdate>::try_from_output_iter(iter, private_keys)?,
+        })
+    }
+}
+
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Debug, PartialEq)]
+// An explicit state diff (no KZG commitment applied) in the partial output format (no
+// previous values).
+pub struct PartialOsStateDiff {
+    // Changed contracts.
+    pub contracts: Vec<PartialContractChanges>,
+    // Declared classes. Represents the updates of a mapping from class hash to the new compiled
+    // class hash.
+    pub classes: Vec<PartialCompiledClassHashUpdate>,
+}
+
+impl TryFromOutputIter for PartialOsStateDiff {
+    fn try_from_output_iter<It: Iterator<Item = Felt>>(
+        iter: &mut It,
+        private_keys: Option<&Vec<Felt>>,
+    ) -> Result<Self, OsOutputError> {
+        let iter = &mut maybe_decrypt_iter(iter, private_keys);
+        let decompressed = &mut decompress(iter).into_iter().chain(iter);
+
+        Ok(Self {
+            contracts: Vec::<PartialContractChanges>::try_from_output_iter(
+                decompressed,
+                private_keys,
+            )?,
+            classes: Vec::<PartialCompiledClassHashUpdate>::try_from_output_iter(
+                decompressed,
+                private_keys,
+            )?,
+        })
+    }
+}
+
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Debug, PartialEq)]
+// A commitment to the state diff (with KZG commitment applied) in the full output format.
+pub struct FullCommitmentOsStateDiff(pub(crate) OsKzgCommitmentInfo);
+
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize, serde::Serialize))]
+#[derive(Debug, PartialEq)]
+// A commitment to the state diff (with KZG commitment applied) in the partial output format.
+pub struct PartialCommitmentOsStateDiff(pub OsKzgCommitmentInfo);

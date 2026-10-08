@@ -1,0 +1,548 @@
+use std::any::type_name;
+use std::fmt::Debug;
+use std::sync::Arc;
+
+use apollo_infra::component_client::ClientError;
+use apollo_infra::component_definitions::ComponentStarter;
+use apollo_infra_utils::{debug_every_n, info_every_n_ms};
+use apollo_l1_events_config::config::L1EventsScraperConfig;
+use apollo_l1_events_types::errors::{L1EventsProviderClientError, L1EventsProviderError};
+use apollo_l1_events_types::{Event, SharedL1EventsProviderClient};
+use apollo_metrics::metrics::set_unix_now_seconds;
+use apollo_time::time::{Clock, DefaultClock};
+use async_trait::async_trait;
+use futures::future::{BoxFuture, FutureExt};
+use itertools::zip_eq;
+use papyrus_base_layer::constants::EventIdentifier;
+use papyrus_base_layer::{BaseLayerContract, L1BlockNumber, L1BlockReference, L1Event};
+use starknet_api::block::BlockNumber;
+use starknet_api::StarknetApiError;
+use static_assertions::const_assert;
+use thiserror::Error;
+use tokio::time::sleep;
+use tracing::{debug, info, instrument, trace, warn};
+
+use crate::metrics::{
+    register_scraper_metrics,
+    L1_MESSAGE_SCRAPER_BASELAYER_ERROR_COUNT,
+    L1_MESSAGE_SCRAPER_LAST_SUCCESS_TIMESTAMP_SECONDS,
+    L1_MESSAGE_SCRAPER_LATEST_SCRAPED_BLOCK,
+    L1_MESSAGE_SCRAPER_REORG_DETECTED,
+    L1_MESSAGE_SCRAPER_SUCCESS_COUNT,
+};
+
+#[cfg(test)]
+#[path = "l1_scraper_tests.rs"]
+pub mod l1_scraper_tests;
+
+type L1EventsScraperResult<T, B> = Result<T, L1EventsScraperError<B>>;
+
+pub struct L1EventsScraper<BaseLayerType: BaseLayerContract + Send + Sync + Debug> {
+    pub config: L1EventsScraperConfig,
+    pub base_layer: BaseLayerType,
+    pub scrape_from_this_l1_block: Option<L1BlockReference>,
+    pub l1_events_provider_client: SharedL1EventsProviderClient,
+    tracked_event_identifiers: Vec<EventIdentifier>,
+    pub clock: Arc<dyn Clock>,
+}
+
+impl<BaseLayerType: BaseLayerContract + Send + Sync + Debug> L1EventsScraper<BaseLayerType> {
+    pub async fn new(
+        config: L1EventsScraperConfig,
+        l1_events_provider_client: SharedL1EventsProviderClient,
+        base_layer: BaseLayerType,
+        events_identifiers_to_track: &[EventIdentifier],
+    ) -> L1EventsScraperResult<Self, BaseLayerType> {
+        Ok(Self {
+            l1_events_provider_client,
+            base_layer,
+            scrape_from_this_l1_block: None,
+            config,
+            tracked_event_identifiers: events_identifiers_to_track.to_vec(),
+            clock: Arc::new(DefaultClock),
+        })
+    }
+
+    #[instrument(skip(self), err)]
+    pub async fn run(&mut self) -> L1EventsScraperResult<(), BaseLayerType> {
+        // Each of the following function is use as a closure sent to
+        // retry_until_base_layer_success. This will retry each of them, in turn, in an
+        // endless loop until they succeed. Since they have different return types, we have
+        // to use box/pin to pass them as a closure.
+
+        // Try to get all the information needed for initialization.
+        self.scrape_from_this_l1_block = Some(
+            self.retry_until_base_layer_success(
+                |this| this.fetch_start_block().boxed(),
+                "fetching start block",
+            )
+            .await?,
+        );
+
+        // The last historic L2 height is returned, to be using in initialization.
+        let historic_l2_height = self
+            .retry_until_base_layer_success(
+                |this| this.get_last_historic_l2_height().boxed(),
+                "fetching last historic L2 height",
+            )
+            .await?;
+
+        // Initialize fetches events from start block up to latest, sends them to the provider.
+        // Update the L1 block number we need to scrape from.
+        self.scrape_from_this_l1_block = Some(
+            self.retry_until_base_layer_success(
+                |this| this.initialize(historic_l2_height).boxed(),
+                "initializing",
+            )
+            .await?,
+        );
+
+        // This is the main (steady state) loop.
+        loop {
+            // Sleep at start of loop, as we get here right after successful initialize+break.
+            sleep(self.config.polling_interval_seconds).await;
+
+            match self.send_events_to_l1_events_provider().await {
+                Err(L1EventsScraperError::BaseLayerError(e)) => {
+                    L1_MESSAGE_SCRAPER_BASELAYER_ERROR_COUNT.increment(1);
+                    warn!("BaseLayerError during scraping: {e:?}");
+                }
+                Ok(_) => {
+                    L1_MESSAGE_SCRAPER_SUCCESS_COUNT.increment(1);
+                    set_unix_now_seconds(&L1_MESSAGE_SCRAPER_LAST_SUCCESS_TIMESTAMP_SECONDS);
+                }
+                Err(e @ L1EventsScraperError::L1ReorgDetected { .. }) => {
+                    warn!("L1 reorg detected during scraping: {e}");
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Use config.startup_rewind_time_seconds to estimate an L1 block number
+    /// that is far enough back to start scraping from.
+    pub async fn fetch_start_block(
+        &mut self,
+    ) -> Result<L1BlockReference, L1EventsScraperError<BaseLayerType>> {
+        // Define the safety margin (e.g., extra 50% over the required number of blocks).
+        const SAFTEY_MARGIN_NUMERATOR: u64 = 3;
+        const SAFTEY_MARGIN_DENOMINATOR: u64 = 2;
+        const_assert!(SAFTEY_MARGIN_NUMERATOR > SAFTEY_MARGIN_DENOMINATOR);
+        let finality = self.config.finality;
+        let latest_l1_block_number = self
+            .base_layer
+            .latest_l1_block_number()
+            .await
+            .map_err(L1EventsScraperError::BaseLayerError)?;
+        let latest_l1_block_number = latest_l1_block_number.checked_sub(finality).ok_or(
+            L1EventsScraperError::LatestBlockNumberTooLow {
+                latest_l1_block_no_finality: latest_l1_block_number,
+                finality,
+            },
+        )?;
+        debug!("Latest L1 block number: {latest_l1_block_number:?}");
+
+        // Estimate the number of blocks in the interval, to rewind from the latest block.
+        let blocks_in_interval = self.config.startup_rewind_time_seconds.as_secs()
+            / self.config.l1_block_time_seconds.as_secs();
+        debug!("Blocks in interval: {blocks_in_interval}");
+
+        // Add 50% safety margin.
+        let safe_blocks_in_interval = blocks_in_interval + blocks_in_interval / 2;
+        debug!("Safe blocks in interval: {safe_blocks_in_interval}");
+
+        let l1_block_number_rewind = latest_l1_block_number.saturating_sub(safe_blocks_in_interval);
+        debug!("L1 block number rewind: {l1_block_number_rewind}");
+
+        let block_reference_rewind = self
+            .base_layer
+            .l1_block_at(l1_block_number_rewind)
+            .await
+            .map_err(L1EventsScraperError::BaseLayerError)?
+            .unwrap_or_else(|| {
+                panic!(
+                    "Rewound L1 block number is between 0 and the verified latest L1 block \
+                     {latest_l1_block_number}, so should exist",
+                )
+            });
+        debug!("Block reference rewind: {block_reference_rewind:?}");
+
+        Ok(block_reference_rewind)
+    }
+
+    /// Get the last historic L2 height that was proved before the start block number.
+    async fn get_last_historic_l2_height(
+        &mut self,
+    ) -> L1EventsScraperResult<BlockNumber, BaseLayerType> {
+        let Some(start_block) = self.scrape_from_this_l1_block else {
+            panic!(
+                "Should never get last historic L2 height without first getting the last \
+                 processed L1 block."
+            );
+        };
+        // If the L1 chain was created less than startup_rewind ago, then L2 didn't exist at that
+        // moment. Therefore, historic L2 height should be 0
+        if start_block.number == 0 {
+            warn!(
+                "L1 start block is genesis (no historical L2). Setting provider historic height \
+                 to L2 genesis height"
+            );
+            return Ok(BlockNumber(0));
+        }
+        if self.config.set_provider_historic_height_to_l2_genesis {
+            warn!(
+                "Config set_provider_historic_height_to_l2_genesis is enabled. Setting provider \
+                 historic height to L2 genesis height"
+            );
+            return Ok(BlockNumber(0));
+        }
+        let last_historic_l2_height = self
+            .base_layer
+            .get_proved_block_at(start_block.number)
+            .await
+            .map_err(L1EventsScraperError::BaseLayerError)?
+            .number;
+        Ok(last_historic_l2_height.unchecked_next())
+    }
+
+    /// Send an initialize message to the L1 provider, including the last L2 height that was proved
+    /// before the start block number, and the events scraped over the first bounded window (see
+    /// `fetch_events` / `max_blocks_per_fetch`). The provider returns an error if it was already
+    /// initialized (e.g., if the scraper was restarted).
+    ///
+    /// Returns the L1 block reference up to which events were scraped. When the catch-up range
+    /// exceeds one window, this is short of the latest block; the polling loop drains the remaining
+    /// windows via `add_events`.
+    #[instrument(skip(self), err)]
+    async fn initialize(
+        &mut self,
+        historic_l2_height: BlockNumber,
+    ) -> L1EventsScraperResult<L1BlockReference, BaseLayerType> {
+        let (window_end_block, events) = self.fetch_events().await?;
+
+        debug!("Scraped up to L1 block for initialize: {window_end_block:?}");
+        debug!("All events scraped during initialize: {events:?}");
+
+        let initialize_result =
+            self.l1_events_provider_client.initialize(historic_l2_height, events).await;
+        handle_client_error(initialize_result)?;
+
+        Ok(window_end_block)
+    }
+
+    /// Scrape recent events and send them to the L1 provider.
+    pub async fn send_events_to_l1_events_provider(
+        &mut self,
+    ) -> L1EventsScraperResult<(), BaseLayerType> {
+        if self.scrape_from_this_l1_block.is_none() {
+            panic!(
+                "Scraper initialization was skipped. Must provide a value for \
+                 scrape_from_this_l1_block. Value is given by a call to fetch_start_block() in \
+                 run(). Did you forget to call run()?"
+            )
+        }
+        self.assert_no_l1_reorgs().await?;
+
+        let (latest_l1_block, events) = self.fetch_events().await?;
+        // TODO(guyn): remove these _every_n_ms because the polling interval is longer.
+        trace!("scraped up to {latest_l1_block:?}");
+        info_every_n_ms!(1_000, "scraped up to {latest_l1_block:?}");
+
+        // Sending even if there are no events, to keep the flow as simple/debuggable as possible.
+        // Perf hit is minimal, since the scraper is on the same machine as the provider (no
+        // network). If this gets spammy, short-circuit on events.empty().
+        let add_events_result = self.l1_events_provider_client.add_events(events).await;
+        handle_client_error(add_events_result)?;
+
+        L1_MESSAGE_SCRAPER_LATEST_SCRAPED_BLOCK.set_lossy(latest_l1_block.number);
+        // Successfully scraped events up to latest l1 block.
+        self.scrape_from_this_l1_block = Some(latest_l1_block);
+
+        Ok(())
+    }
+
+    /// Query the L1 base layer for all events since scrape_from_this_l1_block.
+    async fn fetch_events(
+        &mut self,
+    ) -> L1EventsScraperResult<(L1BlockReference, Vec<Event>), BaseLayerType> {
+        let scrape_timestamp = self.clock.unix_now();
+
+        let latest_l1_block_number = self
+            .base_layer
+            .latest_l1_block_number()
+            .await
+            .map_err(L1EventsScraperError::BaseLayerError)?;
+        let latest_l1_block_number = latest_l1_block_number
+            .checked_sub(self.config.finality)
+            .ok_or(L1EventsScraperError::LatestBlockNumberTooLow {
+                finality: self.config.finality,
+                latest_l1_block_no_finality: latest_l1_block_number,
+            })?;
+        let latest_l1_block = self
+            .base_layer
+            .l1_block_at(latest_l1_block_number)
+            .await
+            .map_err(L1EventsScraperError::BaseLayerError)?
+            .ok_or(L1EventsScraperError::LatestL1BlockNumberNoBlockFound {
+                block_number: latest_l1_block_number,
+            })?;
+
+        let Some(scrape_from_this_l1_block) = self.scrape_from_this_l1_block else {
+            panic!("Should never fetch events without first getting the last processed L1 block.");
+        };
+        // This can happen if, e.g., changing base layers. Should ignore and try scraping again.
+        if latest_l1_block.number <= scrape_from_this_l1_block.number {
+            warn!(
+                "Latest L1 block number {} is not greater than the last processed L1 block number \
+                 {}. Ignoring, will try again on the next interval.",
+                latest_l1_block.number, scrape_from_this_l1_block.number
+            );
+            return Ok((scrape_from_this_l1_block, vec![]));
+        }
+
+        let scraping_start_number = scrape_from_this_l1_block.number + 1;
+        // Cap the fetched range to max_blocks_per_fetch so a large backlog is drained over
+        // successive polls rather than in one unbounded eth_getLogs request. The window is
+        // inclusive on both ends, hence the `- 1`; `.max(1)` and saturating arithmetic guard
+        // against underflow even though config validation already rejects 0. The finality ceiling
+        // (latest_l1_block.number) is preserved.
+        let window_end_number = latest_l1_block
+            .number
+            .min(scraping_start_number.saturating_add(self.config.max_blocks_per_fetch.max(1) - 1));
+
+        // Reuse latest_l1_block when the window already reaches it, to avoid a needless extra RPC.
+        let window_end_block = if window_end_number == latest_l1_block.number {
+            latest_l1_block
+        } else {
+            self.base_layer
+                .l1_block_at(window_end_number)
+                .await
+                .map_err(L1EventsScraperError::BaseLayerError)?
+                .ok_or(L1EventsScraperError::LatestL1BlockNumberNoBlockFound {
+                    block_number: window_end_number,
+                })?
+        };
+
+        let scraping_result = self
+            .base_layer
+            .events(scraping_start_number..=window_end_number, &self.tracked_event_identifiers)
+            .await;
+
+        let l1_events = scraping_result.map_err(L1EventsScraperError::BaseLayerError)?;
+
+        // Used for debug. Collect the L1 tx hashes and L1 block timestamps.
+        let l1_messages_info = l1_events
+            .iter()
+            .filter_map(|event| match event {
+                L1Event::LogMessageToL2 { l1_tx_hash, block_timestamp, .. } => {
+                    Some((*l1_tx_hash, *block_timestamp))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        // Convert L1 events into Starknet provider events. Includes calculating the L2 tx hash.
+        let events = l1_events
+            .into_iter()
+            .map(|event| {
+                Event::from_l1_event(&self.config.chain_id, event, scrape_timestamp)
+                    .map_err(L1EventsScraperError::HashCalculationError)
+            })
+            .collect::<L1EventsScraperResult<Vec<_>, _>>()?;
+        // Used for debug. Collect the L2 hashes for events that are L1 handler transactions.
+        let l2_hashes = events.iter().filter_map(|event| match event {
+            Event::L1HandlerTransaction { l1_handler_tx, .. } => Some(l1_handler_tx.tx_hash),
+            _ => None,
+        });
+        // Collect the L1-L2 message hashes (keccak) for L1 handler transactions.
+        let l1_msg_hashes = events.iter().filter_map(|event| match event {
+            Event::L1HandlerTransaction { l1_handler_tx, .. } => {
+                Some(l1_handler_tx.tx.calc_msg_hash())
+            }
+            _ => None,
+        });
+
+        let formatted_pairs = zip_eq(zip_eq(l1_messages_info, l2_hashes), l1_msg_hashes)
+            .map(|(((l1_hash, timestamp), l2_hash), l1_msg_hash)| {
+                format!(
+                    "L1 tx hash: {l1_hash:?}, L1 timestamp: {timestamp}, L2 tx hash: {l2_hash}, \
+                     L1-L2 msg hash: {l1_msg_hash}"
+                )
+            })
+            .collect::<Vec<_>>();
+        if formatted_pairs.is_empty() {
+            debug_every_n!(100, "Got Messages to L2: []");
+        } else {
+            debug!("Got Messages to L2: {formatted_pairs:?}");
+        }
+
+        // Debug: log cancellation started events.
+        let cancellation_started_events = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::TransactionCancellationStarted { tx_hash, .. } => Some(*tx_hash),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let formatted_cancellation_started_events = cancellation_started_events
+            .iter()
+            .map(|tx_hash| format!("Cancel tx with L2 hash: {tx_hash}"));
+        if cancellation_started_events.is_empty() {
+            debug_every_n!(100, "Got Cancellation Started Events: []");
+        } else {
+            debug!("Got Cancellation Started Events: {formatted_cancellation_started_events:?}");
+        }
+        Ok((window_end_block, events))
+    }
+
+    /// Retry the given function if it gets base layer errors. Returns the result of the function in
+    /// case of success or the error in case of failure.
+    async fn retry_until_base_layer_success<T, FuncType>(
+        &mut self,
+        mut func: FuncType,
+        description: &str,
+    ) -> L1EventsScraperResult<T, BaseLayerType>
+    // Accept closure that takes a mutable reference to self, returning a future returning a result.
+    where
+        for<'a> FuncType:
+            FnMut(&'a mut Self) -> BoxFuture<'a, Result<T, L1EventsScraperError<BaseLayerType>>>,
+    {
+        loop {
+            match func(self).await {
+                Err(L1EventsScraperError::BaseLayerError(e)) => {
+                    warn!("Error while {description}: {e}");
+                    L1_MESSAGE_SCRAPER_BASELAYER_ERROR_COUNT.increment(1);
+                    // TODO(guyn): consider using a different interval here? Maybe doesn't really
+                    // matter.
+                    sleep(self.config.polling_interval_seconds).await;
+                    continue;
+                }
+                // Return a non-base layer error or success.
+                e => return e,
+            }
+        }
+    }
+
+    /// Fetch scrape_from_this_l1_block again, check it still exists and that its hash is the same.
+    /// If a reorg occurred up to this block, return an error (existing data in the provider is
+    /// stale).
+    async fn assert_no_l1_reorgs(&mut self) -> L1EventsScraperResult<(), BaseLayerType> {
+        let Some(scrape_from_this_l1_block) = self.scrape_from_this_l1_block else {
+            panic!(
+                "Should never assert no l1 reorgs without first getting the last processed L1 \
+                 block."
+            );
+        };
+        let last_processed_l1_block_number = scrape_from_this_l1_block.number;
+        let last_processed_l1_block_hash = scrape_from_this_l1_block.hash;
+        let last_block_processed_fresh = self
+            .base_layer
+            .l1_block_at(last_processed_l1_block_number)
+            .await
+            .map_err(L1EventsScraperError::BaseLayerError)?;
+
+        let Some(last_block_processed_fresh) = last_block_processed_fresh else {
+            L1_MESSAGE_SCRAPER_REORG_DETECTED.increment(1);
+            return Err(L1EventsScraperError::L1ReorgDetected {
+                reason: format!(
+                    "Last processed L1 block with number {last_processed_l1_block_number} and \
+                     hash {last_processed_l1_block_hash} no longer exists."
+                ),
+            });
+        };
+
+        if last_block_processed_fresh.hash != last_processed_l1_block_hash {
+            L1_MESSAGE_SCRAPER_REORG_DETECTED.increment(1);
+            return Err(L1EventsScraperError::L1ReorgDetected {
+                reason: format!(
+                    "Last processed L1 block hash, {}, for block number {}, is different from the \
+                     hash stored, {}",
+                    last_block_processed_fresh.hash,
+                    last_processed_l1_block_number,
+                    last_processed_l1_block_hash
+                ),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<BaseLayerType: BaseLayerContract + Send + Sync + Debug> ComponentStarter
+    for L1EventsScraper<BaseLayerType>
+{
+    async fn start(&mut self) {
+        info!("Starting component {}.", type_name::<Self>());
+        register_scraper_metrics();
+        self.run().await.unwrap_or_else(|e| panic!("Runtime Error: {e}"))
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum L1EventsScraperError<BaseLayerType: BaseLayerContract + Send + Sync + Debug> {
+    #[error("Base layer error: {0}")]
+    BaseLayerError(BaseLayerType::Error),
+    #[error(
+        "Latest L1 block number is too low: latest L1 block number: \
+         {latest_l1_block_no_finality:?}, finality: {finality:?}"
+    )]
+    LatestBlockNumberTooLow { latest_l1_block_no_finality: L1BlockNumber, finality: u64 },
+    #[error("Block number {block_number} not found")]
+    LatestL1BlockNumberNoBlockFound { block_number: L1BlockNumber },
+    #[error("Failed to calculate hash: {0}")]
+    HashCalculationError(StarknetApiError),
+    // Leaky abstraction, these errors should not propagate here.
+    #[error(transparent)]
+    NetworkError(ClientError),
+    #[error("L1 reorg detected: {reason}. Restart both the L1 provider and the scraper.")]
+    L1ReorgDetected { reason: String },
+    // This is likely due to a provider crash, which is now waiting for the restart sequence from
+    // the scraper.
+    #[error("The scraper requires a restart.")]
+    NeedsRestart,
+}
+
+impl<BaseLayerType: BaseLayerContract + Send + Sync + Debug> PartialEq
+    for L1EventsScraperError<BaseLayerType>
+{
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::BaseLayerError(e1), Self::BaseLayerError(e2)) => e1 == e2,
+            (
+                this @ Self::LatestBlockNumberTooLow { .. },
+                other @ Self::LatestBlockNumberTooLow { .. },
+            ) => this == other,
+            (Self::HashCalculationError(e1), Self::HashCalculationError(e2)) => e1 == e2,
+            (Self::NetworkError(e1), Self::NetworkError(e2)) => e1 == e2,
+            (this @ Self::L1ReorgDetected { .. }, other @ Self::L1ReorgDetected { .. }) => {
+                this == other
+            }
+            (Self::NeedsRestart, Self::NeedsRestart) => true,
+            _ => false,
+        }
+    }
+}
+
+fn handle_client_error<BaseLayerType: BaseLayerContract + Send + Sync + Debug>(
+    client_result: Result<(), L1EventsProviderClientError>,
+) -> Result<(), L1EventsScraperError<BaseLayerType>> {
+    let Err(error) = client_result else {
+        return Ok(());
+    };
+    match error {
+        L1EventsProviderClientError::ClientError(client_error) => {
+            Err(L1EventsScraperError::NetworkError(client_error))
+        }
+        L1EventsProviderClientError::L1EventsProviderError(provider_error) => {
+            if provider_error != L1EventsProviderError::Uninitialized {
+                warn!(
+                    "L1 Events Provider returned unexpected error: {provider_error}. Triggering \
+                     restart."
+                );
+            }
+            Err(L1EventsScraperError::NeedsRestart)
+        }
+    }
+}

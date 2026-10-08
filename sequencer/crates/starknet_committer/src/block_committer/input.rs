@@ -1,0 +1,316 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Debug;
+
+use apollo_config::dumping::{ser_param, SerializeConfig};
+use apollo_config::{ParamPath, ParamPrivacyInput, SerializedParam};
+use serde::{Deserialize, Serialize};
+use starknet_api::core::{ClassHash, ContractAddress, Nonce, PatriciaKey};
+use starknet_api::state::{StorageKey, ThinStateDiff};
+use starknet_api::StarknetApiError;
+use starknet_patricia::patricia_merkle_tree::node_data::leaf::{LeafModifications, SkeletonLeaf};
+use starknet_patricia::patricia_merkle_tree::types::NodeIndex;
+use starknet_types_core::felt::Felt;
+
+use crate::patricia_merkle_tree::types::{class_hash_into_node_index, CompiledClassHash};
+
+#[cfg(test)]
+#[path = "input_test.rs"]
+pub mod input_test;
+
+pub fn try_node_index_into_contract_address(
+    node_index: &NodeIndex,
+) -> Result<ContractAddress, String> {
+    Ok(ContractAddress(try_node_index_into_patricia_key(node_index)?))
+}
+
+pub fn try_node_index_into_patricia_key(node_index: &NodeIndex) -> Result<PatriciaKey, String> {
+    if !node_index.is_leaf() {
+        return Err("NodeIndex is not a leaf.".to_string());
+    }
+    let result = Felt::try_from(*node_index - NodeIndex::FIRST_LEAF);
+    match result {
+        Ok(felt) => Ok(PatriciaKey::try_from(felt).map_err(|error| error.to_string())?),
+        Err(error) => Err(format!(
+            "Tried to convert node index to felt and got the following error: {:?}",
+            error.to_string()
+        )),
+    }
+}
+
+pub fn contract_address_into_node_index(address: &ContractAddress) -> NodeIndex {
+    NodeIndex::from_leaf_felt(&address.0)
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
+// TODO(Nimrod, 1/6/2025):  Use the StarknetStorageValue defined in starknet-types-core when
+// available.
+pub struct StarknetStorageKey(pub StorageKey);
+
+impl From<&StarknetStorageKey> for NodeIndex {
+    fn from(key: &StarknetStorageKey) -> NodeIndex {
+        NodeIndex::from_leaf_felt(&key.0)
+    }
+}
+
+impl From<PatriciaKey> for StarknetStorageKey {
+    fn from(key: PatriciaKey) -> Self {
+        Self(StorageKey(key))
+    }
+}
+
+impl TryFrom<Felt> for StarknetStorageKey {
+    type Error = StarknetApiError;
+    fn try_from(felt: Felt) -> Result<Self, Self::Error> {
+        Ok(Self::from(PatriciaKey::try_from(felt)?))
+    }
+}
+
+impl From<u128> for StarknetStorageKey {
+    fn from(val: u128) -> Self {
+        Self::try_from(Felt::from(val)).expect("u128 is a valid patricia key.")
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StarknetStorageValue(pub Felt);
+
+impl From<StarknetStorageValue> for SkeletonLeaf {
+    fn from(value: StarknetStorageValue) -> Self {
+        SkeletonLeaf::from(value.0)
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StateDiff {
+    pub address_to_class_hash: HashMap<ContractAddress, ClassHash>,
+    pub address_to_nonce: HashMap<ContractAddress, Nonce>,
+    pub class_hash_to_compiled_class_hash: HashMap<ClassHash, CompiledClassHash>,
+    pub storage_updates:
+        HashMap<ContractAddress, HashMap<StarknetStorageKey, StarknetStorageValue>>,
+}
+
+impl StateDiff {
+    pub fn len(&self) -> usize {
+        let Self {
+            address_to_class_hash,
+            address_to_nonce,
+            class_hash_to_compiled_class_hash,
+            storage_updates,
+        } = self;
+        let mut result = 0usize;
+        result += address_to_class_hash.len();
+        result += address_to_nonce.len();
+        result += class_hash_to_compiled_class_hash.len();
+        for storage_map in storage_updates.values() {
+            result += storage_map.len();
+        }
+        result
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl From<ThinStateDiff> for StateDiff {
+    fn from(
+        ThinStateDiff {
+            class_hash_to_compiled_class_hash,
+            deployed_contracts,
+            storage_diffs,
+            nonces,
+            ..
+        }: ThinStateDiff,
+    ) -> Self {
+        Self {
+            address_to_class_hash: deployed_contracts.into_iter().collect(),
+            address_to_nonce: nonces.into_iter().collect(),
+            class_hash_to_compiled_class_hash: class_hash_to_compiled_class_hash
+                .into_iter()
+                .map(|(k, v)| (k, CompiledClassHash(v.0)))
+                .collect(),
+            storage_updates: storage_diffs
+                .into_iter()
+                .map(|(address, updates)| {
+                    (
+                        address,
+                        updates
+                            .into_iter()
+                            .map(|(key, value)| {
+                                (StarknetStorageKey(key), StarknetStorageValue(value))
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+/// All optional configurations of the committer.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReaderConfig {
+    warn_on_trivial_modifications: bool,
+    build_storage_tries_concurrently: bool,
+}
+
+impl Default for ReaderConfig {
+    fn default() -> Self {
+        Self { warn_on_trivial_modifications: false, build_storage_tries_concurrently: true }
+    }
+}
+
+impl ReaderConfig {
+    pub fn new(
+        warn_on_trivial_modifications: bool,
+        build_storage_tries_concurrently: bool,
+    ) -> Self {
+        Self { warn_on_trivial_modifications, build_storage_tries_concurrently }
+    }
+
+    /// Indicates whether a warning should be given in case of a trivial state update.
+    /// If the configuration is set, it requires that the storage will contain the original data for
+    /// the modified leaves. Otherwise, it is not required.
+    pub fn warn_on_trivial_modifications(&self) -> bool {
+        self.warn_on_trivial_modifications
+    }
+
+    /// Indicates whether to build the storage tries concurrently or sequentially.
+    pub fn build_storage_tries_concurrently(&self) -> bool {
+        self.build_storage_tries_concurrently
+    }
+}
+
+impl SerializeConfig for ReaderConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        BTreeMap::from_iter([
+            ser_param(
+                "warn_on_trivial_modifications",
+                &self.warn_on_trivial_modifications,
+                "Whether to warn on trivial state update.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "build_storage_tries_concurrently",
+                &self.build_storage_tries_concurrently,
+                "Whether to build the storage tries concurrently or sequentially.",
+                ParamPrivacyInput::Public,
+            ),
+        ])
+    }
+}
+
+/// Defines the context type for the input of the committer.
+pub trait InputContext: Clone {}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Input<I: InputContext> {
+    /// All relevant information for the state diff commitment.
+    pub state_diff: StateDiff,
+    pub initial_read_context: I,
+    pub config: ReaderConfig,
+}
+
+pub trait IsSubset<T> {
+    fn is_subset(&self, other: &T) -> bool;
+}
+
+impl<K, V> IsSubset<HashMap<K, V>> for HashMap<K, V>
+where
+    K: Eq + std::hash::Hash,
+    V: PartialEq,
+{
+    fn is_subset(&self, other: &HashMap<K, V>) -> bool {
+        self.iter().all(|(k, v)| other.get(k).is_some_and(|other_v| v == other_v))
+    }
+}
+
+impl IsSubset<StateDiff> for StateDiff {
+    /// Checks if self is a subset of other.
+    /// For storage diffs, asserts every address with a diff exists in other, and the address's diff
+    /// is a subset of the other's diff.
+    fn is_subset(&self, other: &Self) -> bool {
+        let Self {
+            address_to_class_hash,
+            address_to_nonce,
+            class_hash_to_compiled_class_hash,
+            storage_updates,
+        } = other;
+        self.address_to_class_hash.is_subset(address_to_class_hash)
+            && self.address_to_nonce.is_subset(address_to_nonce)
+            && self.class_hash_to_compiled_class_hash.is_subset(class_hash_to_compiled_class_hash)
+            && self.storage_updates.iter().all(|(address, diffs)| {
+                storage_updates.get(address).is_some_and(|other_diffs| diffs.is_subset(other_diffs))
+            })
+    }
+}
+
+impl StateDiff {
+    pub fn extend(&mut self, other: Self) {
+        self.address_to_class_hash.extend(other.address_to_class_hash);
+        self.address_to_nonce.extend(other.address_to_nonce);
+        self.class_hash_to_compiled_class_hash.extend(other.class_hash_to_compiled_class_hash);
+        for (address, updates) in other.storage_updates {
+            self.storage_updates
+                .entry(address)
+                .and_modify(|existing_updates| {
+                    existing_updates.extend(updates.clone());
+                })
+                .or_insert(updates);
+        }
+    }
+
+    pub(crate) fn accessed_addresses(&self) -> HashSet<&ContractAddress> {
+        HashSet::from_iter(
+            self.address_to_class_hash
+                .keys()
+                .chain(self.address_to_nonce.keys())
+                .chain(self.storage_updates.keys()),
+        )
+    }
+
+    /// For each modified contract calculates it's actual storage updates.
+    pub(crate) fn actual_storage_updates(
+        &self,
+    ) -> HashMap<ContractAddress, LeafModifications<StarknetStorageValue>> {
+        self.accessed_addresses()
+            .iter()
+            .map(|address| {
+                let updates = match self.storage_updates.get(address) {
+                    Some(inner_updates) => {
+                        inner_updates.iter().map(|(key, value)| (key.into(), *value)).collect()
+                    }
+                    None => HashMap::new(),
+                };
+                (**address, updates)
+            })
+            .collect()
+    }
+
+    pub(crate) fn actual_classes_updates(&self) -> LeafModifications<CompiledClassHash> {
+        self.class_hash_to_compiled_class_hash
+            .iter()
+            .map(|(class_hash, compiled_class_hash)| {
+                (class_hash_into_node_index(class_hash), *compiled_class_hash)
+            })
+            .collect()
+    }
+}
+
+/// Reduces a single trie's actual leaf updates to skeleton updates (whether each leaf is zero or
+/// non-zero).
+pub(crate) fn skeleton_trie_updates<L: Copy + Into<SkeletonLeaf>>(
+    actual_updates: &LeafModifications<L>,
+) -> LeafModifications<SkeletonLeaf> {
+    actual_updates.iter().map(|(&index, &value)| (index, value.into())).collect()
+}
+
+/// Reduces the actual storage updates to skeleton updates.
+pub(crate) fn skeleton_storage_updates(
+    actual_storage_updates: &HashMap<ContractAddress, LeafModifications<StarknetStorageValue>>,
+) -> HashMap<ContractAddress, LeafModifications<SkeletonLeaf>> {
+    actual_storage_updates
+        .iter()
+        .map(|(address, updates)| (*address, skeleton_trie_updates(updates)))
+        .collect()
+}

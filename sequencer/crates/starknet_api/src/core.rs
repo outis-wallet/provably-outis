@@ -1,0 +1,736 @@
+#[cfg(test)]
+#[path = "core_test.rs"]
+mod core_test;
+
+#[cfg(any(test, feature = "testing"))]
+use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::str::FromStr;
+use std::sync::LazyLock;
+
+use apollo_sizeof::SizeOf;
+use num_traits::ToPrimitive;
+use primitive_types::H160;
+use serde::de::Error;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use starknet_types_core::felt::{Felt, NonZeroFelt};
+use starknet_types_core::hash::{Blake2Felt252, Pedersen, StarkHash as CoreStarkHash};
+
+use crate::block::StarknetVersion;
+use crate::crypto::utils::PublicKey;
+use crate::hash::{HashOutput, PoseidonHash, StarkHash};
+use crate::serde_utils::{BytesAsHex, PrefixedBytesAsHex};
+use crate::transaction::fields::{Calldata, ContractAddressSalt};
+use crate::{impl_from_through_intermediate, StarknetApiError, StarknetApiResult};
+
+/// Felt.
+pub fn ascii_as_felt(ascii_str: &str) -> Result<Felt, StarknetApiError> {
+    Felt::from_hex(hex::encode(ascii_str).as_str()).map_err(|_| StarknetApiError::OutOfRange {
+        string: format!("The str {ascii_str}, does not fit into a single felt"),
+    })
+}
+
+pub fn felt_to_u128(felt: &Felt) -> Result<u128, StarknetApiError> {
+    felt.to_u128().ok_or(StarknetApiError::OutOfRange {
+        string: format!("Felt {} is too big to convert to 'u128'", *felt,),
+    })
+}
+
+/// A chain id.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub enum ChainId {
+    Mainnet,
+    Sepolia,
+    IntegrationSepolia,
+    Other(String),
+}
+
+impl Serialize for ChainId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ChainId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(ChainId::from(s))
+    }
+}
+impl From<String> for ChainId {
+    fn from(s: String) -> Self {
+        match s.as_ref() {
+            "SN_MAIN" => ChainId::Mainnet,
+            "SN_SEPOLIA" => ChainId::Sepolia,
+            "SN_INTEGRATION_SEPOLIA" => ChainId::IntegrationSepolia,
+            other => ChainId::Other(other.to_owned()),
+        }
+    }
+}
+impl std::fmt::Display for ChainId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChainId::Mainnet => write!(f, "SN_MAIN"),
+            ChainId::Sepolia => write!(f, "SN_SEPOLIA"),
+            ChainId::IntegrationSepolia => write!(f, "SN_INTEGRATION_SEPOLIA"),
+            ChainId::Other(ref s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl TryFrom<&ChainId> for Felt {
+    type Error = StarknetApiError;
+
+    fn try_from(chain_id: &ChainId) -> Result<Self, Self::Error> {
+        Self::from_hex(chain_id.as_hex().as_str()).map_err(|_| Self::Error::OutOfRange {
+            string: format!("Failed to convert chain id {chain_id} to felt."),
+        })
+    }
+}
+
+impl ChainId {
+    pub fn as_hex(&self) -> String {
+        format!("0x{}", hex::encode(self.to_string()))
+    }
+}
+
+/// Hex of 'StarknetOsConfig3' (Pedersen-based OS config hash, used before the V4 cutover).
+pub const STARKNET_OS_CONFIG_HASH_VERSION_V3: Felt =
+    Felt::from_hex_unchecked("0x537461726b6e65744f73436f6e66696733");
+
+/// Hex of 'StarknetOsConfig4' (Blake-based OS config hash, used from the V4 cutover).
+pub const STARKNET_OS_CONFIG_HASH_VERSION_V4: Felt =
+    Felt::from_hex_unchecked("0x537461726b6e65744f73436f6e66696734");
+
+/// The first Starknet version at which the OS config hash is computed with Blake (V4) instead of
+/// Pedersen (V3).
+const OS_CONFIG_HASH_V4_CUTOVER: StarknetVersion = StarknetVersion::V0_14_3;
+
+/// Selects the hash function and version short-string used to compute the OS config hash.
+/// Gated by the block's Starknet version so that blocks produced before the cutover remain
+/// re-executable / re-provable with their original (Pedersen) hash.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OsConfigHashVersion {
+    /// Pedersen hash, prefixed with 'StarknetOsConfig3'.
+    V3,
+    /// Blake hash, prefixed with 'StarknetOsConfig4'.
+    V4,
+}
+
+impl From<StarknetVersion> for OsConfigHashVersion {
+    fn from(starknet_version: StarknetVersion) -> Self {
+        if starknet_version < OS_CONFIG_HASH_V4_CUTOVER { Self::V3 } else { Self::V4 }
+    }
+}
+
+impl From<OsConfigHashVersion> for Felt {
+    fn from(hash_version: OsConfigHashVersion) -> Self {
+        match hash_version {
+            OsConfigHashVersion::V3 => STARKNET_OS_CONFIG_HASH_VERSION_V3,
+            OsConfigHashVersion::V4 => STARKNET_OS_CONFIG_HASH_VERSION_V4,
+        }
+    }
+}
+
+const DEFAULT_PUBLIC_KEYS_HASH: Felt = Felt::ZERO;
+
+fn compute_public_keys_hash(public_keys: Option<&Vec<Felt>>) -> Felt {
+    match public_keys {
+        Some(public_keys) if !public_keys.is_empty() => {
+            Blake2Felt252::encode_felt252_data_and_calc_blake_hash(public_keys)
+        }
+        _ => DEFAULT_PUBLIC_KEYS_HASH,
+    }
+}
+
+/// Chain information for OS execution.
+/// Contains minimal chain configuration needed for OS config hash computation.
+// TODO(Meshi): Remove Once the blockifier ChainInfo do not support deprecated fee token.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OsChainInfo {
+    #[serde(deserialize_with = "deserialize_chain_id_from_hex")]
+    pub chain_id: ChainId,
+    pub strk_fee_token_address: ContractAddress,
+}
+
+impl Default for OsChainInfo {
+    fn default() -> Self {
+        OsChainInfo {
+            chain_id: ChainId::Other("0x0".to_string()),
+            strk_fee_token_address: ContractAddress::default(),
+        }
+    }
+}
+
+impl OsChainInfo {
+    /// Computes the OS config hash for the given chain info and Starknet version.
+    /// The hash function (Pedersen for V3, Blake for V4) and the version short-string are selected
+    /// by `starknet_version`; see [`OsConfigHashVersion`]. The public keys hash, when present, is
+    /// computed with Blake (matching the Cairo `get_public_keys_hash`).
+    pub fn compute_os_config_hash(
+        &self,
+        public_keys: Option<&Vec<Felt>>,
+        starknet_version: StarknetVersion,
+    ) -> Result<Felt, StarknetApiError> {
+        let hash_version = OsConfigHashVersion::from(starknet_version);
+        let mut data = vec![
+            Felt::from(hash_version),
+            (&self.chain_id).try_into().map_err(|_| StarknetApiError::OutOfRange {
+                string: format!("Invalid chain ID (cannot convert to Felt): {:?}", self.chain_id),
+            })?,
+            self.strk_fee_token_address.into(),
+        ];
+        let public_keys_hash = compute_public_keys_hash(public_keys);
+        if public_keys_hash != DEFAULT_PUBLIC_KEYS_HASH {
+            data.push(public_keys_hash);
+        }
+        Ok(match hash_version {
+            OsConfigHashVersion::V3 => Pedersen::hash_array(&data),
+            OsConfigHashVersion::V4 => {
+                Blake2Felt252::encode_felt252_data_and_calc_blake_hash(&data)
+            }
+        })
+    }
+
+    /// Computes the virtual OS config hash (without public keys).
+    pub fn compute_virtual_os_config_hash(
+        &self,
+        starknet_version: StarknetVersion,
+    ) -> Result<Felt, StarknetApiError> {
+        self.compute_os_config_hash(None, starknet_version)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn to_hex_map(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("chain_id".to_string(), self.chain_id.as_hex()),
+            ("strk_fee_token_address".to_string(), self.strk_fee_token_address.to_string()),
+        ])
+    }
+}
+
+/// Parses a hex string (e.g., "0x534e5f4d41494e") into a ChainId.
+pub fn chain_id_from_hex_str(hex_str: &str) -> StarknetApiResult<ChainId> {
+    let chain_id_str =
+        std::str::from_utf8(&hex::decode(hex_str.trim_start_matches("0x")).map_err(|e| {
+            StarknetApiError::InvalidChainIdHex(format!(
+                "Failed to decode the hex string {hex_str}. Error: {e:?}"
+            ))
+        })?)
+        .map_err(|e| {
+            StarknetApiError::InvalidChainIdHex(format!(
+                "Failed to convert to UTF-8 string. Error: {e}"
+            ))
+        })?
+        .to_string();
+    Ok(ChainId::from(chain_id_str))
+}
+
+pub fn deserialize_chain_id_from_hex<'de, D>(deserializer: D) -> Result<ChainId, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let hex_str = String::deserialize(deserializer)?;
+    chain_id_from_hex_str(&hex_str).map_err(D::Error::custom)
+}
+
+/// The address of a contract, used for example in [StateDiff](`crate::state::StateDiff`),
+/// [DeclareTransaction](`crate::transaction::DeclareTransaction`), and
+/// [BlockHeader](`crate::block::BlockHeader`).
+// The block hash table is stored in address 0x1,
+// this is a special address that is not used for contracts.
+pub const BLOCK_HASH_TABLE_ADDRESS: ContractAddress = ContractAddress(PatriciaKey(StarkHash::ONE));
+
+#[derive(
+    Debug,
+    Default,
+    Copy,
+    Clone,
+    derive_more::Display,
+    Eq,
+    PartialEq,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more::Deref,
+    SizeOf,
+)]
+pub struct ContractAddress(pub PatriciaKey);
+
+impl ContractAddress {
+    /// Validates the contract address is in the valid range for external access.
+    /// The lower bound is above the special saved addresses and the upper bound is congruent with
+    /// the storage var address upper bound.
+    pub fn validate(&self) -> Result<(), StarknetApiError> {
+        let value = self.0.0;
+        let l2_address_upper_bound = Felt::from(*L2_ADDRESS_UPPER_BOUND);
+        if (value > BLOCK_HASH_TABLE_ADDRESS.0.0) && (value < l2_address_upper_bound) {
+            return Ok(());
+        }
+
+        Err(StarknetApiError::OutOfRange { string: format!("[0x2, {l2_address_upper_bound})") })
+    }
+}
+
+impl From<ContractAddress> for Felt {
+    fn from(contract_address: ContractAddress) -> Felt {
+        **contract_address
+    }
+}
+
+impl From<u128> for ContractAddress {
+    fn from(val: u128) -> Self {
+        ContractAddress(PatriciaKey::from(val))
+    }
+}
+
+impl_from_through_intermediate!(u128, ContractAddress, u8, u16, u32, u64);
+
+impl FromStr for ContractAddress {
+    type Err = StarknetApiError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let felt = Felt::from_str(s)
+            .map_err(|e| StarknetApiError::OutOfRange { string: format!("{e}") })?;
+        Ok(ContractAddress(PatriciaKey::try_from(felt)?))
+    }
+}
+
+/// The maximal size of storage var.
+pub const MAX_STORAGE_ITEM_SIZE: u16 = 256;
+/// The prefix used in the calculation of a contract address.
+pub const CONTRACT_ADDRESS_PREFIX: &str = "STARKNET_CONTRACT_ADDRESS";
+/// The size of the contract address domain.
+pub const CONTRACT_ADDRESS_DOMAIN_SIZE: Felt = PATRICIA_KEY_UPPER_BOUND_FELT;
+/// The address upper bound; it is defined to be congruent with the storage var address upper bound.
+pub static L2_ADDRESS_UPPER_BOUND: LazyLock<NonZeroFelt> = LazyLock::new(|| {
+    NonZeroFelt::try_from(CONTRACT_ADDRESS_DOMAIN_SIZE - Felt::from(MAX_STORAGE_ITEM_SIZE)).unwrap()
+});
+
+impl TryFrom<StarkHash> for ContractAddress {
+    type Error = StarknetApiError;
+    fn try_from(hash: StarkHash) -> Result<Self, Self::Error> {
+        Ok(Self(PatriciaKey::try_from(hash)?))
+    }
+}
+
+// TODO(Noa): Add a hash_function as a parameter
+pub fn calculate_contract_address(
+    salt: ContractAddressSalt,
+    class_hash: ClassHash,
+    constructor_calldata: &Calldata,
+    deployer_address: ContractAddress,
+) -> Result<ContractAddress, StarknetApiError> {
+    let constructor_calldata_hash = Pedersen::hash_array(&constructor_calldata.0);
+    let contract_address_prefix = format!("0x{}", hex::encode(CONTRACT_ADDRESS_PREFIX));
+    let address = Pedersen::hash_array(&[
+        Felt::from_hex(contract_address_prefix.as_str()).map_err(|_| {
+            StarknetApiError::OutOfRange { string: contract_address_prefix.clone() }
+        })?,
+        *deployer_address.0.key(),
+        salt.0,
+        class_hash.0,
+        constructor_calldata_hash,
+    ]);
+    let (_, address) = address.div_rem(&L2_ADDRESS_UPPER_BOUND);
+
+    ContractAddress::try_from(address)
+}
+
+/// The hash of a ContractClass.
+// TODO(Dori): create a specialized type for deprecated class hashes, and then ClassHash can use a
+//   PatriciaKey instead of StarkHash as the inner type.
+#[derive(
+    Debug,
+    Default,
+    Copy,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more::Display,
+    derive_more::Deref,
+    SizeOf,
+)]
+pub struct ClassHash(pub StarkHash);
+
+impl From<ClassHash> for Felt {
+    fn from(class_hash: ClassHash) -> Felt {
+        class_hash.0
+    }
+}
+
+/// The hash of a compiled ContractClass.
+#[derive(
+    Debug,
+    Default,
+    Copy,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more::Display,
+    SizeOf,
+)]
+pub struct CompiledClassHash(pub StarkHash);
+
+impl From<CompiledClassHash> for Felt {
+    fn from(compiled_class_hash: CompiledClassHash) -> Felt {
+        compiled_class_hash.0
+    }
+}
+/// A general type for nonces.
+#[derive(
+    Debug,
+    Default,
+    derive_more::Display,
+    Copy,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more::Deref,
+    SizeOf,
+)]
+pub struct Nonce(pub Felt);
+
+impl Nonce {
+    pub fn try_increment(&self) -> Result<Self, StarknetApiError> {
+        // Check if an overflow occurred during increment.
+        let incremented = self.0 + Felt::ONE;
+        if incremented == Felt::ZERO {
+            return Err(StarknetApiError::OutOfRange { string: format!("{self:?}") });
+        }
+        Ok(Self(incremented))
+    }
+
+    pub fn try_decrement(&self) -> Result<Self, StarknetApiError> {
+        // Check if an underflow occurred during decrement.
+        if self.0 == Felt::ZERO {
+            return Err(StarknetApiError::OutOfRange { string: format!("{self:?}") });
+        }
+        Ok(Self(self.0 - Felt::ONE))
+    }
+}
+
+/// The selector of an [EntryPoint](`crate::state::EntryPoint`).
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Default,
+    Eq,
+    PartialEq,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more::Display,
+)]
+pub struct EntryPointSelector(pub StarkHash);
+
+/// The root of the global state at a [Block](`crate::block::Block`)
+/// and [StateUpdate](`crate::state::StateUpdate`).
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Default,
+    Eq,
+    PartialEq,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more::Display,
+)]
+pub struct GlobalRoot(pub StarkHash);
+
+impl GlobalRoot {
+    pub const ROOT_OF_EMPTY_STATE: GlobalRoot = GlobalRoot(HashOutput::ROOT_OF_EMPTY_TREE.0);
+}
+
+// Hex of 'STARKNET_STATE_V0'.
+pub const GLOBAL_STATE_VERSION: Felt =
+    Felt::from_hex_unchecked("0x535441524b4e45545f53544154455f5630");
+
+/// The commitment on the transactions in a [Block](`crate::block::Block`).
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Default,
+    Eq,
+    PartialEq,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more::Display,
+)]
+pub struct TransactionCommitment(pub StarkHash);
+
+/// The commitment on the events in a [Block](`crate::block::Block`).
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Default,
+    Eq,
+    PartialEq,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more::Display,
+)]
+pub struct EventCommitment(pub StarkHash);
+
+/// The commitment on the receipts in a [Block](`crate::block::Block`).
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Default,
+    Eq,
+    PartialEq,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more::Display,
+)]
+pub struct ReceiptCommitment(pub StarkHash);
+
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    Default,
+    Eq,
+    PartialEq,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more::Display,
+)]
+pub struct StateDiffCommitment(pub PoseidonHash);
+
+/// A key for nodes of a Patricia tree.
+// Invariant: key is in range.
+#[derive(
+    Copy,
+    Clone,
+    derive_more::Display,
+    Eq,
+    PartialEq,
+    Default,
+    Hash,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    Ord,
+    derive_more:: Deref,
+    SizeOf,
+)]
+#[display("{}", _0.to_fixed_hex_string())]
+pub struct PatriciaKey(StarkHash);
+
+// 2**251
+pub const PATRICIA_KEY_UPPER_BOUND: &str =
+    "0x800000000000000000000000000000000000000000000000000000000000000";
+pub const PATRICIA_KEY_UPPER_BOUND_FELT: Felt = Felt::from_hex_unchecked(PATRICIA_KEY_UPPER_BOUND);
+
+pub static MAX_PATRICIA_KEY: LazyLock<PatriciaKey> = LazyLock::new(|| {
+    PatriciaKey::try_from(Felt::from_hex_unchecked(PATRICIA_KEY_UPPER_BOUND) - Felt::ONE)
+        .expect("One less than the upper bound")
+});
+
+impl PatriciaKey {
+    pub const ZERO: Self = Self(StarkHash::ZERO);
+    pub const ONE: Self = Self(StarkHash::ONE);
+    pub const TWO: Self = Self(StarkHash::TWO);
+
+    pub fn key(&self) -> &StarkHash {
+        &self.0
+    }
+
+    pub const fn from_hex_unchecked(val: &str) -> Self {
+        Self(StarkHash::from_hex_unchecked(val))
+    }
+}
+
+impl From<u128> for PatriciaKey {
+    fn from(val: u128) -> Self {
+        PatriciaKey::try_from(Felt::from(val)).expect("Failed to convert u128 to PatriciaKey.")
+    }
+}
+
+impl_from_through_intermediate!(u128, PatriciaKey, u8, u16, u32, u64);
+
+impl TryFrom<StarkHash> for PatriciaKey {
+    type Error = StarknetApiError;
+
+    fn try_from(value: StarkHash) -> Result<Self, Self::Error> {
+        if value < CONTRACT_ADDRESS_DOMAIN_SIZE {
+            return Ok(PatriciaKey(value));
+        }
+        Err(StarknetApiError::OutOfRange { string: format!("[0x0, {PATRICIA_KEY_UPPER_BOUND})") })
+    }
+}
+
+impl Debug for PatriciaKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PatriciaKey").field(&self.0).finish()
+    }
+}
+
+/// A utility macro to create a [`PatriciaKey`] from a hex string / unsigned integer representation.
+#[cfg(any(feature = "testing", test))]
+#[macro_export]
+macro_rules! patricia_key {
+    ($s:expr) => {
+        $crate::core::PatriciaKey::try_from($crate::felt!($s)).unwrap()
+    };
+}
+
+/// A utility macro to create a [`ClassHash`] from a hex string / unsigned integer representation.
+#[cfg(any(feature = "testing", test))]
+#[macro_export]
+macro_rules! class_hash {
+    ($s:expr) => {
+        $crate::core::ClassHash($crate::felt!($s))
+    };
+}
+
+/// A utility macro to create a [`ContractAddress`] from a hex string / unsigned integer
+/// representation.
+#[cfg(any(feature = "testing", test))]
+#[macro_export]
+macro_rules! contract_address {
+    ($s:expr) => {
+        $crate::core::ContractAddress($crate::patricia_key!($s))
+    };
+}
+
+/// An Ethereum address.
+#[derive(
+    Debug, Copy, Clone, Default, Eq, PartialEq, Hash, Deserialize, Serialize, PartialOrd, Ord,
+)]
+#[serde(try_from = "PrefixedBytesAsHex<20_usize>", into = "PrefixedBytesAsHex<20_usize>")]
+pub struct EthAddress(pub H160);
+
+#[derive(
+    Debug, Copy, Clone, Default, Eq, PartialEq, Hash, Deserialize, Serialize, PartialOrd, Ord,
+)]
+pub struct L1Address(pub Felt);
+
+impl From<ContractAddress> for L1Address {
+    fn from(address: ContractAddress) -> Self {
+        L1Address(address.0.0)
+    }
+}
+
+impl TryFrom<L1Address> for ContractAddress {
+    type Error = StarknetApiError;
+
+    fn try_from(address: L1Address) -> Result<Self, Self::Error> {
+        Ok(ContractAddress(PatriciaKey::try_from(address.0)?))
+    }
+}
+
+impl From<EthAddress> for L1Address {
+    fn from(address: EthAddress) -> Self {
+        L1Address(address.into())
+    }
+}
+
+impl TryFrom<L1Address> for EthAddress {
+    type Error = StarknetApiError;
+
+    fn try_from(address: L1Address) -> Result<Self, Self::Error> {
+        EthAddress::try_from(address.0)
+    }
+}
+
+impl From<Felt> for L1Address {
+    fn from(felt: Felt) -> Self {
+        L1Address(felt)
+    }
+}
+
+impl From<L1Address> for Felt {
+    fn from(address: L1Address) -> Self {
+        address.0
+    }
+}
+
+impl TryFrom<Felt> for EthAddress {
+    type Error = StarknetApiError;
+    fn try_from(felt: Felt) -> Result<Self, Self::Error> {
+        const COMPLIMENT_OF_H160: usize = std::mem::size_of::<Felt>() - H160::len_bytes();
+
+        let bytes = felt.to_bytes_be();
+        let (rest, h160_bytes) = bytes.split_at(COMPLIMENT_OF_H160);
+        if rest != [0u8; COMPLIMENT_OF_H160] {
+            return Err(StarknetApiError::OutOfRange { string: felt.to_string() });
+        }
+
+        Ok(EthAddress(H160::from_slice(h160_bytes)))
+    }
+}
+
+impl From<EthAddress> for Felt {
+    fn from(value: EthAddress) -> Self {
+        Felt::from_bytes_be_slice(value.0.as_bytes())
+    }
+}
+
+impl TryFrom<PrefixedBytesAsHex<20_usize>> for EthAddress {
+    type Error = StarknetApiError;
+    fn try_from(val: PrefixedBytesAsHex<20_usize>) -> Result<Self, Self::Error> {
+        Ok(EthAddress(H160::from_slice(&val.0)))
+    }
+}
+
+impl From<EthAddress> for PrefixedBytesAsHex<20_usize> {
+    fn from(felt: EthAddress) -> Self {
+        BytesAsHex(felt.0.to_fixed_bytes())
+    }
+}
+
+/// A public key of a sequencer.
+#[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash, Deserialize, Serialize)]
+pub struct SequencerPublicKey(pub PublicKey);
+
+#[derive(
+    Debug, Default, Clone, Copy, Eq, PartialEq, Hash, Deserialize, Serialize, PartialOrd, Ord,
+)]
+pub struct SequencerContractAddress(pub ContractAddress);

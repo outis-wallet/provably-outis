@@ -1,0 +1,247 @@
+use std::sync::LazyLock;
+
+use apollo_starknet_os_program::OS_PROGRAM;
+use ark_bls12_381::Fr;
+use ark_ff::{BigInteger, PrimeField};
+use blockifier::blockifier_versioned_constants::VersionedConstants;
+use c_kzg::{KzgCommitment, BYTES_PER_BLOB};
+use cairo_vm::types::relocatable::MaybeRelocatable;
+use num_bigint::BigUint;
+use num_traits::{Num, One, Zero};
+use rstest::rstest;
+use starknet_api::versioned_constants_logic::VersionedConstantsTrait;
+use starknet_types_core::felt::Felt;
+
+use crate::hints::hint_implementation::kzg::implementation::MAX_N_BLOBS_PER_TX;
+use crate::hints::hint_implementation::kzg::test_utils::{
+    estimate_os_kzg_commitment_computation_resources,
+    run_compute_os_kzg_commitment_info,
+};
+use crate::hints::hint_implementation::kzg::utils::{
+    bit_reversal,
+    decode_blobs,
+    deserialize_blob,
+    polynomial_coefficients_to_blob,
+    serialize_blob,
+    split_commitment,
+    BLS_PRIME,
+    FIELD_ELEMENTS_PER_BLOB,
+};
+use crate::hints::vars::CairoStruct;
+use crate::io::os_output::OsKzgCommitmentInfo;
+use crate::io::os_output_types::TryFromOutputIter;
+use crate::io::test_utils::validate_kzg_segment;
+use crate::vm_utils::get_field_offset;
+
+static BLOB_SUBGROUP_GENERATOR: LazyLock<BigUint> = LazyLock::new(|| {
+    BigUint::from_str_radix(
+        "39033254847818212395286706435128746857159659164139250548781411570340225835782",
+        10,
+    )
+    .unwrap()
+});
+
+static FFT_REGRESSION_INPUT: LazyLock<Vec<Fr>> = LazyLock::new(|| {
+    serde_json::from_str::<Vec<String>>(include_str!("fft_regression_input.json"))
+        .unwrap()
+        .into_iter()
+        .map(|s| Fr::from(BigUint::from_str_radix(&s, 10).unwrap()))
+        .collect()
+});
+static FFT_REGRESSION_OUTPUT: LazyLock<[u8; BYTES_PER_BLOB]> = LazyLock::new(|| {
+    serde_json::from_str::<Vec<u8>>(include_str!("fft_regression_output.json"))
+        .unwrap()
+        .try_into()
+        .unwrap()
+});
+static BLOB_REGRESSION_INPUT: LazyLock<Vec<Fr>> = LazyLock::new(|| {
+    serde_json::from_str::<Vec<String>>(include_str!("blob_regression_input.json"))
+        .unwrap()
+        .into_iter()
+        .map(|s| Fr::from(BigUint::from_str_radix(&s, 10).unwrap()))
+        .collect()
+});
+static BLOB_REGRESSION_OUTPUT: LazyLock<[u8; BYTES_PER_BLOB]> = LazyLock::new(|| {
+    serde_json::from_str::<Vec<u8>>(include_str!("blob_regression_output.json"))
+        .unwrap()
+        .try_into()
+        .unwrap()
+});
+
+fn generate(generator: &BigUint) -> Vec<BigUint> {
+    let mut array = vec![BigUint::one()];
+    for _ in 1..FIELD_ELEMENTS_PER_BLOB {
+        let last = array.last().unwrap().clone();
+        let next = (generator * &last) % &*BLS_PRIME;
+        array.push(next);
+    }
+    bit_reversal(&mut array).unwrap();
+
+    array
+}
+
+#[test]
+fn test_blob_bytes_serde() {
+    let serded_blob = deserialize_blob(&serialize_blob(&BLOB_REGRESSION_INPUT).unwrap());
+    assert_eq!(*BLOB_REGRESSION_INPUT, serded_blob);
+}
+
+/// All the expected values are checked using the contract logic given in the Starknet core
+/// contract:
+/// https://github.com/starkware-libs/cairo-lang/blob/a86e92bfde9c171c0856d7b46580c66e004922f3/src/starkware/starknet/solidity/Starknet.sol#L209.
+#[rstest]
+#[case(
+    BigUint::from_str_radix(
+        "b7a71dc9d8e15ea474a69c0531e720cf5474b189ac9afc81590b91a225b1bf7fa5877ec546d090e0059f019c74675362",
+        16,
+    ).unwrap(),
+    (
+        Felt::from_hex_unchecked("590b91a225b1bf7fa5877ec546d090e0059f019c74675362"),
+        Felt::from_hex_unchecked("b7a71dc9d8e15ea474a69c0531e720cf5474b189ac9afc81"),
+    )
+)]
+#[case(
+    BigUint::from_str_radix(
+        "a797c1973c99961e357246ee81bde0acbdd27e801d186ccb051732ecbaa75842afd3d8860d40b3e8eeea433bce18b5c8",
+        16,
+    ).unwrap(),
+    (
+        Felt::from_hex_unchecked("51732ecbaa75842afd3d8860d40b3e8eeea433bce18b5c8"),
+        Felt::from_hex_unchecked("a797c1973c99961e357246ee81bde0acbdd27e801d186ccb"),
+    )
+)]
+fn test_split_commitment_function(
+    #[case] commitment: BigUint,
+    #[case] expected_output: (Felt, Felt),
+) {
+    let commitment = KzgCommitment::from_bytes(&commitment.to_bytes_be()).unwrap();
+    assert_eq!(split_commitment(&commitment).unwrap(), expected_output);
+}
+
+#[rstest]
+#[case::zero(vec![Fr::zero()], &[0u8; BYTES_PER_BLOB])]
+#[case::one(
+    vec![Fr::one()],
+    &(0..BYTES_PER_BLOB)
+        .map(|i| if (i + 1).is_multiple_of(32) { 1 } else { 0 })
+        .collect::<Vec<u8>>()
+        .try_into()
+        .unwrap()
+)]
+#[case::degree_one(
+    vec![Fr::zero(), Fr::from(10_u8)],
+    &serialize_blob(
+        &generate(&BLOB_SUBGROUP_GENERATOR)
+            .into_iter()
+            .map(|subgroup_elm| Fr::from((BigUint::from(10_u8) * subgroup_elm) % &*BLS_PRIME))
+            .collect::<Vec<Fr>>(),
+    ).unwrap()
+)]
+#[case::original(BLOB_REGRESSION_INPUT.to_vec(), &BLOB_REGRESSION_OUTPUT)]
+#[case::generated(FFT_REGRESSION_INPUT.to_vec(), &FFT_REGRESSION_OUTPUT)]
+fn test_fft_blob_regression(
+    #[case] input: Vec<Fr>,
+    #[case] expected_output: &[u8; BYTES_PER_BLOB],
+) {
+    let bytes = polynomial_coefficients_to_blob(input).unwrap();
+    assert_eq!(&bytes, expected_output);
+}
+
+#[rstest]
+fn test_serialize_deserialize_blob() {
+    let blob: [Fr; FIELD_ELEMENTS_PER_BLOB] = (1..=FIELD_ELEMENTS_PER_BLOB)
+        .map(|i| Fr::from(BigUint::from(i)))
+        .collect::<Vec<Fr>>()
+        .try_into()
+        .unwrap();
+    let bytes = serialize_blob(&blob).unwrap();
+    let deserialized_blob = deserialize_blob(&bytes);
+    assert_eq!(deserialized_blob, blob);
+}
+
+#[rstest]
+#[case::simple(vec![Fr::from(1_u8), Fr::from(2_u8), Fr::from(3_u8)])]
+#[case::zero(vec![Fr::zero()])]
+#[case::one(vec![Fr::one()])]
+#[case::regression(BLOB_REGRESSION_INPUT.to_vec())]
+fn test_decode_blobs(#[case] coefficients: Vec<Fr>) {
+    let raw_blob = polynomial_coefficients_to_blob(coefficients.clone()).unwrap();
+    let decoded = decode_blobs(vec![raw_blob]).unwrap();
+    let mut expected = coefficients.clone();
+    expected.resize(FIELD_ELEMENTS_PER_BLOB, Fr::zero());
+    let expected_felt: Vec<Felt> = expected
+        .iter()
+        .map(|fr| {
+            let bytes = fr.into_bigint().to_bytes_be();
+            Felt::from_bytes_be_slice(&bytes)
+        })
+        .collect();
+    assert_eq!(decoded, expected_felt);
+}
+
+#[rstest]
+fn test_os_kzg_commitment_resources_estimation(
+    #[values(1, 2, 99, 2001, 2048, 4096, 7000, 12000)] state_diff_size: usize,
+) {
+    let vc = VersionedConstants::latest_constants();
+    let actual_resources = run_compute_os_kzg_commitment_info(state_diff_size)
+        .0
+        .get_execution_resources()
+        .unwrap()
+        .filter_unused_builtins();
+    let estimated_resources = estimate_os_kzg_commitment_computation_resources(vc, state_diff_size);
+    assert_eq!(actual_resources, estimated_resources);
+}
+
+#[rstest]
+fn test_commitment_happy_flow(
+    #[values(1, 555, 7000, FIELD_ELEMENTS_PER_BLOB * MAX_N_BLOBS_PER_TX)] state_diff_size: usize,
+) {
+    let (runner, da_segment) = run_compute_os_kzg_commitment_info(state_diff_size);
+    let da_segment = da_segment.unwrap();
+
+    // Extract KZG commitment info from output.
+    let return_values = runner.vm.get_return_values(1).unwrap();
+    let [MaybeRelocatable::RelocatableValue(cairo_kzg_struct_ptr)] = return_values.as_slice()
+    else {
+        panic!("Unexpected output structure: {0:?}.", runner.vm.get_return_values(1).unwrap());
+    };
+    let field_address = |field_name: &str| {
+        (*cairo_kzg_struct_ptr
+            + get_field_offset(CairoStruct::OsKzgCommitmentInfo, field_name, &*OS_PROGRAM).unwrap())
+        .unwrap()
+    };
+    let z = *runner.vm.get_integer(field_address("z")).unwrap();
+    let n_blobs =
+        usize::try_from(*runner.vm.get_integer(field_address("n_blobs")).unwrap()).unwrap();
+    let commitments = runner
+        .vm
+        .get_integer_range(
+            runner.vm.get_relocatable(field_address("kzg_commitments")).unwrap(),
+            n_blobs * 2,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|felt| felt.into_owned())
+        .collect::<Vec<Felt>>();
+    let evals = runner
+        .vm
+        .get_integer_range(runner.vm.get_relocatable(field_address("evals")).unwrap(), n_blobs * 2)
+        .unwrap()
+        .into_iter()
+        .map(|felt| felt.into_owned())
+        .collect::<Vec<Felt>>();
+    let kzg_segment = OsKzgCommitmentInfo::try_from_output_iter(
+        &mut [vec![z], vec![Felt::from(n_blobs)], commitments, evals].concat().into_iter(),
+        None,
+    )
+    .unwrap();
+
+    validate_kzg_segment(&da_segment, &kzg_segment);
+}
+
+#[rstest]
+#[should_panic(expected = "Invalid number of blobs.")]
+fn test_invalid_number_of_blobs() {
+    run_compute_os_kzg_commitment_info(0);
+}

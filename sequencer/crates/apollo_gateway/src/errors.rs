@@ -1,0 +1,404 @@
+use apollo_class_manager_types::{ClassManagerClientError, ClassManagerError};
+use apollo_gateway_config::compiler_version::{VersionId, VersionIdError};
+use apollo_gateway_types::deprecated_gateway_error::{
+    KnownStarknetErrorCode,
+    StarknetError,
+    StarknetErrorCode,
+};
+use apollo_gateway_types::errors::GatewaySpecError;
+use apollo_gateway_types::gateway_types::SUPPORTED_TRANSACTION_VERSIONS;
+use apollo_mempool_types::communication::{MempoolClientError, MempoolClientResult};
+use apollo_mempool_types::errors::MempoolError;
+use apollo_transaction_converter::TransactionConverterError;
+use starknet_api::block::GasPrice;
+use starknet_api::executable_transaction::ValidateCompiledClassHashError;
+use starknet_api::execution_resources::GasAmount;
+use starknet_api::transaction::fields::{AllResourceBounds, TransactionSignature};
+use starknet_api::StarknetApiError;
+use thiserror::Error;
+use tracing::debug;
+
+pub type GatewayResult<T> = Result<T, StarknetError>;
+
+#[derive(Debug, Error)]
+#[cfg_attr(any(test, feature = "testing"), derive(PartialEq))]
+pub enum StatelessTransactionValidatorError {
+    #[error(
+        "Calldata length exceeded maximum: length {calldata_length}
+        (allowed length: {max_calldata_length})."
+    )]
+    CalldataTooLong { calldata_length: usize, max_calldata_length: usize },
+    #[error(
+        "Cannot declare contract class with bytecode size of {contract_bytecode_size}; max \
+         allowed size: {max_contract_bytecode_size}."
+    )]
+    ContractBytecodeSizeTooLarge {
+        contract_bytecode_size: usize,
+        max_contract_bytecode_size: usize,
+    },
+    #[error(
+        "Cannot declare contract class with size of {contract_class_object_size}; max allowed \
+         size: {max_contract_class_object_size}."
+    )]
+    ContractClassObjectSizeTooLarge {
+        contract_class_object_size: usize,
+        max_contract_class_object_size: usize,
+    },
+    #[error("Entry points must be unique and sorted.")]
+    EntryPointsNotUniquelySorted,
+    #[error("Invalid {field_name} data availability mode.")]
+    InvalidDataAvailabilityMode { field_name: String },
+    #[error(transparent)]
+    InvalidSierraVersion(#[from] VersionIdError),
+    #[error(
+        "Signature length exceeded maximum: length {signature_length}
+        (allowed length: {max_signature_length})."
+    )]
+    SignatureTooLong { signature_length: usize, max_signature_length: usize },
+    #[error(transparent)]
+    StarknetApiError(#[from] StarknetApiError),
+    #[error(
+        "Sierra versions older than {min_version} or newer than {max_version} are not supported. \
+         The Sierra version of the declared contract is {version}."
+    )]
+    UnsupportedSierraVersion { version: VersionId, min_version: VersionId, max_version: VersionId },
+    #[error("The field {field_name} should be empty.")]
+    NonEmptyField { field_name: String },
+    #[error(
+        "At least one resource bound (L1, L2, or L1 Data) must be non-zero. Got:
+        {resource_bounds:?}."
+    )]
+    ZeroResourceBounds { resource_bounds: AllResourceBounds },
+    #[error(
+        "Max gas price is too low: {gas_price:?}, minimum required gas price: {min_gas_price:?}."
+    )]
+    MaxGasPriceTooLow { gas_price: GasPrice, min_gas_price: u128 },
+    #[error(
+        "Max gas amount is too high: {gas_amount:?}, maximum allowed gas amount: \
+         {max_gas_amount:?}."
+    )]
+    MaxGasAmountTooHigh { gas_amount: GasAmount, max_gas_amount: u64 },
+    #[error(
+        "Transactions with client-side proving (non-empty proof_facts or proof) are not accepted."
+    )]
+    ClientSideProvingNotAllowed,
+    #[error(
+        "Invalid proof data: Proof facts and proof must either both be present or both be absent:
+        (has_proof_facts: {has_proof_facts:?}, has_proof: {has_proof:?})."
+    )]
+    ProofFactsAndProofConsistency { has_proof_facts: bool, has_proof: bool },
+    #[error(
+        "Client-side proof is too large: size {proof_size} (maximum allowed: {max_proof_size})."
+    )]
+    ProofTooLarge { proof_size: usize, max_proof_size: usize },
+}
+
+impl From<StatelessTransactionValidatorError> for GatewaySpecError {
+    fn from(e: StatelessTransactionValidatorError) -> Self {
+        match e {
+            StatelessTransactionValidatorError::ContractClassObjectSizeTooLarge { .. }
+            | StatelessTransactionValidatorError::ContractBytecodeSizeTooLarge { .. } => {
+                GatewaySpecError::ContractClassSizeIsTooLarge
+            }
+            StatelessTransactionValidatorError::UnsupportedSierraVersion { .. } => {
+                GatewaySpecError::UnsupportedContractClassVersion
+            }
+            StatelessTransactionValidatorError::CalldataTooLong { .. }
+            | StatelessTransactionValidatorError::EntryPointsNotUniquelySorted
+            | StatelessTransactionValidatorError::InvalidDataAvailabilityMode { .. }
+            | StatelessTransactionValidatorError::InvalidSierraVersion(..)
+            | StatelessTransactionValidatorError::NonEmptyField { .. }
+            | StatelessTransactionValidatorError::SignatureTooLong { .. }
+            | StatelessTransactionValidatorError::StarknetApiError(..)
+            | StatelessTransactionValidatorError::ZeroResourceBounds { .. }
+            | StatelessTransactionValidatorError::MaxGasPriceTooLow { .. }
+            | StatelessTransactionValidatorError::MaxGasAmountTooHigh { .. }
+            | StatelessTransactionValidatorError::ClientSideProvingNotAllowed
+            | StatelessTransactionValidatorError::ProofFactsAndProofConsistency { .. }
+            | StatelessTransactionValidatorError::ProofTooLarge { .. } => {
+                GatewaySpecError::ValidationFailure { data: e.to_string() }
+            }
+        }
+    }
+}
+
+impl From<StatelessTransactionValidatorError> for StarknetError {
+    fn from(e: StatelessTransactionValidatorError) -> Self {
+        let message = format!("{e}");
+        let code = match e {
+            StatelessTransactionValidatorError::ContractBytecodeSizeTooLarge { .. } => {
+                StarknetErrorCode::KnownErrorCode(
+                    KnownStarknetErrorCode::ContractBytecodeSizeTooLarge,
+                )
+            }
+            StatelessTransactionValidatorError::ContractClassObjectSizeTooLarge { .. } => {
+                StarknetErrorCode::KnownErrorCode(
+                    KnownStarknetErrorCode::ContractClassObjectSizeTooLarge,
+                )
+            }
+            StatelessTransactionValidatorError::UnsupportedSierraVersion { .. } => {
+                StarknetErrorCode::UnknownErrorCode(
+                    "StarknetErrorCode.INVALID_CONTRACT_CLASS".to_string(),
+                )
+            }
+            StatelessTransactionValidatorError::CalldataTooLong { .. } => {
+                StarknetErrorCode::UnknownErrorCode(
+                    "StarknetErrorCode.CALLDATA_TOO_LONG".to_string(),
+                )
+            }
+            StatelessTransactionValidatorError::EntryPointsNotUniquelySorted =>
+            // Error does not exist in deprecated GW.
+            {
+                StarknetErrorCode::UnknownErrorCode(
+                    "StarknetErrorCode.ENTRY_POINTS_NOT_UNIQUELY_SORTED".to_string(),
+                )
+            }
+            StatelessTransactionValidatorError::InvalidDataAvailabilityMode { .. } =>
+            // Error does not exist in deprecated GW.
+            {
+                StarknetErrorCode::UnknownErrorCode(
+                    "StarknetErrorCode.INVALID_DATA_AVAILABILITY_MODE".to_string(),
+                )
+            }
+            StatelessTransactionValidatorError::InvalidSierraVersion(..) =>
+            // Error does not exist in deprecated GW.
+            {
+                StarknetErrorCode::UnknownErrorCode(
+                    "StarknetErrorCode.INVALID_SIERRA_VERSION".to_string(),
+                )
+            }
+            StatelessTransactionValidatorError::MaxGasAmountTooHigh { .. } => {
+                StarknetErrorCode::UnknownErrorCode(
+                    "StarknetErrorCode.MAX_GAS_AMOUNT_TOO_HIGH".to_string(),
+                )
+            }
+            StatelessTransactionValidatorError::NonEmptyField { .. } =>
+            // Error does not exist in deprecated GW.
+            {
+                StarknetErrorCode::UnknownErrorCode("StarknetErrorCode.NON_EMPTY_FIELD".to_string())
+            }
+            StatelessTransactionValidatorError::SignatureTooLong { .. } => {
+                StarknetErrorCode::UnknownErrorCode(
+                    "StarknetErrorCode.SIGNATURE_TOO_LONG".to_string(),
+                )
+            }
+            StatelessTransactionValidatorError::StarknetApiError(e) => {
+                return convert_sn_api_error(e);
+            }
+            StatelessTransactionValidatorError::ZeroResourceBounds { .. }
+            | StatelessTransactionValidatorError::MaxGasPriceTooLow { .. } => {
+                StarknetErrorCode::KnownErrorCode(KnownStarknetErrorCode::InsufficientMaxFee)
+            }
+            StatelessTransactionValidatorError::ClientSideProvingNotAllowed => {
+                StarknetErrorCode::UnknownErrorCode(
+                    "StarknetErrorCode.CLIENT_SIDE_PROVING_NOT_ALLOWED".to_string(),
+                )
+            }
+            StatelessTransactionValidatorError::ProofFactsAndProofConsistency { .. } => {
+                StarknetErrorCode::UnknownErrorCode(
+                    "StarknetErrorCode.PROOF_FACTS_AND_PROOF_CONSISTENCY".to_string(),
+                )
+            }
+            StatelessTransactionValidatorError::ProofTooLarge { .. } => {
+                StarknetErrorCode::UnknownErrorCode("StarknetErrorCode.PROOF_TOO_LARGE".to_string())
+            }
+        };
+        StarknetError { code, message }
+    }
+}
+
+pub fn mempool_client_err_to_deprecated_gw_err(
+    tx_signature: &TransactionSignature,
+    err: MempoolClientError,
+) -> StarknetError {
+    let code = match &err {
+        MempoolClientError::ClientError(client_error) => {
+            return StarknetError::internal_with_signature_logging(
+                "Mempool client error",
+                tx_signature,
+                client_error,
+            );
+        }
+        MempoolClientError::MempoolError(mempool_error) => {
+            debug!("Mempool error: {}", mempool_error);
+            match mempool_error {
+                MempoolError::DuplicateNonce { .. } => StarknetErrorCode::KnownErrorCode(
+                    KnownStarknetErrorCode::InvalidTransactionNonce,
+                ),
+                MempoolError::NonceTooLarge(..) =>
+                // We didn't have this kind of an error.
+                {
+                    StarknetErrorCode::UnknownErrorCode(
+                        "StarknetErrorCode.NONCE_TOO_LARGE".to_string(),
+                    )
+                }
+                MempoolError::NonceTooOld { .. } => StarknetErrorCode::KnownErrorCode(
+                    KnownStarknetErrorCode::InvalidTransactionNonce,
+                ),
+                MempoolError::DuplicateTransaction { .. } => {
+                    StarknetErrorCode::KnownErrorCode(KnownStarknetErrorCode::DuplicatedTransaction)
+                }
+                MempoolError::MempoolFull => StarknetErrorCode::KnownErrorCode(
+                    KnownStarknetErrorCode::TransactionLimitExceeded,
+                ),
+                MempoolError::P2pPropagatorClientError { .. } => {
+                    // Not an error from the gateway's perspective.
+                    return StarknetError::internal_with_signature_logging(
+                        "Mempool p2p propagator client error",
+                        tx_signature,
+                        mempool_error,
+                    );
+                }
+                MempoolError::TransactionNotFound { .. } => {
+                    // This error is not expected to happen within the gateway, only from other
+                    // mempool clients.
+                    unreachable!("Unexpected mempool error in gateway context: {}", mempool_error);
+                }
+            }
+        }
+    };
+    StarknetError { code, message: format!("{:?}", err) }
+}
+
+/// Converts a mempool client result to a gateway result. Some errors variants are unreachable in
+/// Gateway context, and some are not considered errors from the gateway's perspective.
+pub fn mempool_client_result_to_deprecated_gw_result(
+    tx_signature: &TransactionSignature,
+    value: MempoolClientResult<()>,
+) -> GatewayResult<()> {
+    value.map_err(|err| mempool_client_err_to_deprecated_gw_err(tx_signature, err))
+}
+
+pub type StatelessTransactionValidatorResult<T> = Result<T, StatelessTransactionValidatorError>;
+
+pub type StatefulTransactionValidatorResult<T> = Result<T, StarknetError>;
+
+pub fn transaction_converter_err_to_deprecated_gw_err(
+    tx_signature: &TransactionSignature,
+    err: TransactionConverterError,
+) -> StarknetError {
+    match err {
+        TransactionConverterError::ProofManagerClientError(err) => {
+            StarknetError::internal_with_logging("Proof manager client error", err)
+        }
+        TransactionConverterError::ProofVerificationError(err) => StarknetError {
+            code: StarknetErrorCode::KnownErrorCode(KnownStarknetErrorCode::InvalidProof),
+            message: format!("Proof verification error: {err}"),
+        },
+        TransactionConverterError::ValidateCompiledClassHashError(err) => {
+            convert_compiled_class_hash_error(err)
+        }
+        TransactionConverterError::ClassManagerClientError(err) => {
+            convert_class_manager_client_error(tx_signature, err)
+        }
+        // Internal error because the class manager should have the class in its storage.
+        TransactionConverterError::ClassNotFound { .. } => {
+            StarknetError::internal_with_signature_logging("Class not found", tx_signature, err)
+        }
+        TransactionConverterError::ProofNotFound { .. } => {
+            StarknetError::internal_with_signature_logging("Proof not found", tx_signature, err)
+        }
+        TransactionConverterError::StarknetApiError(err) => convert_sn_api_error(err),
+    }
+}
+
+fn convert_compiled_class_hash_error(err: ValidateCompiledClassHashError) -> StarknetError {
+    let ValidateCompiledClassHashError::CompiledClassHashMismatch {
+        computed_class_hash,
+        supplied_class_hash,
+    } = err;
+    StarknetError {
+        code: StarknetErrorCode::KnownErrorCode(KnownStarknetErrorCode::InvalidCompiledClassHash),
+        message: format!(
+            "Computed compiled class hash: {computed_class_hash} does not match the given value: \
+             {supplied_class_hash}.",
+        ),
+    }
+}
+
+fn convert_class_manager_client_error(
+    tx_signature: &TransactionSignature,
+    err: ClassManagerClientError,
+) -> StarknetError {
+    match err {
+        ClassManagerClientError::ClassManagerError(err) => {
+            convert_class_manager_error(tx_signature, err)
+        }
+        ClassManagerClientError::ClientError(_) => StarknetError::internal_with_signature_logging(
+            "Class manager client error",
+            tx_signature,
+            err,
+        ),
+    }
+}
+
+fn convert_class_manager_error(
+    tx_signature: &TransactionSignature,
+    err: ClassManagerError,
+) -> StarknetError {
+    match err {
+        ClassManagerError::SierraCompiler { .. } => StarknetError {
+            code: StarknetErrorCode::KnownErrorCode(KnownStarknetErrorCode::CompilationFailed),
+            message: err.to_string(),
+        },
+        ClassManagerError::ContractClassObjectSizeTooLarge { .. } => StarknetError {
+            code: StarknetErrorCode::KnownErrorCode(
+                KnownStarknetErrorCode::ContractClassObjectSizeTooLarge,
+            ),
+            message: err.to_string(),
+        },
+        ClassManagerError::UnsupportedContractClassVersion(_) => StarknetError {
+            code: StarknetErrorCode::KnownErrorCode(
+                KnownStarknetErrorCode::InvalidContractClassVersion,
+            ),
+            message: err.to_string(),
+        },
+        ClassManagerError::ClassSerde(_)
+        | ClassManagerError::ClassStorage(_)
+        | ClassManagerError::Client(_) => {
+            StarknetError::internal_with_signature_logging("Class manager error", tx_signature, err)
+        }
+    }
+}
+
+fn convert_sn_api_error(err: StarknetApiError) -> StarknetError {
+    match err {
+        StarknetApiError::InvalidStarknetVersion(tx_version) => StarknetError {
+            code: StarknetErrorCode::KnownErrorCode(
+                KnownStarknetErrorCode::InvalidTransactionVersion,
+            ),
+            message: format!(
+                "Transaction version {tx_version:?} is not supported. Supported versions: \
+                 {SUPPORTED_TRANSACTION_VERSIONS:?}.",
+            ),
+        },
+        StarknetApiError::ContractClassVersionSierraProgramLengthMismatch { .. }
+        | StarknetApiError::ContractClassVersionMismatch { .. } => StarknetError {
+            code: StarknetErrorCode::KnownErrorCode(
+                KnownStarknetErrorCode::InvalidContractClassVersion,
+            ),
+            message: err.to_string(),
+        },
+        StarknetApiError::ZeroGasPrice
+        | StarknetApiError::GasPriceConversionError(..)
+        | StarknetApiError::UnknownTransactionType(..)
+        | StarknetApiError::InvalidResourceMappingInitializer(..)
+        | StarknetApiError::ParseIntError(..)
+        | StarknetApiError::BlockHashVersion { .. }
+        | StarknetApiError::ParseSierraVersionError(..)
+        | StarknetApiError::ResourceHexToFeltConversion(..)
+        | StarknetApiError::OutOfRange { .. }
+        | StarknetApiError::InvalidChainIdHex(..)
+        | StarknetApiError::MissingBlockHeaderCommitments { .. }
+        | StarknetApiError::InvalidProofFacts(..) => StarknetError {
+            code: StarknetErrorCode::KnownErrorCode(KnownStarknetErrorCode::MalformedRequest),
+            message: err.to_string(),
+        },
+        StarknetApiError::DeclareTransactionCasmHashMissMatch(err) => StarknetError {
+            code: StarknetErrorCode::KnownErrorCode(
+                KnownStarknetErrorCode::InvalidCompiledClassHash,
+            ),
+            message: err.to_string(),
+        },
+    }
+}

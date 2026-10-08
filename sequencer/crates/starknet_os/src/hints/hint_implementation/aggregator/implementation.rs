@@ -1,0 +1,110 @@
+use starknet_types_core::felt::Felt;
+
+use crate::hint_processor::aggregator_hint_processor::{AggregatorHintProcessor, DataAvailability};
+use crate::hint_processor::common_hint_processor::CommonHintProcessor;
+use crate::hints::error::{OsHintError, OsHintResult};
+use crate::hints::hint_implementation::aggregator::utils::FullOsOutputsData;
+use crate::hints::types::HintContext;
+use crate::hints::vars::Ids;
+use crate::io::os_output_types::TryFromOutputIter;
+use crate::vm_utils::LoadIntoVmMemory;
+
+pub(crate) fn allocate_segments_for_messages(mut ctx: HintContext<'_>) -> OsHintResult {
+    let segment1 = ctx.vm.add_temporary_segment();
+    let segment2 = ctx.vm.add_temporary_segment();
+    let initial_carried_outputs = ctx.vm.gen_arg(&vec![segment1, segment2])?;
+    ctx.insert_value(Ids::InitialCarriedOutputs, initial_carried_outputs)?;
+    Ok(())
+}
+
+pub(crate) fn disable_da_page_creation(
+    hint_processor: &mut AggregatorHintProcessor<'_>,
+    _ctx: HintContext<'_>,
+) -> OsHintResult {
+    // Note that `serialize_os_output` splits its output to memory pages (see
+    // `OutputBuiltinRunner.add_page`).
+    // Since this output is only used internally and will not be used in the final fact, we need to
+    // disable page creation.
+    hint_processor.serialize_data_availability_create_pages = false;
+    Ok(())
+}
+
+pub(crate) fn get_os_output_for_inner_blocks(
+    hint_processor: &mut AggregatorHintProcessor<'_>,
+    mut ctx: HintContext<'_>,
+) -> OsHintResult {
+    let mut bootloader_iter = hint_processor
+        .input
+        .bootloader_output
+        .take()
+        .ok_or(OsHintError::AggregatorBootloaderInputAlreadyConsumed)?
+        .into_iter();
+
+    // Regardless of encryption mode: OS outputs that reach the aggregator are never
+    // encrypted. No need to pass any decryption data here.
+    let FullOsOutputsData { outputs, n_outputs, program_hash } =
+        FullOsOutputsData::try_from_output_iter(&mut bootloader_iter, None)?;
+
+    ctx.insert_value(Ids::OsProgramHash, program_hash)?;
+    ctx.insert_value(Ids::NTasks, n_outputs)?;
+
+    let os_output_ptr = ctx.get_ptr(Ids::OsOutputs)?;
+    outputs.load_into_vm_memory(ctx.vm, os_output_ptr)?;
+    Ok(())
+}
+
+pub(crate) fn get_aggregator_output(
+    hint_processor: &mut AggregatorHintProcessor<'_>,
+    _ctx: HintContext<'_>,
+) -> OsHintResult {
+    // This impl differs from the python one, as we don't need to support an input of
+    // polynomial_coefficients_to_kzg_commitment function anymore.
+    hint_processor.serialize_data_availability_create_pages = true;
+    Ok(())
+}
+
+pub(crate) fn write_da_segment(
+    hint_processor: &mut AggregatorHintProcessor<'_>,
+    _ctx: HintContext<'_>,
+) -> OsHintResult {
+    if let DataAvailability::Blob(da_file_path) = hint_processor.input.da.clone() {
+        let da_segment = hint_processor.get_da_segment();
+
+        std::fs::write(da_file_path, serde_json::to_string(&da_segment)?)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn get_use_kzg_da_and_full_output_from_input(
+    hint_processor: &mut AggregatorHintProcessor<'_>,
+    mut ctx: HintContext<'_>,
+) -> OsHintResult {
+    let use_kzg_da: Felt = match hint_processor.input.da {
+        DataAvailability::Blob(_) => true,
+        DataAvailability::CallData => false,
+    }
+    .into();
+    let full_output: Felt = hint_processor.input.full_output.into();
+    ctx.insert_value(Ids::UseKzgDa, use_kzg_da)?;
+    ctx.insert_value(Ids::FullOutput, full_output)?;
+    Ok(())
+}
+
+pub(crate) fn set_state_update_pointers_to_none<CHP: CommonHintProcessor>(
+    hint_processor: &mut CHP,
+    _ctx: HintContext<'_>,
+) -> OsHintResult {
+    *hint_processor.get_mut_state_update_pointers() = None;
+    Ok(())
+}
+
+pub(crate) fn get_chain_id_and_fee_token_address_from_input(
+    hint_processor: &mut AggregatorHintProcessor<'_>,
+    mut ctx: HintContext<'_>,
+) -> OsHintResult {
+    let chain_id: Felt = hint_processor.input.chain_id;
+    let fee_token_address: Felt = hint_processor.input.fee_token_address;
+    ctx.insert_value(Ids::ChainId, chain_id)?;
+    ctx.insert_value(Ids::FeeTokenAddress, fee_token_address)?;
+    Ok(())
+}

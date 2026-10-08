@@ -1,0 +1,5 @@
+include: configs/overlays/hybrid/common/services/committer.yaml
+
+config:
+  sequencerConfig:
+    committer_config.storage_config.cache_size: 50000000

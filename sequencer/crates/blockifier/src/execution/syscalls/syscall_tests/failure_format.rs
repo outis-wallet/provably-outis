@@ -1,0 +1,30 @@
+use starknet_api::core::{ContractAddress, EntryPointSelector};
+use starknet_api::felt;
+
+use crate::execution::call_info::{CallExecution, CallInfo, Retdata};
+use crate::execution::errors::EntryPointExecutionError;
+use crate::execution::stack_trace::{extract_trailing_cairo1_revert_trace, Cairo1RevertHeader};
+
+#[test]
+fn test_syscall_failure_format() {
+    let execution_failure = "0x457865637574696f6e206661696c757265";
+    let error_data = Retdata(vec![felt!(execution_failure)]);
+    let callinfo = CallInfo {
+        execution: CallExecution { retdata: error_data, failed: true, ..Default::default() },
+        ..Default::default()
+    };
+    let error = EntryPointExecutionError::ExecutionFailed {
+        error_trace: extract_trailing_cairo1_revert_trace(&callinfo, Cairo1RevertHeader::Execution),
+    };
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "Execution failed. Failure reason:
+Error in contract (contract address: {:#066x}, class hash: _, selector: {:#066x}):
+{execution_failure} ('Execution failure').
+",
+            ContractAddress::default().0.key(),
+            EntryPointSelector::default().0
+        )
+    );
+}

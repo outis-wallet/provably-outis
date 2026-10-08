@@ -1,0 +1,5 @@
+include: configs/overlays/hybrid/common/services/sierra-compiler.yaml
+
+config:
+  sequencerConfig:
+    sierra_compiler_config.audited_libfuncs_only: true

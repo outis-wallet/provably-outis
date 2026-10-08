@@ -1,0 +1,58 @@
+use serde::Deserialize;
+use starknet_api::block::{GasPrice, StarknetVersion};
+use starknet_api::define_versioned_constants;
+use starknet_api::execution_resources::GasAmount;
+use starknet_api::versioned_constants_logic::VersionedConstantsTrait;
+use thiserror::Error;
+
+#[cfg(test)]
+#[path = "test.rs"]
+mod test;
+
+/// Versioned constants for the Consensus.
+#[derive(Clone, Debug, Deserialize)]
+pub struct VersionedConstants {
+    ///  This is used to calculate the base gas price for the next block according to EIP-1559 and
+    /// serves as a sensitivity parameter that limits the maximum rate of change of the gas price
+    /// between consecutive blocks.
+    pub gas_price_max_change_denominator: u128,
+    /// The minimum gas price in fri.
+    pub min_gas_price: GasPrice,
+    /// Ceiling on the L2 gas price, as a multiple of the minimum gas price in force for the
+    /// height. Must be greater than one. Every version's resource states it explicitly.
+    pub max_gas_price_multiplier: u128,
+    /// The maximum block size in gas units.
+    // NOTE: Must stay in sync with BouncerWeights receipt_l2_gas.
+    // NOTE: When max_block_size is changed, update `gas_target` accordingly to maintain the ratio.
+    pub max_block_size: GasAmount,
+    /// The target gas usage per block. Used by EIP-1559 to calculate the next block's gas price.
+    // Target is 60% of max_block_size, making price adjustment more responsive to congestion.
+    pub gas_target: GasAmount,
+    /// The margin for the eth to fri rate disagreement, expressed as a percentage (parts per
+    /// hundred).
+    pub l1_gas_price_margin_percent: u32,
+    /// Number of `fee_proposal` values used to compute `fee_actual` (sliding window).
+    pub fee_proposal_window_size: u64,
+    /// Maximum `fee_proposal` change per block in parts per thousand (e.g., `2` = 0.2%).
+    pub fee_proposal_margin_ppt: u128,
+}
+
+define_versioned_constants!(
+    VersionedConstants,
+    VersionedConstantsError,
+    StarknetVersion::V0_14_0,
+    "resources/versioned_constants_diff_regression",
+    (V0_14_0, "../resources/orchestrator_versioned_constants_0_14_0.json"),
+    (V0_14_1, "../resources/orchestrator_versioned_constants_0_14_1.json"),
+    (V0_14_2, "../resources/orchestrator_versioned_constants_0_14_2.json"),
+    (V0_14_3, "../resources/orchestrator_versioned_constants_0_14_3.json"),
+    (V0_14_4, "../resources/orchestrator_versioned_constants_0_14_4.json"),
+);
+
+/// Error type for the Consensus' versioned constants.
+#[derive(Debug, Error)]
+pub enum VersionedConstantsError {
+    /// Invalid Starknet version.
+    #[error("Invalid Starknet version: {0}")]
+    InvalidStarknetVersion(StarknetVersion),
+}

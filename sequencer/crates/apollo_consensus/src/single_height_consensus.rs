@@ -1,0 +1,282 @@
+//! Run a single height of consensus.
+//!
+//! [`SingleHeightConsensus`] (SHC) - run consensus for a single height.
+//!
+//! SHC returns SMRequests to be executed by the manager; it does not run tasks itself.
+
+#[cfg(test)]
+#[path = "single_height_consensus_test.rs"]
+mod single_height_consensus_test;
+
+#[cfg(test)]
+#[path = "simulation_test.rs"]
+mod simulation_test;
+
+use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
+
+use apollo_staking::committee_provider::CommitteeTrait;
+
+use crate::state_machine::VoteStatus;
+const REBROADCAST_LOG_PERIOD_MS: u64 = 10_000;
+const DUPLICATE_VOTE_LOG_PERIOD_MS: u64 = 10_000;
+
+use apollo_consensus_config::config::TimeoutsConfig;
+use apollo_infra_utils::trace_every_n_ms;
+use apollo_protobuf::consensus::{ProposalInit, Vote, VoteType};
+use starknet_api::block::BlockNumber;
+use tracing::{debug, info, instrument, trace, warn};
+
+use crate::metrics::{
+    CONSENSUS_BUILD_PROPOSAL_FAILED,
+    CONSENSUS_BUILD_PROPOSAL_TOTAL,
+    CONSENSUS_CONFLICTING_VOTES,
+    CONSENSUS_PROPOSALS_ACCEPTED_FOR_VALIDATION,
+    CONSENSUS_PROPOSALS_INVALID,
+    CONSENSUS_PROPOSALS_VALIDATED,
+};
+use crate::state_machine::{SMRequest, StateMachine, StateMachineEvent};
+use crate::types::{ProposalCommitment, Round, ValidatorId};
+use crate::votes_threshold::QuorumType;
+
+/// Type alias for the requests returned by SHC.
+/// SHC always returns a VecDeque of SMRequest. Decisions are indicated via
+/// `SMRequest::DecisionReached(Decision)` which contains the full Decision with precommits.
+pub(crate) type Requests = VecDeque<SMRequest>;
+
+/// Represents a single height of consensus. It is responsible for mapping between the idealized
+/// view of consensus represented in the StateMachine and the real world implementation.
+///
+/// Example:
+/// - Timeouts: the SM returns schedule requests; SHC returns these as SMRequests for the Manager to
+///   run (e.g., schedule timeouts, broadcast, etc.). The manager has minimal consensus logic.
+///
+/// Each height is begun with a call to `start`, with no further calls to it.
+///
+/// SHC is not a top level task; it is called directly and returns values (does not run sub-tasks).
+/// SHC has no timers and does not perform IO; the manager executes requests and returns
+/// `StateMachineEvent`s back to SHC.
+pub(crate) struct SingleHeightConsensus {
+    timeouts: TimeoutsConfig,
+    state_machine: StateMachine,
+    committee: Arc<dyn CommitteeTrait>,
+    // Tracks rounds for which we started validating a proposal to avoid duplicate validations.
+    pending_validation_rounds: HashSet<Round>,
+}
+
+impl SingleHeightConsensus {
+    pub(crate) fn new(
+        height: BlockNumber,
+        is_observer: bool,
+        id: ValidatorId,
+        quorum_type: QuorumType,
+        timeouts: TimeoutsConfig,
+        committee: Arc<dyn CommitteeTrait>,
+        require_virtual_proposer_vote: bool,
+    ) -> Self {
+        let total_weight: u128 = committee.members().iter().map(|s| s.weight.0).sum();
+        let state_machine = StateMachine::new(
+            height,
+            id,
+            total_weight,
+            is_observer,
+            quorum_type,
+            committee.clone(),
+            require_virtual_proposer_vote,
+        );
+        Self { timeouts, state_machine, committee, pending_validation_rounds: HashSet::new() }
+    }
+
+    pub(crate) fn current_round(&self) -> Round {
+        self.state_machine.round()
+    }
+
+    pub(crate) fn committee(&self) -> Arc<dyn CommitteeTrait> {
+        Arc::clone(&self.committee)
+    }
+
+    #[instrument(skip_all)]
+    pub(crate) fn start(&mut self) -> Requests {
+        self.state_machine.start()
+    }
+
+    /// Process the proposal init message and initiate block validation by returning
+    /// `SMRequest::StartValidateProposal` to the manager.
+    #[instrument(skip_all)]
+    pub(crate) fn handle_proposal(&mut self, init: ProposalInit) -> Requests {
+        debug!("Received {init:?}");
+        let height = self.state_machine.height();
+        if init.height != height {
+            warn!("Invalid proposal height: expected {:?}, got {:?}", height, init.height);
+            return VecDeque::new();
+        }
+        // TODO(guyn): replace this with assert_eq, but also need to fix simulation_test.
+        let Ok(proposer_id) = self.committee.get_proposer(height, init.round) else {
+            return VecDeque::new();
+        };
+        if init.proposer != proposer_id {
+            warn!("Invalid proposer: expected {:?}, got {:?}", proposer_id, init.proposer);
+            return VecDeque::new();
+        }
+        // Avoid duplicate validations:
+        // - If SM already has an entry for this round, a (re)proposal was already recorded.
+        // - If we already started validating this round, ignore repeats.
+        if self.state_machine.has_proposal_for_round(init.round)
+            || self.pending_validation_rounds.contains(&init.round)
+        {
+            warn!("Round {} already handled a proposal, ignoring", init.round);
+            return VecDeque::new();
+        }
+        let timeout = self.timeouts.get_proposal_timeout(init.round);
+        info!(
+            "Accepting {init:?}. node_round: {}, timeout: {timeout:?}",
+            self.state_machine.round()
+        );
+        CONSENSUS_PROPOSALS_ACCEPTED_FOR_VALIDATION.increment(1);
+
+        // Since validating the proposal is non-blocking, avoid validating the same round twice in
+        // parallel (e.g., due to repeats or spam).
+        self.pending_validation_rounds.insert(init.round);
+        // Ask the manager to start validation.
+        VecDeque::from([SMRequest::StartValidateProposal(init)])
+    }
+
+    #[instrument(skip_all)]
+    pub(crate) fn handle_event(&mut self, event: StateMachineEvent) -> Requests {
+        trace!("Received StateMachineEvent: {:?}", event);
+        match event {
+            StateMachineEvent::TimeoutPropose(_)
+            | StateMachineEvent::TimeoutPrevote(_)
+            | StateMachineEvent::TimeoutPrecommit(_) => self.handle_timeout_event(event),
+            StateMachineEvent::VoteBroadcasted(vote) => self.handle_vote_broadcasted(vote),
+            StateMachineEvent::FinishedValidation(proposal_id, round, valid_round) => {
+                self.handle_finished_validation(proposal_id, round, valid_round)
+            }
+            StateMachineEvent::FinishedBuilding(proposal_id, round) => {
+                self.handle_finished_building(proposal_id, round)
+            }
+            StateMachineEvent::Prevote(_) | StateMachineEvent::Precommit(_) => {
+                unreachable!("Peer votes must be handled via handle_vote")
+            }
+        }
+    }
+
+    fn handle_timeout_event(&mut self, event: StateMachineEvent) -> Requests {
+        self.state_machine.handle_event(event)
+    }
+
+    fn handle_vote_broadcasted(&mut self, vote: Vote) -> Requests {
+        let last_vote = match vote.vote_type {
+            VoteType::Prevote => self.state_machine.last_self_prevote(),
+            VoteType::Precommit => self.state_machine.last_self_precommit(),
+        };
+        let last_vote = last_vote.expect("No last vote to send");
+        if last_vote.round > vote.round {
+            // Only rebroadcast the newest vote.
+            return VecDeque::new();
+        }
+        assert_eq!(last_vote, vote);
+        trace_every_n_ms!(REBROADCAST_LOG_PERIOD_MS, "Rebroadcasting {last_vote:?}");
+        VecDeque::from([SMRequest::BroadcastVote(last_vote)])
+    }
+
+    fn handle_finished_validation(
+        &mut self,
+        proposal_id: Option<ProposalCommitment>,
+        round: Round,
+        valid_round: Option<Round>,
+    ) -> Requests {
+        let height = self.state_machine.height();
+        let Ok(proposer) = self.committee.get_proposer(height, round) else {
+            return VecDeque::new();
+        };
+        debug!(
+            proposer = %proposer,
+            %round,
+            ?valid_round,
+            proposal_commitment = ?proposal_id,
+            node_round = self.state_machine.round(),
+            "Validated proposal.",
+        );
+        if proposal_id.is_some() {
+            CONSENSUS_PROPOSALS_VALIDATED.increment(1);
+        } else {
+            CONSENSUS_PROPOSALS_INVALID.increment(1);
+        }
+        // Cleanup: validation for round {round} finished, so remove it from the pending
+        // set. This doesn't affect logic.
+        self.pending_validation_rounds.remove(&round);
+        self.state_machine.handle_event(StateMachineEvent::FinishedValidation(
+            proposal_id,
+            round,
+            valid_round,
+        ))
+    }
+
+    fn handle_finished_building(
+        &mut self,
+        proposal_id: Option<ProposalCommitment>,
+        round: Round,
+    ) -> Requests {
+        if proposal_id.is_none() {
+            CONSENSUS_BUILD_PROPOSAL_FAILED.increment(1);
+        }
+        CONSENSUS_BUILD_PROPOSAL_TOTAL.increment(1);
+        // Ensure SM has no proposal recorded yet for this round when proposing.
+        assert!(
+            !self.state_machine.has_proposal_for_round(round),
+            "There should be no entry for round {round} when proposing"
+        );
+        assert_eq!(
+            round,
+            self.state_machine.round(),
+            "State machine should not progress while awaiting proposal"
+        );
+        debug!(%round, proposal_commitment = ?proposal_id, "Built proposal.");
+        self.state_machine.handle_event(StateMachineEvent::FinishedBuilding(proposal_id, round))
+    }
+
+    /// Handle vote messages from peer nodes.
+    #[instrument(skip_all)]
+    pub(crate) fn handle_vote(&mut self, vote: Vote) -> Requests {
+        // TODO(Asmaa): verify the signature
+        trace!("Received {:?}", vote);
+        let height = self.state_machine.height();
+        if vote.height != height {
+            warn!("Invalid vote height: expected {:?}, got {:?}", height, vote.height);
+            return VecDeque::new();
+        }
+        if !self.committee.members().iter().any(|s| s.address == vote.voter) {
+            debug!("Ignoring vote from non validator: vote={:?}", vote);
+            return VecDeque::new();
+        }
+
+        // Check if vote has already been received.
+        match self.state_machine.received_vote(&vote) {
+            VoteStatus::Duplicate => {
+                // Duplicate - ignore.
+                trace_every_n_ms!(
+                    DUPLICATE_VOTE_LOG_PERIOD_MS,
+                    "Ignoring duplicate vote: {vote:?}"
+                );
+                return VecDeque::new();
+            }
+            VoteStatus::Conflict(old_vote, new_vote) => {
+                // Conflict - ignore and record.
+                warn!("Conflicting votes: old={old_vote:?}, new={new_vote:?}");
+                CONSENSUS_CONFLICTING_VOTES.increment(1);
+                return VecDeque::new();
+            }
+            VoteStatus::New => {
+                // Vote is new, proceed to process it.
+            }
+        }
+
+        info!("Accepting {:?}", vote);
+        let sm_vote = match vote.vote_type {
+            VoteType::Prevote => StateMachineEvent::Prevote(vote),
+            VoteType::Precommit => StateMachineEvent::Precommit(vote),
+        };
+        self.state_machine.handle_event(sm_vote)
+    }
+}

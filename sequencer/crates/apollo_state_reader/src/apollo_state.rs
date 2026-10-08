@@ -1,0 +1,326 @@
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Instant;
+
+use apollo_class_manager_types::SharedClassManagerClient;
+use apollo_storage::class_hash::ClassHashStorageReader;
+use apollo_storage::compiled_class::CasmStorageReader;
+use apollo_storage::db::RO;
+use apollo_storage::state::StateStorageReader;
+use apollo_storage::{StorageReader, StorageTxn};
+use blockifier::execution::contract_class::{
+    CompiledClassV0,
+    CompiledClassV1,
+    RunnableCompiledClass,
+};
+use blockifier::state::errors::{couple_casm_and_sierra, StateError};
+use blockifier::state::global_cache::CompiledClasses;
+use blockifier::state::state_api::{StateReader, StateResult};
+use blockifier::state::state_reader_and_contract_manager::FetchCompiledClasses;
+use cairo_lang_starknet_classes::casm_contract_class::CasmContractClass;
+use starknet_api::block::BlockNumber;
+use starknet_api::contract_class::ContractClass;
+use starknet_api::core::{ClassHash, CompiledClassHash, ContractAddress, Nonce};
+use starknet_api::deprecated_contract_class::ContractClass as DeprecatedClass;
+use starknet_api::state::{SierraContractClass, StateNumber, StorageKey};
+use starknet_types_core::felt::Felt;
+
+#[cfg(test)]
+#[path = "apollo_state_test.rs"]
+mod test;
+
+type RawApolloReader<'env> = StorageTxn<'env, RO>;
+
+pub struct ClassReader {
+    pub reader: SharedClassManagerClient,
+    // Used to invoke async functions from sync reader code.
+    pub runtime: tokio::runtime::Handle,
+    /// Bounds the total time this reader may spend waiting on the class manager, across every
+    /// request it makes. This reader runs inside a blocking task on a shared blocking-thread
+    /// pool; a stalled class manager would otherwise pin that thread forever, since the pool has
+    /// no way to cancel a thread that is blocked inside `block_on`. A single deadline (set once,
+    /// e.g. at construction) rather than a per-request duration keeps a class hash that needs
+    /// several requests (Casm and Sierra) from being able to add up to a multiple of the caller's
+    /// intended bound. `None` leaves requests unbounded.
+    pub deadline: Option<Instant>,
+}
+
+impl ClassReader {
+    /// Runs `request` on `self.runtime`, bounding it by `self.deadline` when set.
+    ///
+    /// Spawns `request` rather than awaiting it directly: a local class manager is reached
+    /// through a channel whose response sender the server already holds once the request is
+    /// sent (see `LocalComponentClient::send`), and the server panics if that channel's receiver
+    /// is dropped before the response is sent — "considered a bug" by its own comment, since a
+    /// well-behaved client always waits for its response. Racing `request` itself against the
+    /// deadline with `tokio::time::timeout` would drop it, and that receiver, the moment the
+    /// deadline passed. Spawning first means only our wait is bounded; `request` keeps running
+    /// to completion in the background so the server never observes a closed channel.
+    fn block_on_request<Fut>(&self, request: Fut) -> StateResult<Fut::Output>
+    where
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let Some(deadline) = self.deadline else {
+            return Ok(self.runtime.block_on(request));
+        };
+
+        self.runtime.block_on(async {
+            let request_task = self.runtime.spawn(request);
+            match tokio::time::timeout_at(deadline.into(), request_task).await {
+                Ok(join_result) => join_result.map_err(|join_error| {
+                    StateError::StateReadError(format!(
+                        "Class manager request task panicked: {join_error}"
+                    ))
+                }),
+                Err(_elapsed) => Err(StateError::StateReadError(
+                    "Class manager request timed out; the reader's deadline passed.".to_string(),
+                )),
+            }
+        })
+    }
+
+    fn read_executable(&self, class_hash: ClassHash) -> StateResult<ContractClass> {
+        let reader = self.reader.clone();
+        let casm = self
+            .block_on_request(async move { reader.get_executable(class_hash).await })?
+            .map_err(|err| StateError::StateReadError(err.to_string()))?
+            .ok_or(StateError::UndeclaredClassHash(class_hash))?;
+
+        Ok(casm)
+    }
+
+    fn read_casm(&self, class_hash: ClassHash) -> StateResult<CasmContractClass> {
+        let casm = self.read_executable(class_hash)?;
+        let ContractClass::V1((casm, _sierra_version)) = casm else {
+            panic!("Class hash {class_hash} originated from a Cairo 1 contract.");
+        };
+
+        Ok(casm)
+    }
+
+    fn read_sierra(&self, class_hash: ClassHash) -> StateResult<SierraContractClass> {
+        let reader = self.reader.clone();
+        let sierra = self
+            .block_on_request(async move { reader.get_sierra(class_hash).await })?
+            .map_err(|err| StateError::StateReadError(err.to_string()))?
+            .ok_or(StateError::UndeclaredClassHash(class_hash))?;
+
+        Ok(sierra)
+    }
+
+    // TODO(Elin): make `read[_optional_deprecated]_casm` symmetrical and independent of invocation
+    // order.
+    fn read_optional_deprecated_casm(
+        &self,
+        class_hash: ClassHash,
+    ) -> StateResult<Option<DeprecatedClass>> {
+        let casm = self.read_executable(class_hash)?;
+        if let ContractClass::V0(casm) = casm { Ok(Some(casm)) } else { Ok(None) }
+    }
+
+    /// Returns the compiled class hash v2 for the given class hash.
+    fn read_compiled_class_hash_v2(
+        &self,
+        class_hash: ClassHash,
+    ) -> StateResult<Option<CompiledClassHash>> {
+        let reader = self.reader.clone();
+        let compiled_class_hash_v2 = self
+            .block_on_request(async move { reader.get_executable_class_hash_v2(class_hash).await })?
+            .map_err(|err| StateError::StateReadError(err.to_string()))?;
+        Ok(compiled_class_hash_v2)
+    }
+}
+
+pub struct ApolloReader {
+    storage_reader: StorageReader,
+    latest_block: BlockNumber,
+    // Reader is `None` for reader invoked through `native_blockifier`.
+    class_reader: Option<ClassReader>,
+}
+
+impl ApolloReader {
+    pub fn new_with_class_reader(
+        storage_reader: StorageReader,
+        latest_block: BlockNumber,
+        class_reader: Option<ClassReader>,
+    ) -> Self {
+        Self { storage_reader, latest_block, class_reader }
+    }
+
+    pub fn new(storage_reader: StorageReader, latest_block: BlockNumber) -> Self {
+        Self { storage_reader, latest_block, class_reader: None }
+    }
+
+    fn reader(&self) -> StateResult<RawApolloReader<'_>> {
+        self.storage_reader
+            .begin_ro_txn()
+            .map_err(|error| StateError::StateReadError(error.to_string()))
+    }
+
+    /// Returns a V1 contract with Sierra if V1 contract is found, or a V0 contract without Sierra
+    /// if a V1 contract is not found, or an `Error` otherwise.
+    fn get_compiled_class_from_db(&self, class_hash: ClassHash) -> StateResult<CompiledClasses> {
+        if self.is_declared(class_hash)? {
+            // Cairo 1.
+            let (casm_compiled_class, sierra) = self.read_casm_and_sierra(class_hash)?;
+            let sierra_version = sierra.get_sierra_version()?;
+            return Ok(CompiledClasses::V1(
+                CompiledClassV1::try_from((casm_compiled_class, sierra_version))?,
+                Arc::new(sierra),
+            ));
+        }
+
+        // Possibly Cairo 0.
+        let v0_compiled_class = self.read_deprecated_casm(class_hash)?;
+        match v0_compiled_class {
+            Some(starknet_api_contract_class) => {
+                Ok(CompiledClasses::V0(CompiledClassV0::try_from(starknet_api_contract_class)?))
+            }
+            None => Err(StateError::UndeclaredClassHash(class_hash)),
+        }
+    }
+
+    fn read_casm_and_sierra(
+        &self,
+        class_hash: ClassHash,
+    ) -> StateResult<(CasmContractClass, SierraContractClass)> {
+        let Some(class_reader) = &self.class_reader else {
+            // Class reader is not set. Try to read directly from storage.
+            let (option_casm, option_sierra) = self
+                .reader()?
+                .get_casm_and_sierra(&class_hash)
+                .map_err(|err| StateError::StateReadError(err.to_string()))?;
+            let (casm, sierra) = couple_casm_and_sierra(class_hash, option_casm, option_sierra)?
+                .expect(
+                    "Should be able to fetch a Casm and Sierra class if its definition exists,
+                    database is inconsistent.",
+                );
+
+            return Ok((casm, sierra));
+        };
+
+        // TODO(Elin): consider not reading Sierra if compilation is disabled.
+        Ok((class_reader.read_casm(class_hash)?, class_reader.read_sierra(class_hash)?))
+    }
+
+    fn read_deprecated_casm(&self, class_hash: ClassHash) -> StateResult<Option<DeprecatedClass>> {
+        let Some(class_reader) = &self.class_reader else {
+            // Class reader is not set. Try to read directly from storage.
+            let state_number = StateNumber(self.latest_block);
+            let option_casm = self
+                .reader()?
+                .get_state_reader()
+                .and_then(|sr| sr.get_deprecated_class_definition_at(state_number, &class_hash))
+                .map_err(|err| StateError::StateReadError(err.to_string()))?;
+
+            return Ok(option_casm);
+        };
+
+        class_reader.read_optional_deprecated_casm(class_hash)
+    }
+
+    /// Returns the compiled class hash v2 for the given class hash.
+    /// If class reader is not set, it will read the compiled class hash v2 directly from the
+    /// storage.
+    fn read_compiled_class_hash_v2(
+        &self,
+        class_hash: ClassHash,
+    ) -> StateResult<Option<CompiledClassHash>> {
+        let Some(class_reader) = &self.class_reader else {
+            // Class reader is not set. Try to read directly from storage.
+            let compiled_class_hash_v2 =
+                self.reader()?
+                    .get_executable_class_hash_v2(&class_hash)
+                    .map_err(|err| StateError::StateReadError(err.to_string()))?;
+            return Ok(compiled_class_hash_v2);
+        };
+
+        class_reader.read_compiled_class_hash_v2(class_hash)
+    }
+}
+
+// Currently unused - will soon replace the same `impl` for `PapyrusStateReader`.
+impl StateReader for ApolloReader {
+    fn get_storage_at(
+        &self,
+        contract_address: ContractAddress,
+        key: StorageKey,
+    ) -> StateResult<Felt> {
+        let state_number = StateNumber(self.latest_block);
+        self.reader()?
+            .get_state_reader()
+            .and_then(|sr| sr.get_storage_at(state_number, &contract_address, &key))
+            .map_err(|error| StateError::StateReadError(error.to_string()))
+    }
+
+    fn get_nonce_at(&self, contract_address: ContractAddress) -> StateResult<Nonce> {
+        let state_number = StateNumber(self.latest_block);
+        match self
+            .reader()?
+            .get_state_reader()
+            .and_then(|sr| sr.get_nonce_at(state_number, &contract_address))
+        {
+            Ok(Some(nonce)) => Ok(nonce),
+            Ok(None) => Ok(Nonce::default()),
+            Err(err) => Err(StateError::StateReadError(err.to_string())),
+        }
+    }
+
+    fn get_class_hash_at(&self, contract_address: ContractAddress) -> StateResult<ClassHash> {
+        let state_number = StateNumber(self.latest_block);
+        match self
+            .reader()?
+            .get_state_reader()
+            .and_then(|sr| sr.get_class_hash_at(state_number, &contract_address))
+        {
+            Ok(Some(class_hash)) => Ok(class_hash),
+            Ok(None) => Ok(ClassHash::default()),
+            Err(err) => Err(StateError::StateReadError(err.to_string())),
+        }
+    }
+
+    fn get_compiled_class(&self, class_hash: ClassHash) -> StateResult<RunnableCompiledClass> {
+        self.get_compiled_class_from_db(class_hash).map(|class| class.to_runnable())
+    }
+
+    fn get_compiled_class_hash(&self, class_hash: ClassHash) -> StateResult<CompiledClassHash> {
+        let state_number = StateNumber(self.latest_block);
+        match self
+            .reader()?
+            .get_state_reader()
+            .and_then(|sr| sr.get_compiled_class_hash_at(state_number, &class_hash))
+        {
+            Ok(Some(compiled_class_hash)) => Ok(compiled_class_hash),
+            Ok(None) => Ok(CompiledClassHash::default()),
+            Err(err) => Err(StateError::StateReadError(err.to_string())),
+        }
+    }
+
+    fn get_compiled_class_hash_v2(
+        &self,
+        class_hash: ClassHash,
+        _compiled_class: &RunnableCompiledClass,
+    ) -> StateResult<CompiledClassHash> {
+        self.read_compiled_class_hash_v2(class_hash)?
+            .ok_or(StateError::MissingCompiledClassHashV2(class_hash))
+    }
+}
+
+impl FetchCompiledClasses for ApolloReader {
+    fn get_compiled_classes(&self, class_hash: ClassHash) -> StateResult<CompiledClasses> {
+        self.get_compiled_class_from_db(class_hash)
+    }
+
+    fn is_declared(&self, class_hash: ClassHash) -> StateResult<bool> {
+        let state_number = StateNumber(self.latest_block);
+        let class_declaration_block_number = self
+            .reader()?
+            .get_state_reader()
+            .and_then(|sr| sr.get_class_definition_block_number(&class_hash))
+            .map_err(|err| StateError::StateReadError(err.to_string()))?;
+        Ok(
+            matches!(class_declaration_block_number, Some(block_number) if block_number <= state_number.0),
+        )
+    }
+}

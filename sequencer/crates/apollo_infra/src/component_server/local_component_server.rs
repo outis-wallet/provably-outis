@@ -1,0 +1,478 @@
+use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::sync::Arc;
+
+use apollo_config::dumping::{ser_param, SerializeConfig};
+use apollo_config::validators::validate_positive;
+use apollo_config::{ParamPath, ParamPrivacyInput, SerializedParam};
+use apollo_infra_utils::type_name::short_type_name;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::Semaphore;
+use tokio::time::Instant;
+use tracing::{error, info, instrument, trace, warn};
+use validator::Validate;
+
+use crate::component_definitions::{
+    ComponentRequestHandler,
+    ComponentStarter,
+    PrioritizedRequest,
+    RequestId,
+    RequestPriority,
+    RequestWrapper,
+};
+use crate::component_server::ComponentServerStarter;
+use crate::metrics::LocalServerMetrics;
+use crate::requests::LabeledRequest;
+
+// TODO(Tsabary): create custom configs per service, considering the required throughput and spike
+// tolerance.
+
+const DEFAULT_INBOUND_REQUESTS_CHANNEL_CAPACITY: usize = 1024;
+const DEFAULT_HIGH_PRIORITY_REQUESTS_CHANNEL_CAPACITY: usize = 1024;
+const DEFAULT_NORMAL_PRIORITY_REQUESTS_CHANNEL_CAPACITY: usize = 1024;
+const DEFAULT_PROCESSING_TIME_WARNING_THRESHOLD_MS: u128 = 3_000;
+const DEFAULT_MAX_CONCURRENCY: usize = 128;
+
+// The communication configuration of a local component server.
+#[derive(Clone, Debug, Serialize, Deserialize, Validate, PartialEq)]
+pub struct LocalServerConfig {
+    pub inbound_requests_channel_capacity: usize,
+    pub high_priority_requests_channel_capacity: usize,
+    pub normal_priority_requests_channel_capacity: usize,
+    pub processing_time_warning_threshold_ms: u128,
+    #[validate(custom(function = "validate_positive"))]
+    pub max_concurrency: usize,
+}
+
+impl SerializeConfig for LocalServerConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        BTreeMap::from_iter([
+            ser_param(
+                "inbound_requests_channel_capacity",
+                &self.inbound_requests_channel_capacity,
+                "The inbound requests channel capacity.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "high_priority_requests_channel_capacity",
+                &self.high_priority_requests_channel_capacity,
+                "The high priority requests channel capacity.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "normal_priority_requests_channel_capacity",
+                &self.normal_priority_requests_channel_capacity,
+                "The normal priority requests channel capacity.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "processing_time_warning_threshold_ms",
+                &self.processing_time_warning_threshold_ms,
+                "Request processing threshold time in ms after which a warning message is logged.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "max_concurrency",
+                &self.max_concurrency,
+                "The maximum number of concurrent requests handling.",
+                ParamPrivacyInput::Public,
+            ),
+        ])
+    }
+}
+
+impl Default for LocalServerConfig {
+    fn default() -> Self {
+        Self {
+            inbound_requests_channel_capacity: DEFAULT_INBOUND_REQUESTS_CHANNEL_CAPACITY,
+            high_priority_requests_channel_capacity:
+                DEFAULT_HIGH_PRIORITY_REQUESTS_CHANNEL_CAPACITY,
+            normal_priority_requests_channel_capacity:
+                DEFAULT_NORMAL_PRIORITY_REQUESTS_CHANNEL_CAPACITY,
+            processing_time_warning_threshold_ms: DEFAULT_PROCESSING_TIME_WARNING_THRESHOLD_MS,
+            max_concurrency: DEFAULT_MAX_CONCURRENCY,
+        }
+    }
+}
+
+/// The `LocalComponentServer` struct is a generic server that receives requests and returns
+/// responses for a specified component, using Tokio mspc channels for asynchronous communication.
+pub struct LocalComponentServer<Component, Request, Response>
+where
+    Request: Send,
+    Response: Send,
+{
+    component: Option<Component>,
+    rx: Receiver<RequestWrapper<Request, Response>>,
+    metrics: &'static LocalServerMetrics,
+    processing_time_warning_threshold_ms: u128,
+
+    normal_priority_request_rx: Option<Receiver<RequestWrapper<Request, Response>>>,
+    high_priority_request_rx: Option<Receiver<RequestWrapper<Request, Response>>>,
+    normal_priority_request_tx: Sender<RequestWrapper<Request, Response>>,
+    high_priority_request_tx: Sender<RequestWrapper<Request, Response>>,
+}
+
+impl<Component, Request, Response> LocalComponentServer<Component, Request, Response>
+where
+    Component: ComponentRequestHandler<Request, Response> + Send + 'static,
+    Request: Send + Debug + PrioritizedRequest + LabeledRequest + 'static,
+    Response: Send + Debug + 'static,
+{
+    pub fn new(
+        component: Component,
+        config: &LocalServerConfig,
+        rx: Receiver<RequestWrapper<Request, Response>>,
+        metrics: &'static LocalServerMetrics,
+    ) -> Self {
+        let (normal_priority_request_tx, normal_priority_request_rx) =
+            channel::<RequestWrapper<Request, Response>>(
+                config.normal_priority_requests_channel_capacity,
+            );
+        let (high_priority_request_tx, high_priority_request_rx) =
+            channel::<RequestWrapper<Request, Response>>(
+                config.high_priority_requests_channel_capacity,
+            );
+
+        Self {
+            component: Some(component),
+            rx,
+            metrics,
+            processing_time_warning_threshold_ms: config.processing_time_warning_threshold_ms,
+            normal_priority_request_tx,
+            normal_priority_request_rx: Some(normal_priority_request_rx),
+            high_priority_request_tx,
+            high_priority_request_rx: Some(high_priority_request_rx),
+        }
+    }
+
+    fn get_processing_inner_members(
+        &mut self,
+    ) -> RequestProcessingMembers<Request, Response, Component> {
+        // Take ownership of the component and the priority request receivers, so they can be used
+        // in the async task.
+        let component = self.component.take().expect("Component should be available");
+        let high_rx = self
+            .high_priority_request_rx
+            .take()
+            .expect("High priority request receiver should be available");
+        let normal_rx = self
+            .normal_priority_request_rx
+            .take()
+            .expect("Normal priority request receiver should be available");
+        let metrics = self.metrics;
+        let processing_time_warning_threshold_ms = self.processing_time_warning_threshold_ms;
+        RequestProcessingMembers {
+            component,
+            high_rx,
+            normal_rx,
+            metrics,
+            processing_time_warning_threshold_ms,
+        }
+    }
+
+    async fn await_requests(&mut self) {
+        info!(
+            "Starting to await requests in the component {} local server",
+            short_type_name::<Component>()
+        );
+        while let Some(request_wrapper) = self.rx.recv().await {
+            trace!(
+                "Component {} received request {:?} with priority {:?}",
+                short_type_name::<Component>(),
+                request_wrapper.request,
+                request_wrapper.request.priority()
+            );
+            match request_wrapper.request.priority() {
+                RequestPriority::High => {
+                    self.high_priority_request_tx
+                        .send(request_wrapper)
+                        .await
+                        .expect("Failed to send high priority request");
+                }
+                RequestPriority::Normal => {
+                    self.normal_priority_request_tx
+                        .send(request_wrapper)
+                        .await
+                        .expect("Failed to send low priority request");
+                }
+            }
+            self.metrics.increment_received();
+        }
+
+        error!(
+            "Stopped awaiting requests in the component {} local server",
+            short_type_name::<Component>()
+        );
+    }
+
+    async fn process_requests(&mut self) {
+        let component_name = short_type_name::<Component>();
+        info!("Starting to process requests in the component {component_name} local server",);
+
+        let RequestProcessingMembers {
+            mut component,
+            mut high_rx,
+            mut normal_rx,
+            metrics,
+            processing_time_warning_threshold_ms,
+        } = self.get_processing_inner_members();
+
+        tokio::spawn(async move {
+            loop {
+                let (request, tx, request_id) = get_next_request_for_processing(
+                    &mut high_rx,
+                    &mut normal_rx,
+                    &component_name,
+                    metrics,
+                )
+                .await;
+
+                process_request(
+                    &mut component,
+                    request,
+                    request_id,
+                    tx,
+                    metrics,
+                    processing_time_warning_threshold_ms,
+                )
+                .await;
+            }
+        });
+    }
+}
+
+impl<Component, Request, Response> Drop for LocalComponentServer<Component, Request, Response>
+where
+    Request: Send,
+    Response: Send,
+{
+    fn drop(&mut self) {
+        warn!("Dropping {}.", short_type_name::<Self>());
+    }
+}
+
+#[async_trait]
+impl<Component, Request, Response> ComponentServerStarter
+    for LocalComponentServer<Component, Request, Response>
+where
+    Component: ComponentRequestHandler<Request, Response> + Send + ComponentStarter + 'static,
+    Request: Send + Debug + PrioritizedRequest + LabeledRequest + 'static,
+    Response: Send + Debug + 'static,
+{
+    async fn start(&mut self) {
+        info!("Starting LocalComponentServer for {}.", short_type_name::<Component>());
+        self.metrics.register();
+        self.component.as_mut().unwrap().start().await;
+        self.process_requests().await;
+        self.await_requests().await;
+        panic!("Finished LocalComponentServer for {}.", short_type_name::<Component>());
+    }
+}
+
+/// The `ConcurrentLocalComponentServer` adds a concurrency wrapper to the `LocalComponentServer`,
+/// allowing concurrent processing of requests.
+pub struct ConcurrentLocalComponentServer<Component, Request, Response>
+where
+    Request: Send,
+    Response: Send,
+{
+    local_component_server: LocalComponentServer<Component, Request, Response>,
+    max_concurrency: usize,
+}
+
+impl<Component, Request, Response> ConcurrentLocalComponentServer<Component, Request, Response>
+where
+    Component: ComponentRequestHandler<Request, Response> + Clone + Send + 'static,
+    Request: Send + Debug + PrioritizedRequest + LabeledRequest + 'static,
+    Response: Send + Debug + 'static,
+{
+    pub fn new(
+        component: Component,
+        config: &LocalServerConfig,
+        rx: Receiver<RequestWrapper<Request, Response>>,
+        metrics: &'static LocalServerMetrics,
+    ) -> Self {
+        let local_component_server = LocalComponentServer::new(component, config, rx, metrics);
+        Self { local_component_server, max_concurrency: config.max_concurrency }
+    }
+
+    async fn await_requests(&mut self) {
+        self.local_component_server.await_requests().await;
+    }
+
+    async fn process_requests(&mut self) {
+        let component_name = short_type_name::<Component>();
+        info!(
+            "Starting to process requests in the component {component_name} concurrent local \
+             server",
+        );
+
+        let RequestProcessingMembers {
+            component,
+            mut high_rx,
+            mut normal_rx,
+            metrics,
+            processing_time_warning_threshold_ms,
+        } = self.local_component_server.get_processing_inner_members();
+
+        let task_limiter = Arc::new(Semaphore::new(self.max_concurrency));
+
+        tokio::spawn(async move {
+            loop {
+                // TODO(Tsabary): add a test for the queueing time metric.
+                let (request, tx, request_id) = get_next_request_for_processing(
+                    &mut high_rx,
+                    &mut normal_rx,
+                    &component_name,
+                    metrics,
+                )
+                .await;
+
+                // Acquire a permit to run the task.
+                let permit = task_limiter.clone().acquire_owned().await.unwrap();
+
+                // Clone the component for concurrent request processing.
+                let mut cloned_component = component.clone();
+                tokio::spawn(async move {
+                    process_request(
+                        &mut cloned_component,
+                        request,
+                        request_id,
+                        tx,
+                        metrics,
+                        processing_time_warning_threshold_ms,
+                    )
+                    .await;
+                    // Drop the permit to allow more tasks to be created.
+                    drop(permit);
+                });
+            }
+        });
+    }
+}
+
+impl<Component, Request, Response> Drop
+    for ConcurrentLocalComponentServer<Component, Request, Response>
+where
+    Request: Send,
+    Response: Send,
+{
+    fn drop(&mut self) {
+        warn!("Dropping {}.", short_type_name::<Self>());
+    }
+}
+
+#[async_trait]
+impl<Component, Request, Response> ComponentServerStarter
+    for ConcurrentLocalComponentServer<Component, Request, Response>
+where
+    Component:
+        ComponentRequestHandler<Request, Response> + ComponentStarter + Clone + Send + 'static,
+    Request: Send + Debug + PrioritizedRequest + LabeledRequest + 'static,
+    Response: Send + Debug + 'static,
+{
+    async fn start(&mut self) {
+        info!("Starting ConcurrentLocalComponentServer for {}.", short_type_name::<Component>());
+        self.local_component_server.metrics.register();
+        self.local_component_server.component.as_mut().unwrap().start().await;
+        self.process_requests().await;
+        self.await_requests().await;
+        panic!("Finished ConcurrentLocalComponentServer for {}.", short_type_name::<Component>());
+    }
+}
+
+#[instrument(skip_all,fields(request_id = %request_id))]
+async fn process_request<Request, Response, Component>(
+    component: &mut Component,
+    request: Request,
+    request_id: RequestId,
+    tx: Sender<Response>,
+    metrics: &'static LocalServerMetrics,
+    processing_time_warning_threshold_ms: u128,
+) where
+    Component: ComponentRequestHandler<Request, Response> + Send,
+    Request: Send + Debug + LabeledRequest,
+    Response: Send + Debug,
+{
+    let component_name = short_type_name::<Component>();
+    let request_info = format!("{:?}", request);
+    let request_label = request.request_label();
+
+    trace!("Component {component_name} is starting to process request {request_info:?}",);
+    // Please note that the we're measuring the time of an asynchronous request processing, which
+    // might also include the awaited time of this task to execute.
+    let start = Instant::now();
+    let response = component.handle_request(request).await;
+    let elapsed = start.elapsed();
+    metrics.record_processing_time(elapsed.as_secs_f64(), request_label);
+    // TODO(Tsabary): add a test for the processing time metric.
+
+    let elapsed_ms = elapsed.as_millis();
+    if elapsed_ms > processing_time_warning_threshold_ms {
+        warn!(
+            "Component {component_name} took {elapsed_ms} ms to process request {request_info:?}, \
+             exceeding the {processing_time_warning_threshold_ms} ms threshold.",
+        );
+    }
+
+    // TODO(Tsabary): make the processed and received metrics labeled based on the priority and of
+    // the request label.
+    metrics.increment_processed();
+
+    trace!("Component {component_name} is sending response {response:?}");
+    // Send the response to the client. This might result in a panic if the client has closed
+    // the response channel, which is considered a bug.
+    tx.send(response).await.expect("Response connection should be open.");
+}
+
+struct RequestProcessingMembers<Request, Response, Component>
+where
+    Request: Send,
+    Response: Send,
+{
+    component: Component,
+    high_rx: Receiver<RequestWrapper<Request, Response>>,
+    normal_rx: Receiver<RequestWrapper<Request, Response>>,
+    metrics: &'static LocalServerMetrics,
+    processing_time_warning_threshold_ms: u128,
+}
+
+async fn get_next_request_for_processing<Request, Response>(
+    high_rx: &mut Receiver<RequestWrapper<Request, Response>>,
+    normal_rx: &mut Receiver<RequestWrapper<Request, Response>>,
+    component_name: &str,
+    metrics: &'static LocalServerMetrics,
+) -> (Request, Sender<Response>, RequestId)
+where
+    Request: Send + Debug + LabeledRequest,
+    Response: Send,
+{
+    // Update priority and normal queue depth metrics
+    metrics.set_high_priority_queue_depth(high_rx.len());
+    metrics.set_normal_priority_queue_depth(normal_rx.len());
+
+    let request_wrapper = tokio::select! {
+        // Prioritize high priority requests over normal priority ones using `biased`.
+        biased;
+        Some(item) = high_rx.recv() => item,
+        Some(item) = normal_rx.recv() => item,
+        else => {
+            panic!("Stopped processing requests in the component {component_name} local server");
+        }
+    };
+    let request = request_wrapper.request;
+    let tx = request_wrapper.tx;
+    let creation_time = request_wrapper.creation_time;
+    let request_id = request_wrapper.request_id;
+
+    trace!(
+        "Component {component_name} received request {request:?} that was created at \
+         {creation_time:?}",
+    );
+    metrics.record_queueing_time(creation_time.elapsed().as_secs_f64(), request.request_label());
+
+    (request, tx, request_id)
+}

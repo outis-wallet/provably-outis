@@ -1,0 +1,581 @@
+use std::collections::{HashMap, HashSet};
+
+use apollo_starknet_os_program::OS_PROGRAM_BYTES;
+use assert_matches::assert_matches;
+use cairo_vm::types::builtin_name::BuiltinName;
+use cairo_vm::types::layout_name::LayoutName;
+use cairo_vm::types::relocatable::MaybeRelocatable;
+use cairo_vm::vm::runners::cairo_runner::ExecutionResources;
+use expect_test::{expect, Expect};
+use num_bigint::BigUint;
+use rstest::rstest;
+use starknet_types_core::felt::Felt;
+
+use super::utils::{
+    compress,
+    get_bucket_offsets,
+    get_n_elms_per_felt,
+    pack_in_felts,
+    BitsArray,
+    BucketElement,
+    BucketElement125,
+    BucketElement31,
+    BucketElement62,
+    BucketElementTrait,
+    Buckets,
+    CompressionSet,
+    N_UNIQUE_BUCKETS,
+    TOTAL_N_BUCKETS,
+};
+use crate::hints::error::OsHintError;
+use crate::hints::hint_implementation::stateless_compression::utils::{
+    decompress,
+    unpack_felts,
+    unpack_felts_to,
+    ElmBoundType,
+};
+use crate::test_utils::cairo_runner::{
+    initialize_cairo_runner,
+    run_cairo_0_entrypoint,
+    EndpointArg,
+    EntryPointRunnerConfig,
+    ImplicitArg,
+    ValueArg,
+};
+
+const COMPRESSION_MODULE_PATH: &str = "starkware.starknet.core.os.data_availability.compression";
+
+/// Runs the OS unpack_felts function and returns the unpacked felts + resources used.
+fn cairo_unpack_felts(
+    compressed: &[Felt],
+    elm_bound: u128,
+    n_elms: usize,
+) -> (Vec<Felt>, ExecutionResources) {
+    let runner_config = EntryPointRunnerConfig {
+        layout: LayoutName::starknet,
+        add_main_prefix_to_entrypoint: false,
+        ..Default::default()
+    };
+    let mut implicit_args = vec![ImplicitArg::Builtin(BuiltinName::range_check)];
+    let (mut runner, program, entrypoint) = initialize_cairo_runner(
+        &runner_config,
+        OS_PROGRAM_BYTES,
+        &format!("{COMPRESSION_MODULE_PATH}.unpack_felts"),
+        &implicit_args,
+        HashMap::new(),
+    )
+    .unwrap();
+
+    // Function accepts start pointer of the compressed data, and destination pointer of the
+    // unpacked felts, as implicit arguments.
+    let compressed_start = runner
+        .vm
+        .gen_arg(&compressed.iter().map(|x| MaybeRelocatable::Int(*x)).collect::<Vec<_>>())
+        .unwrap()
+        .get_relocatable()
+        .unwrap();
+    let decompressed_start = runner.vm.add_memory_segment();
+    implicit_args.extend([
+        ImplicitArg::NonBuiltin(EndpointArg::Value(ValueArg::Single(compressed_start.into()))),
+        ImplicitArg::NonBuiltin(EndpointArg::Value(ValueArg::Single(decompressed_start.into()))),
+    ]);
+
+    let explicit_args = vec![
+        EndpointArg::Value(ValueArg::Single(n_elms.into())),
+        EndpointArg::Value(ValueArg::Single(Felt::from(elm_bound).into())),
+        EndpointArg::Value(ValueArg::Single(Felt::from(get_n_elms_per_felt(elm_bound)).into())),
+    ];
+
+    // Run the entrypoint.
+    // The unpacked data is stored in the segment starting at `decompressed_start`, the returned
+    // implicit value is the end of the unpacked data.
+    let state_reader = None;
+    let expected_explicit_return_values = vec![];
+    let (implicit_return_values, _explicit_return_values, _hint_processor) =
+        run_cairo_0_entrypoint(
+            entrypoint,
+            &explicit_args,
+            &implicit_args,
+            state_reader,
+            &mut runner,
+            &program,
+            &runner_config,
+            &expected_explicit_return_values,
+        )
+        .unwrap();
+
+    // The implicit return values are [range_check_ptr, compressed_start, decompressed_end].
+    assert_eq!(implicit_return_values.len(), 3);
+    let EndpointArg::Value(ValueArg::Single(MaybeRelocatable::RelocatableValue(decompressed_end))) =
+        implicit_return_values[2]
+    else {
+        panic!("Unexpected implicit return values, got: {implicit_return_values:?}");
+    };
+
+    // Read the compressed data from the segment and return.
+    let unpacked_data = runner
+        .vm
+        .get_integer_range(decompressed_start, (decompressed_end - decompressed_start).unwrap())
+        .unwrap();
+    (unpacked_data.into_iter().map(|f| *f).collect(), runner.get_execution_resources().unwrap())
+}
+
+/// Runs the OS compression function and returns the compressed data, plus the execution resources
+/// used to compress the data.
+fn cairo_compress(data: &[Felt]) -> (Vec<Felt>, ExecutionResources) {
+    let range_check_arg = ImplicitArg::Builtin(BuiltinName::range_check);
+    let runner_config = EntryPointRunnerConfig {
+        layout: LayoutName::starknet,
+        add_main_prefix_to_entrypoint: false,
+        ..Default::default()
+    };
+    let (mut runner, program, entrypoint) = initialize_cairo_runner(
+        &runner_config,
+        OS_PROGRAM_BYTES,
+        &format!("{COMPRESSION_MODULE_PATH}.compress"),
+        std::slice::from_ref(&range_check_arg),
+        HashMap::new(),
+    )
+    .unwrap();
+
+    // Function accepts start and end pointers explicitly, and the destination pointer is passed
+    // as an implicit argument (along with the range check pointer).
+    let data_start = runner
+        .vm
+        .gen_arg(&data.iter().map(|x| MaybeRelocatable::Int(*x)).collect::<Vec<_>>())
+        .unwrap()
+        .get_relocatable()
+        .unwrap();
+    let compressed_dst = runner.vm.add_memory_segment();
+    let explicit_args = vec![
+        EndpointArg::Value(ValueArg::Single(data_start.into())),
+        EndpointArg::Value(ValueArg::Single((data_start + data.len()).unwrap().into())),
+    ];
+    let implicit_args = vec![
+        range_check_arg,
+        ImplicitArg::NonBuiltin(EndpointArg::Value(ValueArg::Single(compressed_dst.into()))),
+    ];
+
+    // Run the entrypoint.
+    // The compressed data is stored in the segment starting at `compressed_dst`, the returned
+    // implicit value is the end of the compressed data.
+    let state_reader = None;
+    let expected_explicit_return_values = vec![];
+    let (implicit_return_values, _explicit_return_values, _hint_processor) =
+        run_cairo_0_entrypoint(
+            entrypoint,
+            &explicit_args,
+            &implicit_args,
+            state_reader,
+            &mut runner,
+            &program,
+            &runner_config,
+            &expected_explicit_return_values,
+        )
+        .unwrap();
+
+    // The implicit return values are [range_check_ptr, compressed_end].
+    assert_eq!(implicit_return_values.len(), 2);
+    let EndpointArg::Value(ValueArg::Single(MaybeRelocatable::RelocatableValue(compressed_end))) =
+        implicit_return_values[1]
+    else {
+        panic!(
+            "Unexpected implicit return value for compressed_end, got: {:?}",
+            implicit_return_values[1]
+        );
+    };
+
+    // Read the compressed data from the segment and return.
+    let compressed_data = runner
+        .vm
+        .get_integer_range(compressed_dst, (compressed_end - compressed_dst).unwrap())
+        .unwrap();
+    (compressed_data.into_iter().map(|f| *f).collect(), runner.get_execution_resources().unwrap())
+}
+
+/// Runs the OS decompression function and returns the decompressed data.
+fn cairo_decompress(compressed: &[Felt]) -> Vec<Felt> {
+    let range_check_arg = ImplicitArg::Builtin(BuiltinName::range_check);
+    let runner_config = EntryPointRunnerConfig {
+        layout: LayoutName::starknet,
+        add_main_prefix_to_entrypoint: false,
+        ..Default::default()
+    };
+    let (mut runner, program, entrypoint) = initialize_cairo_runner(
+        &runner_config,
+        OS_PROGRAM_BYTES,
+        &format!("{COMPRESSION_MODULE_PATH}.decompress"),
+        std::slice::from_ref(&range_check_arg),
+        HashMap::new(),
+    )
+    .unwrap();
+
+    // Function accepts destination pointer explicitly, and the compressed data pointer is passed
+    // as an implicit argument (along with the range check pointer). A pointer to the end of the
+    // decompressed data is returned as an explicit argument.
+    let compressed_ptr = runner
+        .vm
+        .gen_arg(&compressed.iter().map(|x| MaybeRelocatable::Int(*x)).collect::<Vec<_>>())
+        .unwrap()
+        .get_relocatable()
+        .unwrap();
+    let decompressed_dst = runner.vm.add_memory_segment();
+    let explicit_args = vec![EndpointArg::Value(ValueArg::Single(decompressed_dst.into()))];
+    let implicit_args = vec![
+        range_check_arg,
+        ImplicitArg::NonBuiltin(EndpointArg::Value(ValueArg::Single(compressed_ptr.into()))),
+    ];
+    // Dummy value, just to indicate to the runner that a return value is expected.
+    let expected_explicit_return_values = vec![EndpointArg::from(Felt::ZERO)];
+
+    // Run the entrypoint.
+    // The compressed data is stored in the segment starting at `compressed_dst`, the returned
+    // implicit value is the end of the compressed data.
+    let state_reader = None;
+    let (_implicit_return_values, explicit_return_values, _hint_processor) =
+        run_cairo_0_entrypoint(
+            entrypoint,
+            &explicit_args,
+            &implicit_args,
+            state_reader,
+            &mut runner,
+            &program,
+            &runner_config,
+            &expected_explicit_return_values,
+        )
+        .unwrap();
+
+    // The explicit return value should be the decompressed end pointer.
+    assert_eq!(explicit_return_values.len(), 1);
+    let EndpointArg::Value(ValueArg::Single(MaybeRelocatable::RelocatableValue(decompressed_end))) =
+        explicit_return_values[0]
+    else {
+        panic!("Expected a single felt return value, got {:?}", explicit_return_values[0]);
+    };
+
+    // Read the compressed data from the segment and return.
+    let decompressed_data = runner
+        .vm
+        .get_integer_range(decompressed_dst, (decompressed_end - decompressed_dst).unwrap())
+        .unwrap();
+    decompressed_data.into_iter().map(|f| *f).collect()
+}
+
+#[rstest]
+#[case::zero([false; 10], Felt::ZERO)]
+#[case::thousand(
+    [false, false, false, true, false, true, true, true, true, true],
+    Felt::from(0b_0000_0011_1110_1000_u16),
+)]
+fn test_bits_array(#[case] expected: [bool; 10], #[case] felt: Felt) {
+    assert_eq!(BitsArray::<10>::try_from(felt).unwrap().0, expected);
+}
+
+#[rstest]
+#[case::max_fits(16, Felt::from(0xFFFF_u16))]
+#[case::overflow(252, Felt::MAX)]
+fn test_overflow_bits_array(#[case] n_bits_felt: usize, #[case] felt: Felt) {
+    let error = BitsArray::<10>::try_from(felt).unwrap_err();
+    assert_matches!(
+        error, OsHintError::StatelessCompressionOverflow { n_bits, .. } if n_bits == n_bits_felt
+    );
+}
+
+#[test]
+fn test_pack_and_unpack() {
+    let felts = [
+        Felt::from(34_u32),
+        Felt::from(0_u32),
+        Felt::from(11111_u32),
+        Felt::from(1034_u32),
+        Felt::from(3404_u32),
+    ];
+    let bucket: Vec<_> =
+        felts.into_iter().map(|f| BucketElement125::try_from(f).unwrap()).collect();
+    let packed = BucketElement125::pack_in_felts(&bucket);
+    let unpacked = unpack_felts(packed.as_ref(), bucket.len());
+    assert_eq!(bucket, unpacked);
+}
+
+#[test]
+fn test_buckets() {
+    let mut buckets = Buckets::new();
+    buckets.add(BucketElement::BucketElement31(BucketElement31::try_from(Felt::ONE).unwrap()));
+    buckets.add(BucketElement::BucketElement62(BucketElement62::try_from(Felt::TWO).unwrap()));
+    let bucket62_3 =
+        BucketElement::BucketElement62(BucketElement62::try_from(Felt::THREE).unwrap());
+    buckets.add(bucket62_3.clone());
+
+    assert_eq!(buckets.get_element_index(&bucket62_3), Some(&1_usize));
+    assert_eq!(buckets.lengths(), [0, 0, 0, 2, 1, 0]);
+}
+
+#[test]
+fn test_usize_pack_and_unpack() {
+    let nums = vec![34, 0, 11111, 1034, 3404, 16, 32, 127, 129, 128];
+    let elm_bound = 12345;
+    let packed = pack_in_felts(&nums, elm_bound);
+    let unpacked = unpack_felts_to::<usize>(packed.as_ref(), nums.len(), elm_bound);
+    assert_eq!(nums, unpacked);
+}
+
+#[rstest]
+#[case::trivial(vec![], 0, None)]
+#[case::powers_of_two_plus_one((0..125).map(|i| 2_u128.pow(i) + 1).collect(), 63, Some(23))]
+#[case::small_number_range((0..2u128.pow(15)).collect(), 2usize.pow(11), Some(15))]
+#[case::large_number_range(
+    (0..2u128.pow(10)).map(|i| 2u128.pow(30) + i).collect(), 2usize.pow(7), Some(16)
+)]
+fn test_unpack_felts(
+    #[case] elms: Vec<u128>,
+    #[case] expected_compression_length: usize,
+    #[case] expected_n_steps_per_elm: Option<usize>,
+) {
+    let elm_bound = elms.iter().max().unwrap_or(&0) + 1;
+    let n_elms = elms.len();
+    let compressed = pack_in_felts(&elms, elm_bound);
+    let felt_bound = Felt::TWO.pow(251u8);
+    assert!(compressed.iter().all(|f| *f < felt_bound));
+    assert_eq!(compressed.len(), expected_compression_length);
+
+    let elm_felts: Vec<_> = elms.into_iter().map(Felt::from).collect();
+    assert_eq!(
+        elm_felts,
+        unpack_felts_to::<u128>(&compressed, n_elms, elm_bound)
+            .into_iter()
+            .map(Felt::from)
+            .collect::<Vec<Felt>>()
+    );
+    let (cairo_unpacked, resources) = cairo_unpack_felts(&compressed, elm_bound, n_elms);
+    assert_eq!(elm_felts, cairo_unpacked);
+    match expected_n_steps_per_elm {
+        Some(expected_n_steps_per_elm) => {
+            assert_eq!(resources.n_steps.checked_div(n_elms).unwrap(), expected_n_steps_per_elm);
+        }
+        None => {
+            assert_eq!(n_elms, 0);
+        }
+    }
+}
+
+#[test]
+fn test_get_bucket_offsets() {
+    let lengths = vec![2, 3, 5];
+    let offsets = get_bucket_offsets(&lengths);
+    assert_eq!(offsets, [0, 2, 5]);
+}
+
+#[rstest]
+#[case::unique_values(
+    vec![
+        Felt::from(42),                    // < 15 bits
+        Felt::from(12833943439439439_u64), // 54 bits
+        Felt::from(1283394343),            // 31 bits
+    ],
+    [0, 0, 0, 1, 1, 1],
+    0,
+    vec![],
+)]
+#[case::repeated_values(
+    vec![
+        Felt::from(43),
+        Felt::from(42),
+        Felt::from(42),
+        Felt::from(42),
+    ],
+    [0, 0, 0, 0, 0, 2],
+    2,
+    vec![1, 1],
+)]
+#[case::edge_bucket_values(
+    vec![
+        Felt::from((BigUint::from(1_u8) << 15) - 1_u8),
+        Felt::from(BigUint::from(1_u8) << 15),
+        Felt::from((BigUint::from(1_u8) << 31) - 1_u8),
+        Felt::from(BigUint::from(1_u8) << 31),
+        Felt::from((BigUint::from(1_u8) << 62) - 1_u8),
+        Felt::from(BigUint::from(1_u8) << 62),
+        Felt::from((BigUint::from(1_u8) << 83) - 1_u8),
+        Felt::from(BigUint::from(1_u8) << 83),
+        Felt::from((BigUint::from(1_u8) << 125) - 1_u8),
+        Felt::from(BigUint::from(1_u8) << 125),
+        Felt::MAX,
+    ],
+    [2, 2, 2, 2, 2, 1],
+    0,
+    vec![],
+)]
+fn test_update_with_unique_values(
+    #[case] values: Vec<Felt>,
+    #[case] expected_unique_lengths: [usize; N_UNIQUE_BUCKETS],
+    #[case] expected_n_repeating_values: usize,
+    #[case] expected_repeating_value_pointers: Vec<usize>,
+) {
+    let compression_set = CompressionSet::new(&values);
+    assert_eq!(expected_unique_lengths, compression_set.get_unique_value_bucket_lengths());
+    assert_eq!(expected_n_repeating_values, compression_set.n_repeating_values());
+    assert_eq!(expected_repeating_value_pointers, compression_set.get_repeating_value_pointers());
+}
+
+// These values are calculated by importing the module and running the compression method
+// ```py
+// # import compress from compression
+// def main() -> int:
+//     print(compress([2,3,1]))
+//     return 0
+// ```
+#[rstest]
+#[case::single_value_1(vec!["0x1"], vec!["0x100000000000000000000000000000100000", "0x1", "0x5"])]
+#[case::single_value_2(vec!["0x2"], vec!["0x100000000000000000000000000000100000", "0x2", "0x5"])]
+#[case::single_value_3(vec!["0xa"], vec!["0x100000000000000000000000000000100000", "0xA", "0x5"])]
+#[case::two_values(vec!["0x1", "0x2"], vec!["0x200000000000000000000000000000200000", "0x10001", "0x28"])]
+#[case::three_values(vec!["0x2", "0x3", "0x1"], vec!["0x300000000000000000000000000000300000", "0x40018002", "0x11d"])]
+#[case::four_values(vec!["0x1", "0x2", "0x3", "0x4"], vec!["0x400000000000000000000000000000400000", "0x8000c0010001", "0x7d0"])]
+#[case::extracted_kzg_example(vec!["0x1", "0x1", "0x6", "0x7c7", "0x42", "0x0"], vec!["0x10000500000000000000000000000000000600000", "0x841f1c0030001", "0x0", "0x17eff"])]
+#[case::many_buckets(
+    vec![
+        "0x4",
+        "0x2",
+        "0x12",
+        "0x0",
+        "0x8d",
+        "0x3b28019ccfdbd30ffc65951d94bb85c9e2b8434111a000b5afd533ce65f57a4",
+        "0x8b",
+        "0x3e761c56282df5f70f25fc154e6b3ac9335b7fc41538ecb9276c77a77ee42b4",
+        "0x8a",
+        "0x7e2c7f8fd5d138ac47de629f64c7a2c732b2fd5863bd4b7a3df13a9143313e2",
+        "0x8c",
+        "0x88",
+        "0xa",
+        "0x8a",
+        "0x8af9fb61c",
+        "0x87",
+        "0xfffffffffffffffffffff7506049e4",
+        "0x89",
+        "0xc02",
+        "0x8c",
+        "0x7",
+        "0x7c6f280b97046e3b87f91b905721b07cb7a3c0c5bc3e7415542d334de7c15b6",
+        "0x8b",
+        "0x7075626c69635f6b6579",
+        "0x1",
+        "0x7c6f280b97046e3b87f91b905721b07cb7a3c0c5bc3e7415542d334de7c15b6",
+        "0x3ccabeeed5a2f8b62b97ade270f3c7276c38f2d88c7260ba080d8185c018d37"
+    ],
+    vec![
+        "0x40000f00000000010000100001000050001b00000",
+        "0x3b28019ccfdbd30ffc65951d94bb85c9e2b8434111a000b5afd533ce65f57a4",
+        "0x3e761c56282df5f70f25fc154e6b3ac9335b7fc41538ecb9276c77a77ee42b4",
+        "0x7e2c7f8fd5d138ac47de629f64c7a2c732b2fd5863bd4b7a3df13a9143313e2",
+        "0x7c6f280b97046e3b87f91b905721b07cb7a3c0c5bc3e7415542d334de7c15b6",
+        "0x3ccabeeed5a2f8b62b97ade270f3c7276c38f2d88c7260ba080d8185c018d37",
+        "0xfffffffffffffffffffff7506049e4",
+        "0x7075626c69635f6b6579",
+        "0x8af9fb61c",
+        "0x40038c020112021c005008801180228045808d000000480010004",
+        "0xaad9",
+        "0x1ec63d26ccd3d600757"
+    ])]
+
+fn test_compress_decompress(#[case] input: Vec<&str>, #[case] expected: Vec<&str>) {
+    let data: Vec<_> = input.into_iter().map(Felt::from_hex_unchecked).collect();
+    let compressed = compress(&data);
+    let expected: Vec<_> = expected.iter().map(|s| Felt::from_hex_unchecked(s)).collect();
+    assert_eq!(compressed, expected);
+
+    let decompressed = decompress(&mut compressed.into_iter());
+    assert_eq!(decompressed, data);
+}
+
+#[rstest]
+#[case::no_values(
+    vec![],
+    0, // No buckets.
+    None,
+)]
+#[case::single_value_1(
+    vec![Felt::from(7777777)],
+    1, // A single bucket with one value.
+    Some(300), // 1 header, 1 value, 1 pointer
+)]
+#[case::large_duplicates(
+    vec![Felt::from(BigUint::from(2_u8).pow(250)); 100],
+    1, // Should remove duplicated values.
+    Some(5),
+)]
+#[case::small_values(
+    (0..0x8000).map(Felt::from).collect(),
+    2048, // = 2**15/(251/15), as all elements are packed in the 15-bits bucket.
+    Some(7),
+)]
+#[case::mixed_buckets(
+    (0..252).map(|i| Felt::from(BigUint::from(2_u8).pow(i))).collect(),
+    1 + 2 + 8 + 7 + 21 + 127, // All buckets are involved here.
+    Some(67), // More than half of the values are in the biggest (252-bit) bucket.
+)]
+fn test_compression_length(
+    #[case] data: Vec<Felt>,
+    #[case] expected_unique_values_packed_length: usize,
+    #[case] expected_compression_percents: Option<usize>,
+) {
+    let compressed = compress(&data);
+
+    let n_unique_values = data.iter().collect::<HashSet<_>>().len();
+    let n_repeated_values = data.len() - n_unique_values;
+    let expected_repeated_value_pointers_packed_length = n_repeated_values
+        .div_ceil(get_n_elms_per_felt(ElmBoundType::try_from(n_unique_values).unwrap()));
+    let expected_bucket_indices_packed_length =
+        data.len().div_ceil(get_n_elms_per_felt(ElmBoundType::try_from(TOTAL_N_BUCKETS).unwrap()));
+
+    assert_eq!(
+        compressed.len(),
+        1 + expected_unique_values_packed_length
+            + expected_repeated_value_pointers_packed_length
+            + expected_bucket_indices_packed_length
+    );
+
+    if let Some(expected_compression_percents_val) = expected_compression_percents {
+        assert_eq!(100 * compressed.len() / data.len(), expected_compression_percents_val);
+    }
+    assert_eq!(data, decompress(&mut compressed.into_iter()));
+}
+
+#[rstest]
+#[case(128, 35)]
+#[case(7, 83)]
+fn test_get_n_elms_per_felt(#[case] elm_bound: ElmBoundType, #[case] expected_n_elems: usize) {
+    assert_eq!(get_n_elms_per_felt(elm_bound), expected_n_elems);
+}
+
+/// Test that Cairo and Rust implementations of compress are identical. Also verifies resources
+/// required for cairo compression.
+#[rstest]
+#[case::no_buckets(vec![], None)]
+#[case::single_bucket_one_value(vec![Felt::from(7777777)], Some(expect![[r#"
+    1271
+"#]]))]
+#[case::large_duplicates(vec![Felt::from(BigUint::from(2_u8).pow(250)); 100], Some(expect![[r#"
+    78
+"#]]))]
+#[case::small_values((0..(1 << 15)).map(Felt::from).collect(), Some(expect![[r#"
+    60
+"#]]))]
+#[case::mixed_buckets(
+    (0..252).map(|i| Felt::from(BigUint::from(2_u8).pow(i))).collect(),
+    Some(expect![[r#"
+    62
+"#]]))]
+fn test_cairo_compress(#[case] data: Vec<Felt>, #[case] expected_n_steps_per_elm: Option<Expect>) {
+    let compressed = compress(&data);
+    let (cairo_compressed, execution_resources) = cairo_compress(&data);
+    assert_eq!(cairo_compressed, compressed);
+
+    if !data.is_empty() {
+        expected_n_steps_per_elm
+            .unwrap()
+            .assert_debug_eq(&(execution_resources.n_steps / data.len()));
+    }
+
+    assert_eq!(data, cairo_decompress(&compressed));
+    assert_eq!(data, decompress(&mut compressed.into_iter()));
+}

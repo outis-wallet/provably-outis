@@ -1,0 +1,387 @@
+use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
+
+use apollo_config::CONFIG_FILE_ARG;
+use apollo_config_manager_config::config::ConfigManagerConfig;
+use apollo_config_manager_types::communication::{
+    ConfigManagerClientError,
+    MockConfigManagerClient,
+    SharedConfigManagerClient,
+};
+use apollo_config_manager_types::errors::ConfigManagerError;
+use apollo_consensus_config::config::ConsensusDynamicConfig;
+use apollo_node_config::component_execution_config::ReactiveComponentExecutionConfig;
+use apollo_node_config::config_utils::{load_and_validate_config, DeploymentBaseAppConfig};
+use apollo_node_config::definitions::ConfigPointersMap;
+use apollo_node_config::node_config::{NodeDynamicConfig, SequencerNodeConfig};
+use serde_json::Value;
+use starknet_api::core::ContractAddress;
+use tempfile::NamedTempFile;
+use tokio::sync::mpsc::channel;
+use tokio::task::yield_now;
+use tokio::time::{interval, timeout};
+use tracing_test::traced_test;
+
+use crate::config_manager_runner::ConfigManagerRunner;
+
+// An arbitrary hex-str config entry to be replaced.
+const VALIDATOR_ID_CONFIG_ENTRY: &str = "validator_id";
+const TEST_TIMEOUT_SECS: u64 = 1;
+// RFC 2606 reserves `.invalid`, so this never resolves and the test needs no network.
+const UNRESOLVABLE_URL: &str = "sequencer-core-service.invalid";
+const ARBITRARY_PORT: u16 = 8080;
+
+/// Creates a temporary config file with specific test values and returns CLI args pointing to it.
+fn create_temp_config_file_and_args() -> (NamedTempFile, Vec<String>, String) {
+    let config = SequencerNodeConfig::default();
+    let config_pointers_map = ConfigPointersMap::create_for_testing();
+
+    let base_app_config = DeploymentBaseAppConfig::new(config, config_pointers_map);
+
+    // Create a temporary file
+    let temp_file = NamedTempFile::new().expect("Failed to create temporary config file");
+
+    base_app_config.dump_config_file(temp_file.path());
+
+    let current_validator_id = base_app_config
+        .as_value()
+        .get(VALIDATOR_ID_CONFIG_ENTRY)
+        .and_then(|v| v.as_str())
+        .expect("Missing or non-string hex value at VALIDATOR_ID_CONFIG_ENTRY")
+        .to_string();
+
+    // Create cli args pointing to the temp file
+    let cli_args = vec![
+        "test_node".to_string(),
+        CONFIG_FILE_ARG.to_string(),
+        temp_file.path().to_string_lossy().to_string(),
+    ];
+
+    (temp_file, cli_args, current_validator_id)
+}
+
+/// Dumps `config` to a temporary file and returns it with CLI args pointing to it.
+fn dump_config_and_args(config: SequencerNodeConfig) -> (NamedTempFile, Vec<String>) {
+    let base_app_config =
+        DeploymentBaseAppConfig::new(config, ConfigPointersMap::create_for_testing());
+    let temp_file = NamedTempFile::new().expect("Failed to create temporary config file");
+    base_app_config.dump_config_file(temp_file.path());
+
+    let cli_args = vec![
+        "test_node".to_string(),
+        CONFIG_FILE_ARG.to_string(),
+        temp_file.path().to_string_lossy().to_string(),
+    ];
+
+    (temp_file, cli_args)
+}
+
+fn update_config_file(temp_file: &NamedTempFile) -> String {
+    let current_content =
+        fs::read_to_string(temp_file.path()).expect("Failed to read temp config file");
+
+    // Parse JSON (expects a top-level object/map)
+    let mut root: Value = serde_json::from_str(&current_content).expect("Config is not valid JSON");
+    let obj = root.as_object_mut().expect("Config root must be a JSON object");
+
+    // Get the hex string at the key VALIDATOR_ID_CONFIG_ENTRY (e.g., "validator_id": "0x00ff")
+    let current_validator_id = obj
+        .get(VALIDATOR_ID_CONFIG_ENTRY)
+        .and_then(|v| v.as_str())
+        .expect("Missing or non-string hex value at VALIDATOR_ID_CONFIG_ENTRY");
+    assert!(current_validator_id.starts_with("0x"), "Expected a 0x-prefixed hex string");
+
+    // Bump by 1 and preserve width
+    let hex = &current_validator_id[2..]; // drop "0x"
+    let n = u128::from_str_radix(hex, 16).unwrap() + 1;
+    let new_validator_id = format!("0x{:0x}", n);
+
+    // Update JSON and write back
+    obj.insert(VALIDATOR_ID_CONFIG_ENTRY.to_string(), Value::String(new_validator_id.clone()));
+    let updated_content = serde_json::to_string_pretty(&root).expect("Failed to serialize JSON");
+    fs::write(temp_file.path(), updated_content)
+        .expect("Failed to write updated config to temp file");
+
+    new_validator_id
+}
+
+#[tokio::test]
+async fn config_manager_runner_update_config_with_changed_values() {
+    // Set a mock config manager client to expect the update dynamic config request.
+    let mut mock_client = MockConfigManagerClient::new();
+    mock_client.expect_set_node_dynamic_config().times(1..).return_const(Ok(()));
+    let config_manager_client: SharedConfigManagerClient = Arc::new(mock_client);
+
+    // Set a config manager config.
+    let config_manager_config = ConfigManagerConfig::default();
+
+    // Create a temporary config file and get the validator id value.
+    let (temp_file, cli_args, validator_id_value) = create_temp_config_file_and_args();
+
+    let node_dynamic_config = NodeDynamicConfig::default();
+
+    // Create a config manager runner and update the config.
+    let mut config_manager_runner = ConfigManagerRunner::new(
+        config_manager_config,
+        config_manager_client,
+        node_dynamic_config,
+        cli_args,
+    );
+
+    // Helper function to convert a hex string to a u128.
+    fn hex_to_u128(s: &str) -> u128 {
+        let hex = s.strip_prefix("0x").unwrap_or(s);
+        u128::from_str_radix(hex, 16).unwrap()
+    }
+
+    // Trigger a config update, expecting the original validator id.
+    let expected_validator_id = ContractAddress::from(hex_to_u128(validator_id_value.as_str()));
+
+    let first_update_config_result = config_manager_runner.update_config().await;
+    let first_dynamic_config =
+        first_update_config_result.expect("First update_config should succeed");
+    assert_eq!(
+        first_dynamic_config.consensus_dynamic_config.as_ref().unwrap().validator_id,
+        expected_validator_id,
+        "First update_config: Validator id mismatch: {} != {}",
+        first_dynamic_config.consensus_dynamic_config.as_ref().unwrap().validator_id,
+        expected_validator_id
+    );
+
+    // Edit the config file and then trigger a config update, expecting the new validator id.
+    let new_validator_id = update_config_file(&temp_file);
+    let expected_validator_id = ContractAddress::from(hex_to_u128(new_validator_id.as_str()));
+
+    let second_update_config_result = config_manager_runner.update_config().await;
+    let second_dynamic_config =
+        second_update_config_result.expect("Second update_config should succeed");
+    assert_eq!(
+        second_dynamic_config.consensus_dynamic_config.as_ref().unwrap().validator_id,
+        expected_validator_id,
+        "Second update_config: Validator id mismatch: {} != {}",
+        second_dynamic_config.consensus_dynamic_config.as_ref().unwrap().validator_id,
+        expected_validator_id
+    );
+}
+
+/// The refresh must not resolve component urls; boot must still reject an unresolvable one.
+#[tokio::test]
+async fn update_config_ignores_unresolvable_component_url() {
+    let mut config = SequencerNodeConfig::default();
+    config.components.batcher =
+        ReactiveComponentExecutionConfig::remote(UNRESOLVABLE_URL.to_string(), ARBITRARY_PORT);
+    // The batcher no longer runs locally, so its config must be unset.
+    config.batcher_config = None;
+
+    let (_temp_file, cli_args) = dump_config_and_args(config);
+
+    let boot_error = load_and_validate_config(cli_args.clone(), false)
+        .expect_err("Boot-time loading should reject an unresolvable component url")
+        .to_string();
+    // Pin the rejection reason, so this stays a test about url resolution, and pin that the error
+    // names the offending component and keeps the resolver's own message.
+    assert!(boot_error.contains("Failed to resolve url"), "Unexpected boot error: {boot_error}");
+    assert!(boot_error.contains("components.batcher"), "Boot error lacks component: {boot_error}");
+    assert!(boot_error.contains(UNRESOLVABLE_URL), "Boot error lacks url: {boot_error}");
+    assert!(
+        boot_error.contains("failed to lookup address information"),
+        "Boot error lacks the resolver error: {boot_error}"
+    );
+
+    let mut mock_client = MockConfigManagerClient::new();
+    mock_client.expect_set_node_dynamic_config().return_const(Ok(()));
+
+    let mut runner = ConfigManagerRunner::new(
+        ConfigManagerConfig::default(),
+        Arc::new(mock_client),
+        NodeDynamicConfig::default(),
+        cli_args,
+    );
+
+    runner.update_config().await.expect("Refresh should not resolve component urls");
+}
+
+/// Skipping url resolution must not skip anything else. This cross-check lives on `BatcherConfig`,
+/// the parent of the dynamic config, so validating only `NodeDynamicConfig` would miss it.
+#[tokio::test]
+async fn update_config_rejects_dynamic_value_invalid_against_static_one() {
+    let mut config = SequencerNodeConfig::default();
+    let batcher_config = config.batcher_config.as_mut().expect("Default config has a batcher");
+    batcher_config.dynamic_config.n_concurrent_txs =
+        batcher_config.static_config.input_stream_content_buffer_size + 1;
+
+    let (_temp_file, cli_args) = dump_config_and_args(config);
+
+    let mut runner = ConfigManagerRunner::new(
+        ConfigManagerConfig::default(),
+        Arc::new(MockConfigManagerClient::new()),
+        NodeDynamicConfig::default(),
+        cli_args,
+    );
+
+    let error = runner
+        .update_config()
+        .await
+        .expect_err("Refresh should reject n_concurrent_txs above input_stream_content_buffer_size")
+        .to_string();
+    assert!(error.contains("input_stream_content_buffer_size"), "Unexpected error: {error}");
+}
+
+/// The refresh must run `cross_member_validations` too, not just the `Validate` derive. This check
+/// spans two configs, so no single struct's validator backstops it.
+#[tokio::test]
+async fn update_config_rejects_idle_delay_above_batcher_deadline() {
+    let mut config = SequencerNodeConfig::default();
+    let consensus_manager_config =
+        config.consensus_manager_config.as_mut().expect("Default config has a consensus manager");
+    let proposal_timeout = consensus_manager_config
+        .consensus_manager_config
+        .dynamic_config
+        .timeouts
+        .get_proposal_timeout(0);
+    // Leave no room between the proposal timeout and the build margin, so idle detection could
+    // never fire before the hard deadline.
+    consensus_manager_config.context_config.dynamic_config.build_proposal_margin_millis =
+        Duration::ZERO;
+    config
+        .batcher_config
+        .as_mut()
+        .expect("Default config has a batcher")
+        .dynamic_config
+        .proposer_idle_detection_delay_millis = proposal_timeout;
+
+    let (_temp_file, cli_args) = dump_config_and_args(config);
+
+    let mut runner = ConfigManagerRunner::new(
+        ConfigManagerConfig::default(),
+        Arc::new(MockConfigManagerClient::new()),
+        NodeDynamicConfig::default(),
+        cli_args,
+    );
+
+    let error = runner
+        .update_config()
+        .await
+        .expect_err("Refresh should reject an idle delay that exceeds the batcher deadline")
+        .to_string();
+    assert!(error.contains("proposer_idle_detection_delay_millis"), "Unexpected error: {error}");
+}
+
+/// A dispatch the component rejects must not be recorded as applied: the next update has to try
+/// again, rather than compare against a config the node never received and see no change.
+#[tokio::test]
+async fn failed_dispatch_is_retried_on_the_next_update() {
+    let (_temp_file, cli_args, _) = create_temp_config_file_and_args();
+
+    let mut mock_client = MockConfigManagerClient::new();
+    // Both updates must reach the client. Were the failure recorded as applied, the second would
+    // take the "no change" path and never dispatch.
+    mock_client.expect_set_node_dynamic_config().times(2).returning(|_| {
+        Err(ConfigManagerClientError::ConfigManagerError(ConfigManagerError::InvalidConfig(
+            "rejected by the component".to_string(),
+        )))
+    });
+
+    let mut runner = ConfigManagerRunner::new(
+        ConfigManagerConfig::default(),
+        Arc::new(mock_client),
+        NodeDynamicConfig::default(),
+        cli_args,
+    );
+
+    runner.update_config().await.expect_err("Dispatch fails");
+    runner.update_config().await.expect_err("Dispatch fails again");
+}
+
+/// The counterpart: once the component accepts the config, an unchanged file is not re-dispatched.
+#[tokio::test]
+async fn accepted_dispatch_is_not_repeated_while_the_config_is_unchanged() {
+    let (_temp_file, cli_args, _) = create_temp_config_file_and_args();
+
+    let mut mock_client = MockConfigManagerClient::new();
+    mock_client.expect_set_node_dynamic_config().times(1).return_const(Ok(()));
+
+    let mut runner = ConfigManagerRunner::new(
+        ConfigManagerConfig::default(),
+        Arc::new(mock_client),
+        NodeDynamicConfig::default(),
+        cli_args,
+    );
+
+    runner.update_config().await.expect("First update should dispatch");
+    runner.update_config().await.expect("Second update should be a no-op");
+}
+
+#[tokio::test]
+async fn watcher_triggers_update_on_file_change() {
+    // Prepare temp config file and CLI args.
+    let (temp_file, cli_args, _) = create_temp_config_file_and_args();
+
+    // Channel to observe that update_config was called.
+    let (tx, mut rx) = channel(1);
+
+    let mut mock_client = MockConfigManagerClient::new();
+    mock_client.expect_set_node_dynamic_config().times(1).returning(move |_| {
+        let _ = tx.blocking_send(());
+        Ok(())
+    });
+
+    let client: SharedConfigManagerClient = Arc::new(mock_client);
+
+    let mut runner = ConfigManagerRunner::new(
+        ConfigManagerConfig::default(),
+        client,
+        NodeDynamicConfig::default(),
+        cli_args,
+    );
+
+    // Spawn watcher loop in background task.
+    tokio::spawn(async move {
+        let _ = runner.run_watcher_loop(interval(Duration::MAX)).await;
+    });
+
+    yield_now().await;
+
+    // Modify the config file to trigger an event.
+    let _ = update_config_file(&temp_file);
+
+    // Wait until the update call is observed or timeout.
+    timeout(Duration::from_secs(TEST_TIMEOUT_SECS), rx.recv())
+        .await
+        .expect("update_config was not called within timeout");
+}
+
+#[traced_test]
+#[test]
+fn log_config_diff_changes() {
+    let old_dynamic_config = NodeDynamicConfig {
+        consensus_dynamic_config: Some(ConsensusDynamicConfig {
+            validator_id: ContractAddress::from(1u128),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let new_dynamic_config = NodeDynamicConfig {
+        consensus_dynamic_config: Some(ConsensusDynamicConfig {
+            validator_id: ContractAddress::from(2u128),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let mock_client = MockConfigManagerClient::new();
+    let runner = ConfigManagerRunner::new(
+        ConfigManagerConfig::default(),
+        Arc::new(mock_client),
+        old_dynamic_config.clone(),
+        Vec::<String>::new(),
+    );
+
+    runner.log_config_diff(&old_dynamic_config, &new_dynamic_config);
+
+    assert!(logs_contain("consensus_dynamic_config changed from"));
+    assert!(logs_contain(r#""validator_id":"0x1""#));
+    assert!(logs_contain(r#""validator_id":"0x2""#));
+}

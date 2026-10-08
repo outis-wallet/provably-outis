@@ -1,0 +1,342 @@
+use apollo_config::behavior_mode::BehaviorMode;
+use apollo_config::dumping::{combine_config_map_and_pointers, SerializeConfig};
+use apollo_gateway_config::config::GatewayConfig;
+use apollo_infra::component_client::RemoteClientConfig;
+use apollo_infra::component_server::{LocalServerConfig, RemoteServerConfig};
+use apollo_infra_utils::dumping::serialize_to_file_test;
+use apollo_state_sync_config::config::{StateSyncConfig, StateSyncStaticConfig};
+use apollo_storage::{StorageConfig, StorageScope};
+use rstest::rstest;
+use validator::Validate;
+
+use crate::component_config::ComponentConfig;
+use crate::component_execution_config::{
+    ActiveComponentExecutionConfig,
+    ReactiveComponentExecutionConfig,
+    ReactiveComponentExecutionMode,
+};
+use crate::config_utils::private_parameters;
+use crate::monitoring::MonitoringConfig;
+use crate::node_config::{
+    SequencerNodeConfig,
+    CONFIG_NON_POINTERS_WHITELIST,
+    CONFIG_POINTERS,
+    CONFIG_SCHEMA_PATH,
+    CONFIG_SECRETS_SCHEMA_PATH,
+};
+
+const FIX_BINARY_NAME: &str = "update_apollo_node_config_schema";
+
+const LOCAL_EXECUTION_MODE: ReactiveComponentExecutionMode =
+    ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled;
+const ENABLE_REMOTE_CONNECTION_MODE: ReactiveComponentExecutionMode =
+    ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled;
+
+const VALID_URL: &str = "www.google.com";
+const VALID_PORT: u16 = 8080;
+// RFC 2606 reserves `.invalid`, so this never resolves and the test needs no network.
+const UNRESOLVABLE_URL: &str = "sequencer-service.invalid";
+
+/// Test the validation of the struct ReactiveComponentExecutionConfig.
+/// Validates that execution mode of the component and the local/remote config are at sync.
+#[rstest]
+#[case::local(ReactiveComponentExecutionMode::Disabled, None, None, None, VALID_URL, VALID_PORT)]
+#[case::local(
+    ReactiveComponentExecutionMode::Remote,
+    None,
+    None,
+    Some(RemoteClientConfig::default()),
+    VALID_URL,
+    VALID_PORT
+)]
+#[case::local(
+    LOCAL_EXECUTION_MODE,
+    Some(LocalServerConfig::default()),
+    None,
+    None,
+    VALID_URL,
+    VALID_PORT
+)]
+#[case::remote(
+    ENABLE_REMOTE_CONNECTION_MODE,
+    Some(LocalServerConfig::default()),
+    Some(RemoteServerConfig::default()),
+    None,
+    VALID_URL,
+    VALID_PORT
+)]
+fn valid_component_execution_config(
+    #[case] execution_mode: ReactiveComponentExecutionMode,
+    #[case] local_server_config: Option<LocalServerConfig>,
+    #[case] remote_server_config: Option<RemoteServerConfig>,
+    #[case] remote_client_config: Option<RemoteClientConfig>,
+    #[case] url: &str,
+    #[case] port: u16,
+) {
+    let component_exe_config = ReactiveComponentExecutionConfig {
+        execution_mode,
+        local_server_config,
+        remote_server_config,
+        remote_client_config,
+        url: url.to_string(),
+        port,
+    };
+    assert_eq!(component_exe_config.validate(), Ok(()));
+}
+
+/// Test the validation of the struct SequencerNodeConfig and that the default config file is up to
+/// date. To update the default config file, run `cargo run --bin <FIX_BINARY_NAME>`.
+#[test]
+fn default_config_file_is_up_to_date() {
+    let combined_map = combine_config_map_and_pointers(
+        SequencerNodeConfig::default().dump(),
+        &CONFIG_POINTERS,
+        &CONFIG_NON_POINTERS_WHITELIST,
+    )
+    .unwrap();
+    serialize_to_file_test(&combined_map, CONFIG_SCHEMA_PATH, FIX_BINARY_NAME);
+
+    serialize_to_file_test(&private_parameters(), CONFIG_SECRETS_SCHEMA_PATH, FIX_BINARY_NAME);
+}
+
+#[test]
+fn validate_config_success() {
+    let config = SequencerNodeConfig::default();
+    assert!(config.validate().is_ok());
+}
+
+/// The `Validate` derive runs on every config-manager refresh, so it must do no network I/O:
+/// resolving urls there lets a transient DNS failure reject an unchanged, valid config. Url
+/// resolution belongs to [`ComponentConfig::validate_urls`], which callers run at boot only.
+///
+/// If this test fails, a validator started doing network I/O again. Move it to `validate_urls`
+/// rather than relaxing the assert. Note that a url that becomes *dynamic* cannot simply move
+/// there — it must be resolved when it changes, not on every refresh.
+#[test]
+fn component_config_validation_does_not_resolve_urls() {
+    let unresolvable =
+        || ReactiveComponentExecutionConfig::remote(UNRESOLVABLE_URL.to_string(), VALID_PORT);
+    let components = ComponentConfig {
+        batcher: unresolvable(),
+        class_manager: unresolvable(),
+        committer: unresolvable(),
+        config_manager: unresolvable(),
+        gateway: unresolvable(),
+        l1_events_provider: unresolvable(),
+        l1_gas_price_provider: unresolvable(),
+        mempool: unresolvable(),
+        mempool_p2p: unresolvable(),
+        proof_manager: unresolvable(),
+        sierra_compiler: unresolvable(),
+        signature_manager: unresolvable(),
+        state_sync: unresolvable(),
+        ..Default::default()
+    };
+
+    components.validate().expect("Config validation must not resolve urls");
+    components.validate_urls().expect_err("Boot-time validation must resolve urls");
+}
+
+fn echonet_gateway_config() -> GatewayConfig {
+    let mut gateway_config = GatewayConfig::default();
+    gateway_config.static_config.behavior_mode = BehaviorMode::Echonet;
+    gateway_config
+}
+
+#[test]
+fn echonet_with_remote_batcher_fails() {
+    let config = SequencerNodeConfig {
+        components: ComponentConfig {
+            batcher: ReactiveComponentExecutionConfig::remote(VALID_URL.to_string(), VALID_PORT),
+            ..Default::default()
+        },
+        gateway_config: Some(echonet_gateway_config()),
+        batcher_config: None,
+        ..Default::default()
+    };
+    let err = config.validate_node_config().unwrap_err();
+    assert!(format!("{err:?}").contains("consolidated"), "Unexpected error: {err:?}");
+}
+
+#[test]
+fn echonet_consolidated_succeeds() {
+    let config = SequencerNodeConfig {
+        gateway_config: Some(echonet_gateway_config()),
+        ..Default::default()
+    };
+    assert!(config.validate_node_config().is_ok(), "{:?}", config.validate_node_config());
+}
+
+#[rstest]
+#[case::monitoring_and_profiling(true, true, true)]
+#[case::monitoring_without_profiling(true, false, true)]
+#[case::no_monitoring_nor_profiling(false, false, true)]
+#[case::no_monitoring_with_profiling(false, true, false)]
+fn monitoring_config(
+    #[case] collect_metrics: bool,
+    #[case] collect_profiling_metrics: bool,
+    #[case] expected_successful_validation: bool,
+) {
+    let component_exe_config = MonitoringConfig { collect_metrics, collect_profiling_metrics };
+    assert_eq!(component_exe_config.validate().is_ok(), expected_successful_validation);
+}
+
+fn state_sync_config_with_full_archive() -> StateSyncConfig {
+    StateSyncConfig {
+        static_config: StateSyncStaticConfig {
+            storage_config: StorageConfig {
+                scope: StorageScope::FullArchive,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn validation_only_with_gateway_enabled_fails() {
+    let config = SequencerNodeConfig {
+        validation_only: true,
+        components: ComponentConfig {
+            gateway: ReactiveComponentExecutionConfig::default(),
+            http_server: ActiveComponentExecutionConfig::default(),
+            mempool: ReactiveComponentExecutionConfig::default(),
+            mempool_p2p: ReactiveComponentExecutionConfig::default(),
+            ..Default::default()
+        },
+        state_sync_config: Some(state_sync_config_with_full_archive()),
+        ..Default::default()
+    };
+    let err = config.validate_node_config().unwrap_err();
+    assert!(format!("{err:?}").contains("gateway"), "Unexpected error: {err:?}");
+}
+
+#[test]
+fn validation_only_with_http_server_enabled_fails() {
+    // Disable gateway to reach the http_server check.
+    let config = SequencerNodeConfig {
+        validation_only: true,
+        components: ComponentConfig {
+            gateway: ReactiveComponentExecutionConfig::disabled(),
+            http_server: ActiveComponentExecutionConfig::default(),
+            mempool: ReactiveComponentExecutionConfig::default(),
+            mempool_p2p: ReactiveComponentExecutionConfig::default(),
+            ..Default::default()
+        },
+        gateway_config: None,
+        state_sync_config: Some(state_sync_config_with_full_archive()),
+        ..Default::default()
+    };
+    let err = config.validate_node_config().unwrap_err();
+    assert!(format!("{err:?}").contains("http_server"), "Unexpected error: {err:?}");
+}
+
+#[test]
+fn validation_only_with_mempool_enabled_fails() {
+    // Disable gateway and http_server to reach the mempool check.
+    let config = SequencerNodeConfig {
+        validation_only: true,
+        components: ComponentConfig {
+            gateway: ReactiveComponentExecutionConfig::disabled(),
+            http_server: ActiveComponentExecutionConfig::disabled(),
+            mempool: ReactiveComponentExecutionConfig::default(),
+            mempool_p2p: ReactiveComponentExecutionConfig::default(),
+            ..Default::default()
+        },
+        gateway_config: None,
+        http_server_config: None,
+        state_sync_config: Some(state_sync_config_with_full_archive()),
+        ..Default::default()
+    };
+    let err = config.validate_node_config().unwrap_err();
+    assert!(format!("{err:?}").contains("mempool"), "Unexpected error: {err:?}");
+}
+
+#[test]
+fn validation_only_with_mempool_p2p_enabled_fails() {
+    // Disable gateway, http_server and mempool to reach the mempool_p2p check.
+    let config = SequencerNodeConfig {
+        validation_only: true,
+        components: ComponentConfig {
+            gateway: ReactiveComponentExecutionConfig::disabled(),
+            http_server: ActiveComponentExecutionConfig::disabled(),
+            mempool: ReactiveComponentExecutionConfig::disabled(),
+            mempool_p2p: ReactiveComponentExecutionConfig::default(),
+            ..Default::default()
+        },
+        gateway_config: None,
+        http_server_config: None,
+        mempool_config: None,
+        state_sync_config: Some(state_sync_config_with_full_archive()),
+        ..Default::default()
+    };
+    let err = config.validate_node_config().unwrap_err();
+    assert!(format!("{err:?}").contains("mempool_p2p"), "Unexpected error: {err:?}");
+}
+
+// The config manager is a local infrastructure component; running it remotely would make its
+// consumers (e.g. the mempool) reach it over a network RPC that can fail mid-request. Both
+// remote-capable execution modes must be rejected at validation time so the client is always local.
+#[test]
+fn config_manager_remote_is_rejected() {
+    // `config_manager_config` is None so the per-component "set iff running locally" check passes
+    // (remote is not running locally) and we reach the config_manager-specific validation.
+    let config = SequencerNodeConfig {
+        components: ComponentConfig {
+            config_manager: ReactiveComponentExecutionConfig::remote(VALID_URL.into(), VALID_PORT),
+            ..Default::default()
+        },
+        config_manager_config: None,
+        state_sync_config: Some(state_sync_config_with_full_archive()),
+        ..Default::default()
+    };
+    let err = config.validate_node_config().unwrap_err();
+    assert!(
+        format!("{err:?}").contains("config_manager must run locally"),
+        "Unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn config_manager_local_with_remote_enabled_is_rejected() {
+    // This mode runs locally, so the default (Some) config_manager_config satisfies the
+    // per-component check and we reach the config_manager-specific validation.
+    let config = SequencerNodeConfig {
+        components: ComponentConfig {
+            config_manager: ReactiveComponentExecutionConfig::local_with_remote_enabled(
+                VALID_URL.into(),
+                VALID_PORT,
+            ),
+            ..Default::default()
+        },
+        state_sync_config: Some(state_sync_config_with_full_archive()),
+        ..Default::default()
+    };
+    let err = config.validate_node_config().unwrap_err();
+    assert!(
+        format!("{err:?}").contains("config_manager must run locally"),
+        "Unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn validation_only_with_tx_ingestion_disabled_succeeds() {
+    let config = SequencerNodeConfig {
+        validation_only: true,
+        components: ComponentConfig {
+            gateway: ReactiveComponentExecutionConfig::disabled(),
+            http_server: ActiveComponentExecutionConfig::disabled(),
+            mempool: ReactiveComponentExecutionConfig::disabled(),
+            mempool_p2p: ReactiveComponentExecutionConfig::disabled(),
+            ..Default::default()
+        },
+        gateway_config: None,
+        http_server_config: None,
+        mempool_config: None,
+        mempool_p2p_config: None,
+        state_sync_config: Some(state_sync_config_with_full_archive()),
+        ..Default::default()
+    };
+    assert!(config.validate_node_config().is_ok());
+}

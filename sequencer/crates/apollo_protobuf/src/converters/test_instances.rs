@@ -1,0 +1,146 @@
+use std::fmt::Display;
+
+use apollo_test_utils::{auto_impl_get_test_instance, get_number_of_variants, GetTestInstance};
+use prost::DecodeError;
+use rand::RngExt;
+use starknet_api::block::{BlockNumber, GasPrice, StarknetVersion};
+use starknet_api::consensus_transaction::ConsensusTransaction;
+use starknet_api::core::ContractAddress;
+use starknet_api::crypto::utils::RawSignature;
+use starknet_api::data_availability::L1DataAvailabilityMode;
+use starknet_api::execution_resources::GasAmount;
+use starknet_api::hash::StarkHash;
+use starknet_types_core::felt::Felt;
+
+use super::ProtobufConversionError;
+use crate::consensus::{
+    CommitmentParts,
+    L2GasInfo,
+    ProposalCommitment,
+    ProposalFin,
+    ProposalFinPayload,
+    ProposalInit,
+    ProposalPart,
+    StreamMessage,
+    StreamMessageBody,
+    TransactionBatch,
+    Vote,
+    VoteType,
+};
+
+auto_impl_get_test_instance! {
+    pub struct Vote {
+        pub vote_type: VoteType,
+        pub height: BlockNumber,
+        pub round: u32,
+        pub proposal_commitment: Option<ProposalCommitment>,
+        pub voter: ContractAddress,
+        pub signature: RawSignature,
+    }
+    pub enum VoteType {
+        Prevote = 0,
+        Precommit = 1,
+    }
+    pub struct ProposalCommitment(pub StarkHash);
+    pub struct CommitmentParts {
+        pub concatenated_counts: Felt,
+        pub parent_commitment: Option<ProposalCommitment>,
+        pub transaction_commitment: StarkHash,
+        pub event_commitment: StarkHash,
+        pub receipt_commitment: StarkHash,
+    }
+    pub struct L2GasInfo {
+        pub next_l2_gas_price_fri: GasPrice,
+        pub l2_gas_used: GasAmount,
+    }
+    pub struct ProposalFinPayload {
+        pub commitment_parts: CommitmentParts,
+        pub l2_gas_info: L2GasInfo,
+    }
+    pub struct ProposalFin {
+        pub proposal_commitment: ProposalCommitment,
+        pub executed_transaction_count: u64,
+        pub fin_payload: Option<ProposalFinPayload>,
+    }
+    pub struct TransactionBatch {
+        pub transactions: Vec<ConsensusTransaction>,
+    }
+    pub struct ProposalInit {
+        pub height: BlockNumber,
+        pub round: u32,
+        pub valid_round: Option<u32>,
+        pub proposer: ContractAddress,
+        pub timestamp: u64,
+        pub builder: ContractAddress,
+        pub l1_da_mode: L1DataAvailabilityMode,
+        pub l2_gas_price_fri: GasPrice,
+        pub l1_gas_price_fri: GasPrice,
+        pub l1_data_gas_price_fri: GasPrice,
+        pub l1_gas_price_wei: GasPrice,
+        pub l1_data_gas_price_wei: GasPrice,
+        pub starknet_version: StarknetVersion,
+        pub version_constant_commitment: StarkHash,
+        pub fee_proposal_fri: Option<GasPrice>,
+    }
+    pub enum ProposalPart {
+        Init(ProposalInit) = 0,
+        Fin(ProposalFin) = 1,
+        Transactions(TransactionBatch) = 2,
+    }
+
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TestStreamId(pub u64);
+
+impl From<TestStreamId> for Vec<u8> {
+    fn from(value: TestStreamId) -> Self {
+        value.0.to_be_bytes().to_vec()
+    }
+}
+
+impl TryFrom<Vec<u8>> for TestStreamId {
+    type Error = ProtobufConversionError;
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        if bytes.len() != 8 {
+            return Err(ProtobufConversionError::DecodeError(DecodeError::new("Invalid length")));
+        };
+        let mut array = [0; 8];
+        array.copy_from_slice(&bytes);
+        Ok(TestStreamId(u64::from_be_bytes(array)))
+    }
+}
+
+impl PartialOrd for TestStreamId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TestStreamId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+impl Display for TestStreamId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TestStreamId({})", self.0)
+    }
+}
+
+// The auto_impl_get_test_instance macro does not work for StreamMessage because it has
+// a generic type.
+// TODO(guyn): try to make the macro work with generic types.
+impl GetTestInstance for StreamMessage<ProposalPart, TestStreamId> {
+    fn get_test_instance(rng: &mut rand_chacha::ChaCha8Rng) -> Self {
+        let message = if rng.random_bool(0.5) {
+            StreamMessageBody::Content(ProposalPart::Transactions(TransactionBatch {
+                transactions: vec![ConsensusTransaction::get_test_instance(rng)],
+            }))
+        } else {
+            StreamMessageBody::Fin
+        };
+        Self { message, stream_id: TestStreamId(12), message_id: 47 }
+    }
+}

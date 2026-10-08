@@ -1,0 +1,235 @@
+use apollo_l1_gas_price::metrics::{
+    EXCHANGE_RATE_ORACLE_ERROR_COUNT,
+    EXCHANGE_RATE_ORACLE_LAST_SUCCESS_TIMESTAMP_SECONDS,
+    EXCHANGE_RATE_ORACLE_RATE,
+    EXCHANGE_RATE_ORACLE_SUCCESS_COUNT,
+    L1_DATA_GAS_PRICE_LATEST_MEAN_VALUE,
+    L1_GAS_PRICE_LATEST_MEAN_VALUE,
+    L1_GAS_PRICE_PROVIDER_INSUFFICIENT_HISTORY,
+    L1_GAS_PRICE_SCRAPER_BASELAYER_ERROR_COUNT,
+    L1_GAS_PRICE_SCRAPER_LAST_SUCCESS_TIMESTAMP_SECONDS,
+    L1_GAS_PRICE_SCRAPER_LATEST_SCRAPED_BLOCK,
+    L1_GAS_PRICE_SCRAPER_REORG_DETECTED,
+    L1_GAS_PRICE_SCRAPER_SUCCESS_COUNT,
+};
+use apollo_l1_gas_price_types::{CurrencyPair, DEFAULT_ETH_TO_FRI_RATE, LABEL_NAME_CURRENCY_PAIR};
+use apollo_metrics::metrics::MetricQueryName;
+
+use crate::dashboard::Row;
+use crate::panel::{traffic_light_thresholds, Panel, PanelType, Unit};
+use crate::query_builder::{
+    increase,
+    increase_with_label,
+    seconds_since_last_timestamp,
+    seconds_since_last_timestamp_with_label,
+    sum_increase_with_label,
+    with_label,
+    DEFAULT_DURATION,
+};
+
+// TODO(Asaf): extract the ETH/STRK panels here and the STRK/USD panels in `panels/consensus.rs`
+// into shared functions parameterized by `CurrencyPair`. They differ only in the pair they filter
+// on and in their titles.
+fn get_panel_eth_to_strk_error_count() -> Panel {
+    Panel::new(
+        "ETH→STRK Rate Query Error Count by Error Type",
+        format!(
+            "The number of times the ETH→STRK rate query failed, split by error type \
+             ({DEFAULT_DURATION} window)"
+        ),
+        increase_with_label(
+            &EXCHANGE_RATE_ORACLE_ERROR_COUNT,
+            LABEL_NAME_CURRENCY_PAIR,
+            CurrencyPair::EthStrk.into(),
+            DEFAULT_DURATION,
+            true,
+        ),
+        PanelType::TimeSeries,
+    )
+    .with_log_query(
+        "\"Failed to resolve query to\" OR \"Timeout when resolving query to\" OR \"Query failed \
+         to join handle for timestamp\"",
+    )
+}
+
+fn get_panel_eth_to_strk_total_error_count() -> Panel {
+    Panel::new(
+        "ETH→STRK Rate Query Total Error Count",
+        format!(
+            "The number of times the ETH→STRK rate query failed, summed over error types \
+             ({DEFAULT_DURATION} window). The error count alert thresholds this sum."
+        ),
+        sum_increase_with_label(
+            &EXCHANGE_RATE_ORACLE_ERROR_COUNT,
+            LABEL_NAME_CURRENCY_PAIR,
+            CurrencyPair::EthStrk.into(),
+            DEFAULT_DURATION,
+        ),
+        PanelType::TimeSeries,
+    )
+}
+
+fn get_panel_eth_to_strk_seconds_since_last_successful_update() -> Panel {
+    Panel::new(
+        "Seconds Since Last Successful ETH→STRK Rate Update",
+        "The number of seconds since the last successful ETH→STRK rate update (assuming there was \
+         an update in the last 12 hours). Expected cadence: ~15 minutes.",
+        seconds_since_last_timestamp_with_label(
+            &EXCHANGE_RATE_ORACLE_LAST_SUCCESS_TIMESTAMP_SECONDS,
+            LABEL_NAME_CURRENCY_PAIR,
+            CurrencyPair::EthStrk.into(),
+        ),
+        PanelType::TimeSeries,
+    )
+    .with_unit(Unit::Seconds)
+    .with_absolute_thresholds(traffic_light_thresholds(1200.0, 1800.0))
+}
+
+fn get_panel_eth_to_strk_success_count() -> Panel {
+    Panel::new(
+        "ETH→STRK Rate Query Success (binary)",
+        "Indicates whether the ETH→STRK rate query succeeded (1m window) \nExpected to be 1 every \
+         15 minutes.",
+        format!(
+            "changes({}[1m])",
+            with_label(
+                &EXCHANGE_RATE_ORACLE_SUCCESS_COUNT,
+                LABEL_NAME_CURRENCY_PAIR,
+                CurrencyPair::EthStrk.into()
+            )
+        ),
+        PanelType::TimeSeries,
+    )
+    .with_log_query("Caching conversion rate for timestamp")
+}
+
+fn get_panel_eth_to_strk_rate() -> Panel {
+    Panel::new(
+        "ETH→STRK rate",
+        format!("ETH→STRK rate (divided by DEFAULT_ETH_TO_FRI_RATE={DEFAULT_ETH_TO_FRI_RATE})"),
+        format!(
+            "{} / {}",
+            with_label(
+                &EXCHANGE_RATE_ORACLE_RATE,
+                LABEL_NAME_CURRENCY_PAIR,
+                CurrencyPair::EthStrk.into()
+            ),
+            DEFAULT_ETH_TO_FRI_RATE
+        ),
+        PanelType::TimeSeries,
+    )
+    .with_log_query("Caching conversion rate for timestamp")
+}
+
+fn get_panel_l1_gas_price_provider_insufficient_history() -> Panel {
+    Panel::new(
+        "L1 Gas Price Provider Insufficient History",
+        format!(
+            "The number of times the L1 gas price provider calculated an average with too few \
+             blocks ({DEFAULT_DURATION} window)",
+        ),
+        increase(&L1_GAS_PRICE_PROVIDER_INSUFFICIENT_HISTORY, DEFAULT_DURATION),
+        PanelType::TimeSeries,
+    )
+    .with_log_query("Not enough history to calculate the mean gas price.")
+}
+
+fn get_panel_l1_gas_price_scraper_success_count() -> Panel {
+    Panel::new(
+        "L1 Gas Price Scraper Success Count",
+        format!(
+            "The number of times the L1 gas price scraper successfully scraped and updated gas \
+             prices ({DEFAULT_DURATION} window)",
+        ),
+        increase(&L1_GAS_PRICE_SCRAPER_SUCCESS_COUNT, DEFAULT_DURATION),
+        PanelType::TimeSeries,
+    )
+}
+
+fn get_panel_l1_gas_price_scraper_baselayer_error_count() -> Panel {
+    Panel::new(
+        "L1 Gas Price Scraper Base Layer Error Count",
+        format!(
+            "The number of times the L1 gas price scraper encountered an error while scraping the \
+             base layer ({DEFAULT_DURATION} window)",
+        ),
+        increase(&L1_GAS_PRICE_SCRAPER_BASELAYER_ERROR_COUNT, DEFAULT_DURATION),
+        PanelType::TimeSeries,
+    )
+    .with_log_query("\"Base layer error\" OR \"Scraper startup failure\"")
+}
+
+fn get_panel_l1_gas_price_scraper_reorg_detected() -> Panel {
+    Panel::new(
+        "L1 Gas Price Scraper Reorg Detected",
+        format!(
+            "The number of times the L1 gas price scraper detected a reorganization in the base \
+             layer ({DEFAULT_DURATION} window)",
+        ),
+        increase(&L1_GAS_PRICE_SCRAPER_REORG_DETECTED, DEFAULT_DURATION),
+        PanelType::TimeSeries,
+    )
+    .with_log_query("L1 reorg detected")
+}
+
+fn get_panel_l1_gas_price_scraper_seconds_since_last_successful_scrape() -> Panel {
+    Panel::new(
+        "Seconds Since Last Successful L1 Gas Price Scrape",
+        "The number of seconds since the last successful scrape of the L1 gas price scraper \
+         (assuming there was a scrape in the last 12 hours)",
+        seconds_since_last_timestamp(&L1_GAS_PRICE_SCRAPER_LAST_SUCCESS_TIMESTAMP_SECONDS),
+        PanelType::TimeSeries,
+    )
+    .with_unit(Unit::Seconds)
+    .with_absolute_thresholds(traffic_light_thresholds(120.0, 300.0))
+}
+
+fn get_panel_l1_gas_price_scraper_latest_scraped_block() -> Panel {
+    Panel::new(
+        "L1 Gas Price Scraper Latest Scraped Block",
+        "The latest block number that the L1 gas price scraper has scraped",
+        L1_GAS_PRICE_SCRAPER_LATEST_SCRAPED_BLOCK.get_name_with_filter(),
+        PanelType::Stat,
+    )
+}
+
+fn get_panel_l1_gas_price_latest_mean_value() -> Panel {
+    Panel::new(
+        "L1 Gas Price Latest Mean Value (Gwei)",
+        "The latest L1 gas price, calculated as an average by the provider client. Displayed in \
+         Gwei (1 Gwei = 1e9 wei).",
+        format!("{} / 1e9", L1_GAS_PRICE_LATEST_MEAN_VALUE.get_name_with_filter()),
+        PanelType::TimeSeries,
+    )
+}
+
+fn get_panel_l1_data_gas_price_latest_mean_value() -> Panel {
+    Panel::new(
+        "L1 Data Gas Price Latest Mean Value (Gwei)",
+        "The latest L1 data gas price, calculated as an average by the provider client. Displayed \
+         in Gwei (1 Gwei = 1e9 wei).",
+        format!("{} / 1e9", L1_DATA_GAS_PRICE_LATEST_MEAN_VALUE.get_name_with_filter()),
+        PanelType::TimeSeries,
+    )
+}
+
+pub(crate) fn get_l1_gas_price_row() -> Row {
+    Row::new(
+        "ETH→STRK Rate & L1 Gas Price",
+        vec![
+            get_panel_l1_gas_price_scraper_seconds_since_last_successful_scrape(),
+            get_panel_eth_to_strk_seconds_since_last_successful_update(),
+            get_panel_eth_to_strk_success_count(),
+            get_panel_eth_to_strk_error_count(),
+            get_panel_eth_to_strk_total_error_count(),
+            get_panel_eth_to_strk_rate(),
+            get_panel_l1_gas_price_provider_insufficient_history(),
+            get_panel_l1_gas_price_scraper_success_count(),
+            get_panel_l1_gas_price_scraper_baselayer_error_count(),
+            get_panel_l1_gas_price_scraper_reorg_detected(),
+            get_panel_l1_gas_price_scraper_latest_scraped_block(),
+            get_panel_l1_gas_price_latest_mean_value(),
+            get_panel_l1_data_gas_price_latest_mean_value(),
+        ],
+    )
+}

@@ -1,0 +1,185 @@
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::LazyLock;
+
+use crate::path::resolve_project_relative_path;
+
+#[cfg(test)]
+#[path = "cairo0_compiler_test.rs"]
+pub mod test;
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct CairoLangVersion<'a>(pub &'a str);
+
+pub const EXPECTED_CAIRO0_STARKNET_COMPILE_VERSION: CairoLangVersion<'static> =
+    CairoLangVersion("0.14.0.1");
+pub const EXPECTED_CAIRO0_VERSION: CairoLangVersion<'static> = CairoLangVersion("0.14.3a3");
+
+/// The local python requirements used to determine the cairo0 compiler version.
+pub(crate) static PIP_REQUIREMENTS_FILE: LazyLock<PathBuf> =
+    LazyLock::new(|| resolve_project_relative_path("scripts/requirements.txt").unwrap());
+pub(crate) static STARKNET_DEPRECATED_COMPILE_REQUIREMENTS_FILE: LazyLock<PathBuf> =
+    LazyLock::new(|| {
+        resolve_project_relative_path(
+            "crates/blockifier_test_utils/resources/blockifier-test-utils-requirements.txt",
+        )
+        .unwrap()
+    });
+
+fn find_script_in_path(script_name: &str) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).find_map(|dir| {
+            let candidate = dir.join(script_name);
+            candidate.exists().then_some(candidate)
+        })
+    })
+}
+
+pub(crate) fn enter_venv_instructions(script_type: &Cairo0Script) -> String {
+    format!(
+        r#"
+python3 -m venv sequencer_venv
+. sequencer_venv/bin/activate
+pip install -r {:?}"#,
+        script_type.requirements_file_path()
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Cairo0Script {
+    Compile,
+    Format,
+    StarknetCompileDeprecated,
+}
+
+impl Cairo0Script {
+    pub fn script_name(&self) -> &'static str {
+        match self {
+            Self::Compile => "cairo-compile",
+            Self::Format => "cairo-format",
+            Self::StarknetCompileDeprecated => "starknet-compile-deprecated",
+        }
+    }
+
+    pub fn required_version(&self) -> CairoLangVersion<'static> {
+        match self {
+            Self::Compile | Self::Format => EXPECTED_CAIRO0_VERSION,
+            Self::StarknetCompileDeprecated => EXPECTED_CAIRO0_STARKNET_COMPILE_VERSION,
+        }
+    }
+
+    pub fn requirements_file_path(&self) -> &PathBuf {
+        match self {
+            Self::Compile | Self::Format => &PIP_REQUIREMENTS_FILE,
+            Self::StarknetCompileDeprecated => &STARKNET_DEPRECATED_COMPILE_REQUIREMENTS_FILE,
+        }
+    }
+
+    pub(crate) fn command(&self) -> Result<Command, Cairo0ScriptVersionError> {
+        let script = self.script_name();
+        let script_path =
+            find_script_in_path(script).ok_or(Cairo0ScriptVersionError::CompilerNotFound {
+                script: *self,
+                error: format!("Failed to find {script} in PATH."),
+            })?;
+        let mut cmd = Command::new("python");
+        cmd.arg(script_path);
+        Ok(cmd)
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum Cairo0ScriptVersionError {
+    #[error(
+        "{script:?} version is not correct: required {required}, got {existing}. Are you in the \
+         venv? If not, run the following commands:\n{}",
+        enter_venv_instructions(script)
+    )]
+    IncorrectVersion { script: Cairo0Script, existing: String, required: String },
+    #[error(
+        "{error}. Are you in the venv? If not, run the following commands:\n{}",
+        enter_venv_instructions(script)
+    )]
+    CompilerNotFound { script: Cairo0Script, error: String },
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum Cairo0CompilerError {
+    #[error(transparent)]
+    Cairo0CompilerVersion(#[from] Cairo0ScriptVersionError),
+    #[error("Cairo root path not found at {0:?}.")]
+    CairoRootNotFound(PathBuf),
+    #[error("Failed to compile the program. Error: {0}.")]
+    CompileError(String),
+    #[error("Invalid path unicode: {0:?}.")]
+    InvalidPath(PathBuf),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("No file found at path {0:?}.")]
+    SourceFileNotFound(PathBuf),
+}
+
+pub fn cairo0_script_correct_version(
+    script_type: &Cairo0Script,
+) -> Result<(), Cairo0ScriptVersionError> {
+    let expected_version = script_type.required_version();
+    let script = script_type.script_name();
+    let version = match script_type.command()?.arg("--version").output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+        Err(error) => {
+            return Err(Cairo0ScriptVersionError::CompilerNotFound {
+                script: *script_type,
+                error: format!("Failed to get {script} version: {error}."),
+            });
+        }
+    };
+    if CairoLangVersion(version.trim().replace("==", " ").split(" ").nth(1).ok_or(
+        Cairo0ScriptVersionError::CompilerNotFound {
+            script: *script_type,
+            error: format!("No {script} version found."),
+        },
+    )?) != expected_version
+    {
+        return Err(Cairo0ScriptVersionError::IncorrectVersion {
+            script: *script_type,
+            existing: version,
+            required: expected_version.0.to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Compile a Cairo0 program.
+pub fn compile_cairo0_program(
+    path_to_main: PathBuf,
+    cairo_root_path: PathBuf,
+) -> Result<Vec<u8>, Cairo0CompilerError> {
+    let script_type = Cairo0Script::Compile;
+    cairo0_script_correct_version(&script_type)?;
+    if !path_to_main.exists() {
+        return Err(Cairo0CompilerError::SourceFileNotFound(path_to_main));
+    }
+    if !cairo_root_path.exists() {
+        return Err(Cairo0CompilerError::CairoRootNotFound(cairo_root_path));
+    }
+    let mut compile_command = script_type.command()?;
+    compile_command.args([
+        path_to_main.to_str().ok_or(Cairo0CompilerError::InvalidPath(path_to_main.clone()))?,
+        "--debug_info_with_source",
+        "--cairo_path",
+        cairo_root_path
+            .to_str()
+            .ok_or(Cairo0CompilerError::InvalidPath(cairo_root_path.clone()))?,
+    ]);
+    let compile_output = compile_command.output()?;
+
+    // Verify output.
+    if !compile_output.status.success() {
+        return Err(Cairo0CompilerError::CompileError(
+            String::from_utf8_lossy(&compile_output.stderr).trim().to_string(),
+        ));
+    }
+
+    Ok(compile_output.stdout)
+}

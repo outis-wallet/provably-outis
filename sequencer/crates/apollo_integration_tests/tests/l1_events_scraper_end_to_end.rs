@@ -1,0 +1,196 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use alloy::primitives::U256;
+use apollo_base_layer_tests::anvil_base_layer::AnvilBaseLayer;
+use apollo_infra_utils::test_utils::{AvailablePortsGenerator, TestIdentifier};
+use apollo_l1_events::event_identifiers_to_track;
+use apollo_l1_events::l1_scraper::L1EventsScraper;
+use apollo_l1_events_config::config::L1EventsScraperConfig;
+use apollo_l1_events_types::{Event, MockL1EventsProviderClient};
+use mockall::Sequence;
+use papyrus_base_layer::test_utils::DEFAULT_ANVIL_L1_ACCOUNT_ADDRESS;
+use papyrus_base_layer::BaseLayerContract;
+use starknet_api::block::BlockTimestamp;
+use starknet_api::contract_address;
+use starknet_api::core::{EntryPointSelector, Nonce};
+use starknet_api::executable_transaction::L1HandlerTransaction as ExecutableL1HandlerTransaction;
+use starknet_api::hash::StarkHash;
+use starknet_api::transaction::fields::{Calldata, Fee};
+use starknet_api::transaction::{L1HandlerTransaction, TransactionHasher, TransactionVersion};
+
+/// Checks if two lists of events are almost equal, allowing for a small margin in scrape time.
+fn check_events_match(expected: &[Event], actual: &[Event]) -> bool {
+    if expected.len() != actual.len() {
+        println!("Expected: {expected:?}\nActual: {actual:?}");
+        return false;
+    }
+
+    let all_match =
+        expected.iter().zip(actual.iter()).all(|(expected, actual)| expected.almost_eq(actual));
+
+    if !all_match {
+        println!("Expected: {expected:?}\nActual: {actual:?}");
+    }
+
+    all_match
+}
+
+#[tokio::test]
+async fn scraper_end_to_end() {
+    // Setup.
+    let mut ports_gen =
+        AvailablePortsGenerator::new(TestIdentifier::L1EventsScraperEndToEndTest.into());
+    let mut available_ports = ports_gen
+        .next()
+        .expect("Failed to get an AvailablePorts instance for l1_events_scraper_end_to_end");
+    let mut base_layer = AnvilBaseLayer::new(None, Some(available_ports.get_next_port())).await;
+    let contract = &base_layer.ethereum_base_layer.contract;
+    let mut l1_events_provider_client = MockL1EventsProviderClient::default();
+
+    // Send messages from L1 to L2.
+    let l2_contract_address = "0x12";
+    let l2_entry_point = "0x34";
+    let fee = 1_u8;
+    let message_to_l2_0 = contract
+        .sendMessageToL2(
+            l2_contract_address.parse().unwrap(),
+            l2_entry_point.parse().unwrap(),
+            vec![U256::from(1_u8), U256::from(2_u8)],
+        )
+        .value(U256::from(fee));
+    let message_to_l2_1 = contract
+        .sendMessageToL2(
+            l2_contract_address.parse().unwrap(),
+            l2_entry_point.parse().unwrap(),
+            vec![U256::from(3_u8), U256::from(4_u8)],
+        )
+        .value(U256::from(fee));
+    let nonce_of_message_to_l2_0 = U256::from(0_u8);
+    let request_cancel_message_0 = contract
+        .startL1ToL2MessageCancellation(
+            l2_contract_address.parse().unwrap(),
+            l2_entry_point.parse().unwrap(),
+            vec![U256::from(1_u8), U256::from(2_u8)],
+            nonce_of_message_to_l2_0,
+        )
+        .from(DEFAULT_ANVIL_L1_ACCOUNT_ADDRESS.to_hex_string().parse().unwrap());
+
+    // Send the transactions to Anvil, and record the timestamps of the blocks they are included in.
+    let mut l1_handler_timestamps: Vec<BlockTimestamp> = Vec::with_capacity(2);
+    for msg in &[message_to_l2_0, message_to_l2_1] {
+        msg.call().await.unwrap(); // Query for errors.
+        let receipt = msg.send().await.unwrap().get_receipt().await.unwrap();
+        l1_handler_timestamps.push(
+            base_layer
+                .get_block_header_immutable(receipt.block_number.unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .timestamp,
+        );
+    }
+
+    request_cancel_message_0.call().await.unwrap(); // Query for errors;
+    let cancel_receipt =
+        request_cancel_message_0.send().await.unwrap().get_receipt().await.unwrap();
+    let cancel_timestamp = base_layer
+        .get_block_header(cancel_receipt.block_number.unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .timestamp;
+
+    const EXPECTED_VERSION: TransactionVersion = TransactionVersion(StarkHash::ZERO);
+    let expected_l1_handler_0 = L1HandlerTransaction {
+        version: EXPECTED_VERSION,
+        nonce: Nonce(StarkHash::ZERO),
+        contract_address: contract_address!(l2_contract_address),
+        entry_point_selector: EntryPointSelector(StarkHash::from_hex_unchecked(l2_entry_point)),
+        calldata: Calldata(
+            vec![DEFAULT_ANVIL_L1_ACCOUNT_ADDRESS, StarkHash::ONE, StarkHash::from(2)].into(),
+        ),
+    };
+    let default_chain_id = L1EventsScraperConfig::default().chain_id;
+    let tx_hash_first_tx = expected_l1_handler_0
+        .calculate_transaction_hash(&default_chain_id, &EXPECTED_VERSION)
+        .unwrap();
+    let expected_executable_l1_handler_0 = ExecutableL1HandlerTransaction {
+        tx_hash: tx_hash_first_tx,
+        tx: expected_l1_handler_0,
+        paid_fee_on_l1: Fee(fee.into()),
+    };
+    let first_expected_log = Event::L1HandlerTransaction {
+        l1_handler_tx: expected_executable_l1_handler_0.clone(),
+        block_timestamp: l1_handler_timestamps[0],
+        scrape_timestamp: l1_handler_timestamps[0].0,
+    };
+
+    let expected_l1_handler_1 = L1HandlerTransaction {
+        nonce: Nonce(StarkHash::ONE),
+        calldata: Calldata(
+            vec![DEFAULT_ANVIL_L1_ACCOUNT_ADDRESS, StarkHash::from(3), StarkHash::from(4)].into(),
+        ),
+        ..expected_executable_l1_handler_0.tx
+    };
+    let expected_executable_l1_handler_1 = ExecutableL1HandlerTransaction {
+        tx_hash: expected_l1_handler_1
+            .calculate_transaction_hash(&default_chain_id, &EXPECTED_VERSION)
+            .unwrap(),
+        tx: expected_l1_handler_1,
+        ..expected_executable_l1_handler_0
+    };
+    let second_expected_log = Event::L1HandlerTransaction {
+        l1_handler_tx: expected_executable_l1_handler_1,
+        block_timestamp: l1_handler_timestamps[1],
+        scrape_timestamp: l1_handler_timestamps[1].0,
+    };
+
+    let expected_cancel_message = Event::TransactionCancellationStarted {
+        tx_hash: tx_hash_first_tx,
+        cancellation_request_timestamp: cancel_timestamp,
+    };
+
+    let mut sequence = Sequence::new();
+    // Expect first call to return all the events defined further down.
+    let expected_events_first_call =
+        [first_expected_log, second_expected_log, expected_cancel_message];
+    l1_events_provider_client
+        .expect_add_events()
+        .once()
+        .in_sequence(&mut sequence)
+        .withf(move |actual| check_events_match(&expected_events_first_call, actual))
+        .returning(|_| Ok(()));
+
+    // Expect second call to return nothing, no events left to scrape.
+    l1_events_provider_client
+        .expect_add_events()
+        .once()
+        .in_sequence(&mut sequence)
+        .withf(move |actual| check_events_match(&[], actual))
+        .returning(|_| Ok(()));
+
+    let l1_events_scraper_config = L1EventsScraperConfig {
+        // Start scraping far enough back to capture all of the events created before.
+        startup_rewind_time_seconds: Duration::from_secs(100),
+        ..Default::default()
+    };
+    let mut scraper = L1EventsScraper::new(
+        l1_events_scraper_config,
+        Arc::new(l1_events_provider_client),
+        base_layer.ethereum_base_layer.clone(),
+        event_identifiers_to_track(),
+    )
+    .await
+    .unwrap();
+
+    // Make sure to initialize the scraper with the start block.
+    let start_block = scraper.fetch_start_block().await.unwrap();
+    scraper.scrape_from_this_l1_block = Some(start_block);
+
+    // Test.
+    scraper.send_events_to_l1_events_provider().await.unwrap();
+
+    // Previous events had been scraped, should no longer appear.
+    scraper.send_events_to_l1_events_provider().await.unwrap();
+}

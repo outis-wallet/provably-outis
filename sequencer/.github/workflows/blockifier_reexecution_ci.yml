@@ -1,0 +1,68 @@
+name: Blockifier-Reexecution-CI
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - edited
+      - synchronize
+    paths:
+      # Other than code-related changes, all changes related to the blockifier should trigger the build.
+      - ".github/workflows/blockifier_reexecution_ci.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/blockifier/**"
+      - "crates/blockifier_reexecution/**"
+      - "scripts/dependencies.sh"
+      - "scripts/install_build_tools.sh"
+      - "scripts/sequencer-ci.Dockerfile"
+
+env:
+  RUSTFLAGS: "-D warnings"
+
+# On PR events, cancel existing CI runs on this same PR for this workflow.
+# Also, create different concurrency groups for different pushed commits, on push events.
+concurrency:
+  group: >
+    ${{ github.workflow }}-
+    ${{ github.ref }}-
+    ${{ github.event_name == 'pull_request' && 'PR' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # https://graphite.com/docs/stacking-and-ci
+  optimize_ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      skip: ${{ steps.check_skip.outputs.skip }}
+    steps:
+      - name: Optimize CI
+        id: check_skip
+        uses: withgraphite/graphite-ci-action@9bc969adfd43bb790da3b64b543c78c75cef9689 # v0.0.9
+        with:
+          graphite_token: ${{ secrets.GRAPHITE_CI_OPTIMIZER_TOKEN }}
+
+  blockifier_reexecution:
+    runs-on: namespace-profile-medium-ubuntu-24-04-amd64
+    needs: optimize_ci
+    if: needs.optimize_ci.outputs.skip == 'false'
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: ./.github/actions/bootstrap
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      # Download the blockifier re-execution test data.
+      - id: auth
+        uses: "google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed" # v2
+        with:
+          credentials_json: ${{ secrets.SA_REEXECUTION_ARTIFACTS_READ_ACCESS_KEY }}
+      - uses: "google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f" # v2
+      - run: echo "REEXECUTION_INPUT_FILES_PREFIX=$(cat ./crates/blockifier_reexecution/resources/offline_reexecution_files_prefix)" >> $GITHUB_ENV
+      - run: gcloud storage cp -r gs://reexecution_artifacts/$REEXECUTION_INPUT_FILES_PREFIX/resources/* ./crates/blockifier_reexecution/resources/
+      # Run blockifier re-execution tests.
+      - run: cargo test --release -p blockifier_reexecution -- --include-ignored
+      # Compile the rpc-tests, without running them.
+      - run: cargo test --release -p blockifier_reexecution --features blockifier_regression_https_testing --no-run

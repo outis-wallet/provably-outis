@@ -1,0 +1,180 @@
+use std::path::{Path, PathBuf};
+
+use blockifier::context::ChainInfo;
+use mempool_test_utils::starknet_api_test_utils::AccountTransactionGenerator;
+use starknet_api::core::StateDiffCommitment;
+
+use crate::executable_setup::NodeExecutableId;
+use crate::state_reader::{
+    PresetTestContracts,
+    StorageTestConfig,
+    StorageTestSetup,
+    BATCHER_DB_PATH_SUFFIX,
+    CLASSES_STORAGE_DB_PATH_SUFFIX,
+    CLASS_HASH_STORAGE_DB_PATH_SUFFIX,
+    CLASS_MANAGER_DB_PATH_SUFFIX,
+    COMMITTER_DB_PATH_SUFFIX,
+    CONSENSUS_DB_PATH_SUFFIX,
+    PROOF_MANAGER_DB_PATH_SUFFIX,
+    STATE_SYNC_DB_PATH_SUFFIX,
+};
+
+// TODO(victork): consider completely removing this struct and use path directly
+#[derive(Debug)]
+pub struct StorageExecutablePaths {
+    path: PathBuf,
+}
+
+impl StorageExecutablePaths {
+    pub fn new(db_base: &Path, node_index: usize) -> Self {
+        // We use a single storage handler per node, regardless of how it is split into various
+        // services and which of these actually requires the storage.
+        let node_index = NodeExecutableId::new(node_index, "".to_string());
+
+        let path = node_index.build_path(db_base);
+
+        Self { path }
+    }
+
+    pub fn get_batcher_exec_path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn get_state_sync_exec_path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn get_class_manager_exec_path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn get_consensus_exec_path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn get_proof_manager_exec_path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn get_committer_exec_path(&self) -> &PathBuf {
+        &self.path
+    }
+
+    pub fn get_batcher_path_with_db_suffix(&self) -> PathBuf {
+        self.path.join(BATCHER_DB_PATH_SUFFIX)
+    }
+
+    pub fn get_state_sync_path_with_db_suffix(&self) -> PathBuf {
+        self.path.join(STATE_SYNC_DB_PATH_SUFFIX)
+    }
+
+    pub fn get_class_manager_path_with_db_suffix(&self) -> PathBuf {
+        self.path.join(CLASS_MANAGER_DB_PATH_SUFFIX)
+    }
+
+    pub fn get_consensus_path_with_db_suffix(&self) -> PathBuf {
+        self.path.join(CONSENSUS_DB_PATH_SUFFIX)
+    }
+
+    pub fn get_proof_manager_path_with_db_suffix(&self) -> PathBuf {
+        self.path.join(PROOF_MANAGER_DB_PATH_SUFFIX)
+    }
+
+    pub fn get_committer_path_with_db_suffix(&self) -> PathBuf {
+        self.path.join(COMMITTER_DB_PATH_SUFFIX)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CustomPaths {
+    db_base: Option<PathBuf>,
+    config_base: Option<PathBuf>,
+    data_prefix_base: Option<PathBuf>,
+}
+
+impl CustomPaths {
+    pub fn new(
+        db_base: Option<PathBuf>,
+        config_base: Option<PathBuf>,
+        data_prefix_base: Option<PathBuf>,
+    ) -> Self {
+        Self { db_base, config_base, data_prefix_base }
+    }
+
+    pub fn get_db_base(&self) -> Option<&PathBuf> {
+        self.db_base.as_ref()
+    }
+
+    pub fn get_config_path(&self, node_executable_id: &NodeExecutableId) -> Option<PathBuf> {
+        self.config_base.as_ref().map(|p| node_executable_id.build_path(p))
+    }
+
+    pub fn get_data_prefix_path(&self) -> Option<&PathBuf> {
+        self.data_prefix_base.as_ref()
+    }
+}
+
+pub fn get_integration_test_storage(
+    node_index: usize,
+    custom_paths: Option<CustomPaths>,
+    accounts: Vec<AccountTransactionGenerator>,
+    chain_info: &ChainInfo,
+    preset_test_contracts: PresetTestContracts,
+    initial_state_diff_commitment: Option<StateDiffCommitment>,
+) -> StorageTestSetup {
+    let storage_exec_paths = custom_paths.as_ref().and_then(|paths| {
+        paths.get_db_base().map(|db_base| StorageExecutablePaths::new(db_base, node_index))
+    });
+
+    let StorageTestSetup { mut storage_config, storage_handles } = StorageTestSetup::new(
+        accounts,
+        chain_info,
+        storage_exec_paths,
+        preset_test_contracts,
+        initial_state_diff_commitment,
+    );
+
+    // Allow overriding the path with a custom prefix for Docker mode in system tests.
+    if let Some(paths) = custom_paths {
+        if let Some(prefix) = paths.get_data_prefix_path() {
+            let custom_storage_exec_paths = StorageExecutablePaths::new(prefix, node_index);
+            storage_config.batcher_storage_config.db_config.path_prefix =
+                custom_storage_exec_paths.get_batcher_exec_path().join(BATCHER_DB_PATH_SUFFIX);
+            storage_config.state_sync_storage_config.db_config.path_prefix =
+                custom_storage_exec_paths
+                    .get_state_sync_exec_path()
+                    .join(STATE_SYNC_DB_PATH_SUFFIX);
+            storage_config
+                .class_manager_storage_config
+                .class_hash_storage_config
+                .db_config
+                .path_prefix = custom_storage_exec_paths
+                .get_class_manager_exec_path()
+                .join(CLASS_MANAGER_DB_PATH_SUFFIX)
+                .join(CLASS_HASH_STORAGE_DB_PATH_SUFFIX);
+            storage_config.class_manager_storage_config.persistent_root = custom_storage_exec_paths
+                .get_class_manager_exec_path()
+                .join(CLASS_MANAGER_DB_PATH_SUFFIX)
+                .join(CLASSES_STORAGE_DB_PATH_SUFFIX);
+            storage_config.consensus_storage_config.db_config.path_prefix =
+                custom_storage_exec_paths.get_consensus_exec_path().join(CONSENSUS_DB_PATH_SUFFIX);
+            storage_config.proof_manager_config.persistent_root = custom_storage_exec_paths
+                .get_proof_manager_exec_path()
+                .join(PROOF_MANAGER_DB_PATH_SUFFIX);
+            storage_config.committer_db_path =
+                custom_storage_exec_paths.get_committer_exec_path().join(COMMITTER_DB_PATH_SUFFIX);
+        }
+    }
+
+    StorageTestSetup {
+        storage_config: StorageTestConfig::new(
+            storage_config.batcher_storage_config,
+            storage_config.state_sync_storage_config,
+            storage_config.class_manager_storage_config,
+            storage_config.consensus_storage_config,
+            storage_config.proof_manager_config,
+            storage_config.committer_db_path,
+        ),
+        storage_handles,
+    }
+}

@@ -1,0 +1,81 @@
+name: Main-CI-Nightly
+on:
+  schedule:
+    - cron: "0 0 * * *" # Runs at 00:00 UTC every day
+  workflow_dispatch:
+
+env:
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  define_branches:
+    runs-on: namespace-profile-small-ubuntu-24-04-amd64
+    outputs:
+      branches: ${{ steps.branches.outputs.branches }}
+    steps:
+      - name: Define branches for nightly run.
+        id: branches
+        run: echo 'branches=["main", "main-v0.14.4", "main-v0.14.3"]' >> "$GITHUB_OUTPUT"
+
+  feature_combos:
+    runs-on: namespace-profile-large-ubuntu-24-04-amd64;ephemeral-storage.size-multiplier=2
+    needs: define_branches
+    strategy:
+      matrix:
+        branch: ${{ fromJson(needs.define_branches.outputs.branches) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ matrix.branch }}
+
+      # Setup pypy and link to the location expected by .cargo/config.toml.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        id: setup-pypy
+        with:
+          python-version: "pypy3.9"
+          cache: "pip"
+      - run: ln -s '${{ steps.setup-pypy.outputs.python-path }}' /usr/local/bin/pypy3.9
+      - env:
+          LD_LIBRARY_PATH: ${{ env.Python3_ROOT_DIR }}/bin
+        run: echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+      - run: pip install -r scripts/requirements.txt
+
+      # Install rust components.
+      - uses: ./.github/actions/bootstrap
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Run feature combo test.
+      - name: "Run feature combo on all crates."
+        run: scripts/run_feature_combos_test.py
+
+  run-integration-tests:
+    runs-on: namespace-profile-large-ubuntu-24-04-amd64;ephemeral-storage.size-multiplier=1.5
+    needs: define_branches
+    strategy:
+      matrix:
+        branch: ${{ fromJson(needs.define_branches.outputs.branches) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ matrix.branch }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Setup pypy and link to the location expected by .cargo/config.toml.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        id: setup-pypy
+        with:
+          python-version: "pypy3.9"
+      - run: ln -s '${{ steps.setup-pypy.outputs.python-path }}' /usr/local/bin/pypy3.9
+      - env:
+          LD_LIBRARY_PATH: ${{ env.Python3_ROOT_DIR }}/bin
+        run: echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+      - run: pip install -r scripts/requirements.txt
+      - name: "Run integration tests pull request"
+        run: |
+          scripts/run_tests.py --command integration --is_nightly
+        env:
+          SEED: 0

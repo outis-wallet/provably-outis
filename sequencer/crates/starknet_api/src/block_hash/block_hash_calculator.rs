@@ -1,0 +1,465 @@
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use starknet_types_core::felt::Felt;
+use starknet_types_core::hash::Poseidon;
+use tokio::task::{spawn_blocking, JoinHandle};
+
+use super::event_commitment::{calculate_event_commitment, EventLeafElement};
+use super::receipt_commitment::{calculate_receipt_commitment, ReceiptElement};
+use super::state_diff_hash::calculate_state_diff_hash;
+use super::transaction_commitment::{calculate_transaction_commitment, TransactionLeafElement};
+use crate::block::{
+    BlockHash,
+    BlockHeader,
+    BlockInfo,
+    BlockNumber,
+    BlockTimestamp,
+    GasPricePerToken,
+    StarknetVersion,
+};
+use crate::core::{
+    ascii_as_felt,
+    EventCommitment,
+    GlobalRoot,
+    ReceiptCommitment,
+    SequencerContractAddress,
+    StateDiffCommitment,
+    TransactionCommitment,
+};
+use crate::crypto::utils::HashChain;
+use crate::data_availability::L1DataAvailabilityMode;
+use crate::execution_resources::GasVector;
+use crate::hash::StarkHash;
+use crate::state::ThinStateDiff;
+use crate::transaction::fields::{Fee, TransactionSignature};
+use crate::transaction::{Event, MessageToL1, TransactionExecutionStatus, TransactionHash};
+use crate::{StarknetApiError, StarknetApiResult};
+
+#[cfg(test)]
+#[path = "block_hash_calculator_test.rs"]
+mod block_hash_calculator_test;
+
+static STARKNET_BLOCK_HASH0: LazyLock<Felt> = LazyLock::new(|| {
+    ascii_as_felt("STARKNET_BLOCK_HASH0").expect("ascii_as_felt failed for 'STARKNET_BLOCK_HASH0'")
+});
+pub static STARKNET_BLOCK_HASH1: LazyLock<Felt> = LazyLock::new(|| {
+    ascii_as_felt("STARKNET_BLOCK_HASH1").expect("ascii_as_felt failed for 'STARKNET_BLOCK_HASH1'")
+});
+pub static STARKNET_GAS_PRICES0: LazyLock<Felt> = LazyLock::new(|| {
+    ascii_as_felt("STARKNET_GAS_PRICES0").expect("ascii_as_felt failed for 'STARKNET_GAS_PRICES0'")
+});
+
+#[allow(non_camel_case_types)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd)]
+pub enum BlockHashVersion {
+    V0_13_2,
+    V0_13_4,
+}
+
+impl From<BlockHashVersion> for StarknetVersion {
+    fn from(value: BlockHashVersion) -> Self {
+        match value {
+            BlockHashVersion::V0_13_2 => StarknetVersion::V0_13_2,
+            BlockHashVersion::V0_13_4 => StarknetVersion::V0_13_4,
+        }
+    }
+}
+
+impl TryFrom<StarknetVersion> for BlockHashVersion {
+    type Error = StarknetApiError;
+
+    fn try_from(value: StarknetVersion) -> StarknetApiResult<Self> {
+        if value < Self::V0_13_2.into() {
+            Err(StarknetApiError::BlockHashVersion { version: value.to_string() })
+        } else if value < Self::V0_13_4.into() {
+            // Starknet versions 0.13.2 and 0.13.3 both have the same block hash mechanism.
+            Ok(Self::V0_13_2)
+        } else {
+            Ok(Self::V0_13_4)
+        }
+    }
+}
+
+// The prefix constant for the block hash calculation.
+type BlockHashConstant = Felt;
+
+impl From<BlockHashVersion> for BlockHashConstant {
+    fn from(block_hash_version: BlockHashVersion) -> Self {
+        match block_hash_version {
+            BlockHashVersion::V0_13_2 => *STARKNET_BLOCK_HASH0,
+            BlockHashVersion::V0_13_4 => *STARKNET_BLOCK_HASH1,
+        }
+    }
+}
+
+/// The common fields of transaction output types.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct TransactionOutputForHash {
+    pub actual_fee: Fee,
+    pub events: Vec<Event>,
+    pub execution_status: TransactionExecutionStatus,
+    pub gas_consumed: GasVector,
+    pub messages_sent: Vec<MessageToL1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TransactionHashingData {
+    pub transaction_signature: TransactionSignature,
+    pub transaction_output: TransactionOutputForHash,
+    pub transaction_hash: TransactionHash,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BlockCommitmentsMeasurements {
+    pub transaction_commitment_duration: Duration,
+    pub event_commitment_duration: Duration,
+    pub receipt_commitment_duration: Duration,
+    pub state_diff_commitment_duration: Duration,
+    // Number of transactions in the block.
+    pub n_txs: usize,
+    // Number of events in the block.
+    pub n_events: usize,
+    pub state_diff_length: usize,
+}
+
+/// Commitments of a block.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BlockHeaderCommitments {
+    pub transaction_commitment: TransactionCommitment,
+    pub event_commitment: EventCommitment,
+    pub receipt_commitment: ReceiptCommitment,
+    pub state_diff_commitment: StateDiffCommitment,
+    // TODO(Yoni): rename to packed_lengths to match Cairo's BlockHeaderCommitments (make sure it
+    // doesn't break anything).
+    pub concatenated_counts: Felt,
+}
+
+impl TryFrom<&BlockHeader> for Option<BlockHeaderCommitments> {
+    type Error = StarknetApiError;
+    fn try_from(block_header: &BlockHeader) -> Result<Self, Self::Error> {
+        match (
+            block_header.state_diff_commitment,
+            block_header.transaction_commitment,
+            block_header.event_commitment,
+            block_header.receipt_commitment,
+            block_header.state_diff_length,
+        ) {
+            (
+                Some(state_diff_commitment),
+                Some(transaction_commitment),
+                Some(event_commitment),
+                Some(receipt_commitment),
+                Some(state_diff_length),
+            ) => Ok(Some(BlockHeaderCommitments {
+                transaction_commitment,
+                event_commitment,
+                receipt_commitment,
+                state_diff_commitment,
+                concatenated_counts: concat_counts(
+                    block_header.n_transactions,
+                    block_header.n_events,
+                    state_diff_length,
+                    block_header.block_header_without_hash.l1_da_mode,
+                ),
+            })),
+            _ => {
+                if block_header
+                    .block_header_without_hash
+                    .starknet_version
+                    .has_partial_block_hash_components()
+                {
+                    Err(StarknetApiError::MissingBlockHeaderCommitments {
+                        block_number: block_header.block_header_without_hash.block_number,
+                        version: block_header.block_header_without_hash.starknet_version,
+                    })
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
+/// Hash of [`PartialBlockHashComponents`] only (no state root or parent hash).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PartialBlockHash(pub StarkHash);
+
+impl PartialBlockHash {
+    // TODO(Ariel): Use parent_partial_block_hash instead of zero.
+    const GLOBAL_ROOT_FOR_PARTIAL_BLOCK_HASH: GlobalRoot = GlobalRoot(Felt::ZERO);
+    const PARENT_HASH_FOR_PARTIAL_BLOCK_HASH: BlockHash = BlockHash(Felt::ZERO);
+
+    /// Hash of [`PartialBlockHashComponents`].
+    /// Uses the same formula as [`calculate_block_hash`] with the fixed constants above for the
+    /// state root and parent hash.
+    pub fn from_partial_block_hash_components(
+        partial_block_hash_components: &PartialBlockHashComponents,
+    ) -> StarknetApiResult<Self> {
+        let block_hash = calculate_block_hash(
+            partial_block_hash_components,
+            Self::GLOBAL_ROOT_FOR_PARTIAL_BLOCK_HASH,
+            Self::PARENT_HASH_FOR_PARTIAL_BLOCK_HASH,
+        )?;
+        Ok(Self(block_hash.0))
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// All information required to calculate a block hash except for the state root and the parent
+/// block hash.
+pub struct PartialBlockHashComponents {
+    pub header_commitments: BlockHeaderCommitments,
+    pub block_number: BlockNumber,
+    pub l1_gas_price: GasPricePerToken,
+    pub l1_data_gas_price: GasPricePerToken,
+    pub l2_gas_price: GasPricePerToken,
+    pub sequencer: SequencerContractAddress,
+    pub timestamp: BlockTimestamp,
+    pub starknet_version: StarknetVersion,
+}
+
+impl PartialBlockHashComponents {
+    pub fn new(block_info: &BlockInfo, header_commitments: BlockHeaderCommitments) -> Self {
+        Self {
+            header_commitments,
+            block_number: block_info.block_number,
+            l1_gas_price: block_info.gas_prices.l1_gas_price_per_token(),
+            l1_data_gas_price: block_info.gas_prices.l1_data_gas_price_per_token(),
+            l2_gas_price: block_info.gas_prices.l2_gas_price_per_token(),
+            sequencer: SequencerContractAddress(block_info.sequencer_address),
+            timestamp: block_info.block_timestamp,
+            starknet_version: block_info.starknet_version,
+        }
+    }
+}
+
+// TODO(Nimrod): Gather the input for this function into a single struct and rename `BlockHashInput`
+// => `PythonBlockHashInput`.
+/// Poseidon (
+///     block_hash_constant, block_number, global_state_root, sequencer_address,
+///     block_timestamp, concat_counts, state_diff_hash, transaction_commitment,
+///     event_commitment, receipt_commitment, gas_prices, starknet_version, 0, parent_block_hash
+/// ).
+pub fn calculate_block_hash(
+    partial_block_hash_components: &PartialBlockHashComponents,
+    state_root: GlobalRoot,
+    previous_block_hash: BlockHash,
+) -> StarknetApiResult<BlockHash> {
+    let block_hash_version: BlockHashVersion =
+        partial_block_hash_components.starknet_version.try_into()?;
+    let block_commitments = &partial_block_hash_components.header_commitments;
+    Ok(BlockHash(
+        HashChain::new()
+            .chain(&block_hash_version.clone().into())
+            .chain(&partial_block_hash_components.block_number.0.into())
+            .chain(&state_root.0)
+            .chain(&partial_block_hash_components.sequencer.0)
+            .chain(&partial_block_hash_components.timestamp.0.into())
+            .chain(&block_commitments.concatenated_counts)
+            .chain(&block_commitments.state_diff_commitment.0.0)
+            .chain(&block_commitments.transaction_commitment.0)
+            .chain(&block_commitments.event_commitment.0)
+            .chain(&block_commitments.receipt_commitment.0)
+            .chain_iter(
+                gas_prices_to_hash(
+                    &partial_block_hash_components.l1_gas_price,
+                    &partial_block_hash_components.l1_data_gas_price,
+                    &partial_block_hash_components.l2_gas_price,
+                    &block_hash_version,
+                )
+                .iter(),
+            )
+            .chain(
+                &Felt::try_from(&partial_block_hash_components.starknet_version)
+                    .expect("Expect ASCII version"),
+            )
+            .chain(&Felt::ZERO)
+            .chain(&previous_block_hash.0)
+            .get_poseidon_hash(),
+    ))
+}
+
+/// Calculates the commitments of the transactions data for the block hash.
+pub async fn calculate_block_commitments(
+    transactions_data: &[TransactionHashingData],
+    state_diff: ThinStateDiff,
+    l1_da_mode: L1DataAvailabilityMode,
+    starknet_version: &StarknetVersion,
+) -> (BlockHeaderCommitments, BlockCommitmentsMeasurements) {
+    let transaction_leaf_elements: Vec<TransactionLeafElement> = transactions_data
+        .iter()
+        .map(|tx_leaf| {
+            let mut tx_leaf_element = TransactionLeafElement::from(tx_leaf);
+            if starknet_version < &BlockHashVersion::V0_13_4.into()
+                && tx_leaf.transaction_signature.0.is_empty()
+            {
+                tx_leaf_element.transaction_signature =
+                    TransactionSignature(vec![Felt::ZERO].into());
+            }
+            tx_leaf_element
+        })
+        .collect();
+
+    let event_leaf_elements: Vec<EventLeafElement> = transactions_data
+        .iter()
+        .flat_map(|transaction_data| {
+            transaction_data.transaction_output.events.iter().map(|event| EventLeafElement {
+                event: event.clone(),
+                transaction_hash: transaction_data.transaction_hash,
+            })
+        })
+        .collect();
+
+    let receipt_elements: Vec<ReceiptElement> =
+        transactions_data.iter().map(ReceiptElement::from).collect();
+
+    let concatenated_counts = concat_counts(
+        transactions_data.len(),
+        event_leaf_elements.len(),
+        state_diff.len(),
+        l1_da_mode,
+    );
+
+    let n_txs = transactions_data.len();
+    let n_events = event_leaf_elements.len();
+    let state_diff_length = state_diff.len();
+
+    // Spawn tasks for parallel execution; each measures its own duration.
+    let transaction_task = spawn_measured_task(move || {
+        calculate_transaction_commitment::<Poseidon>(&transaction_leaf_elements)
+    });
+
+    let event_task =
+        spawn_measured_task(move || calculate_event_commitment::<Poseidon>(&event_leaf_elements));
+
+    let receipt_task =
+        spawn_measured_task(move || calculate_receipt_commitment::<Poseidon>(&receipt_elements));
+
+    let state_diff_task = spawn_measured_task(move || calculate_state_diff_hash(&state_diff));
+
+    // Wait for all tasks to complete.
+    let (
+        (transaction_commitment, transaction_duration),
+        (event_commitment, event_duration),
+        (receipt_commitment, receipt_duration),
+        (state_diff_commitment, state_diff_duration),
+    ) = tokio::try_join!(transaction_task, event_task, receipt_task, state_diff_task)
+        .expect("Failed to join block commitments tasks.");
+
+    let commitments = BlockHeaderCommitments {
+        transaction_commitment,
+        event_commitment,
+        receipt_commitment,
+        state_diff_commitment,
+        concatenated_counts,
+    };
+    let measurements = BlockCommitmentsMeasurements {
+        transaction_commitment_duration: transaction_duration,
+        event_commitment_duration: event_duration,
+        receipt_commitment_duration: receipt_duration,
+        state_diff_commitment_duration: state_diff_duration,
+        n_txs,
+        n_events,
+        state_diff_length,
+    };
+    (commitments, measurements)
+}
+
+// A single felt: [
+//     transaction_count (64 bits) | event_count (64 bits) | state_diff_length (64 bits)
+//     | L1 data availability mode: 0 for calldata, 1 for blob (1 bit) | 0 ...
+// ].
+pub fn concat_counts(
+    transaction_count: usize,
+    event_count: usize,
+    state_diff_length: usize,
+    l1_data_availability_mode: L1DataAvailabilityMode,
+) -> Felt {
+    let l1_data_availability_byte: u8 = match l1_data_availability_mode {
+        L1DataAvailabilityMode::Calldata => 0,
+        L1DataAvailabilityMode::Blob => 0b10000000,
+    };
+    let concat_bytes = [
+        to_64_bits(transaction_count).as_slice(),
+        to_64_bits(event_count).as_slice(),
+        to_64_bits(state_diff_length).as_slice(),
+        &[l1_data_availability_byte],
+        &[0_u8; 7], // zero padding
+    ]
+    .concat();
+    Felt::from_bytes_be_slice(concat_bytes.as_slice())
+}
+
+fn to_64_bits(num: usize) -> [u8; 8] {
+    let sized_transaction_count: u64 = num.try_into().expect("Expect usize is at most 8 bytes");
+    sized_transaction_count.to_be_bytes()
+}
+
+/// Extracts the event count from concatenated_counts.
+pub fn extract_event_count_from_concatenated_counts(concatenated_counts: &Felt) -> usize {
+    let bytes = concatenated_counts.to_bytes_be();
+    // Extract bytes 8-15 (the event_count field)
+    let event_count_bytes: [u8; 8] =
+        bytes[8..16].try_into().expect("Felt should have at least 16 bytes");
+    u64::from_be_bytes(event_count_bytes).try_into().expect("Expected event count to fit in usize")
+}
+
+/// Extracts the L1 data availability mode from concatenated_counts.
+pub fn extract_l1_da_mode_from_concatenated_counts(
+    concatenated_counts: &Felt,
+) -> L1DataAvailabilityMode {
+    // Byte 24 is the L1 data availability mode field, whose top bit carries the mode.
+    match concatenated_counts.to_bytes_be()[24] & 0b10000000 {
+        0 => L1DataAvailabilityMode::Calldata,
+        _ => L1DataAvailabilityMode::Blob,
+    }
+}
+
+// For starknet version >= 0.13.3, returns:
+// [Poseidon (
+//     "STARKNET_GAS_PRICES0", gas_price_wei, gas_price_fri, data_gas_price_wei, data_gas_price_fri,
+//     l2_gas_price_wei, l2_gas_price_fri
+// )].
+// Otherwise, returns:
+// [gas_price_wei, gas_price_fri, data_gas_price_wei, data_gas_price_fri].
+// TODO(Ayelet): add l2_gas_consumed, next_l2_gas_price after 0.14.0.
+pub fn gas_prices_to_hash(
+    l1_gas_price: &GasPricePerToken,
+    l1_data_gas_price: &GasPricePerToken,
+    l2_gas_price: &GasPricePerToken,
+    block_hash_version: &BlockHashVersion,
+) -> Vec<Felt> {
+    if block_hash_version >= &BlockHashVersion::V0_13_4 {
+        vec![
+            HashChain::new()
+                .chain(&STARKNET_GAS_PRICES0)
+                .chain(&l1_gas_price.price_in_wei.0.into())
+                .chain(&l1_gas_price.price_in_fri.0.into())
+                .chain(&l1_data_gas_price.price_in_wei.0.into())
+                .chain(&l1_data_gas_price.price_in_fri.0.into())
+                .chain(&l2_gas_price.price_in_wei.0.into())
+                .chain(&l2_gas_price.price_in_fri.0.into())
+                .get_poseidon_hash(),
+        ]
+    } else {
+        vec![
+            l1_gas_price.price_in_wei.0.into(),
+            l1_gas_price.price_in_fri.0.into(),
+            l1_data_gas_price.price_in_wei.0.into(),
+            l1_data_gas_price.price_in_fri.0.into(),
+        ]
+    }
+}
+
+fn spawn_measured_task<T>(task: impl FnOnce() -> T + Send + 'static) -> JoinHandle<(T, Duration)>
+where
+    T: Send + 'static,
+{
+    spawn_blocking(move || {
+        let start = Instant::now();
+        let result = task();
+        (result, start.elapsed())
+    })
+}

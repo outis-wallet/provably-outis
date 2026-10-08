@@ -1,0 +1,268 @@
+use std::collections::HashSet;
+use std::iter::repeat_n;
+use std::sync::Arc;
+
+use assert_matches::assert_matches;
+use blockifier_test_utils::cairo_versions::{CairoVersion, RunnableCairo1};
+use blockifier_test_utils::contracts::FeatureContract;
+use cairo_lang_starknet_classes::casm_contract_class::{
+    CasmContractEntryPoint,
+    CasmContractEntryPoints,
+};
+use cairo_lang_starknet_classes::NestedIntList;
+use cairo_lang_utils::bigint::BigUintAsHex;
+use num_bigint::BigUint;
+use rstest::rstest;
+use starknet_api::contract_class::compiled_class_hash::{HashVersion, HashableCompiledClass};
+use starknet_api::contract_class::ContractClass;
+use starknet_types_core::felt::Felt;
+use starknet_types_core::hash::Blake2Felt252;
+
+use crate::execution::contract_class::{
+    program_hints_to_casm_hints,
+    CompiledClassV1,
+    ContractClassV1Inner,
+    EntryPointV1,
+    EntryPointsByType,
+    FeltSizeCount,
+    NestedFeltCounts,
+    RunnableCompiledClass,
+};
+use crate::test_utils::contracts::FeatureContractTrait;
+use crate::transaction::errors::TransactionExecutionError;
+
+#[rstest]
+fn test_get_visited_segments() {
+    let test_contract = CompiledClassV1(Arc::new(ContractClassV1Inner {
+        program: Default::default(),
+        entry_points_by_type: Default::default(),
+        hints: Default::default(),
+        sierra_version: Default::default(),
+        bytecode_segment_felt_sizes: NestedFeltCounts::Node(vec![
+            NestedFeltCounts::Leaf(151, FeltSizeCount { small: 151, large: 0 }),
+            NestedFeltCounts::Leaf(104, FeltSizeCount { small: 104, large: 0 }),
+            NestedFeltCounts::Node(vec![
+                NestedFeltCounts::Leaf(170, FeltSizeCount { small: 170, large: 0 }),
+                NestedFeltCounts::Leaf(225, FeltSizeCount { small: 225, large: 0 }),
+            ]),
+            NestedFeltCounts::Leaf(157, FeltSizeCount { small: 157, large: 0 }),
+            NestedFeltCounts::Node(vec![NestedFeltCounts::Node(vec![
+                NestedFeltCounts::Node(vec![NestedFeltCounts::Leaf(
+                    101,
+                    FeltSizeCount { small: 101, large: 0 },
+                )]),
+                NestedFeltCounts::Leaf(195, FeltSizeCount { small: 195, large: 0 }),
+                NestedFeltCounts::Leaf(125, FeltSizeCount { small: 125, large: 0 }),
+            ])]),
+            NestedFeltCounts::Leaf(162, FeltSizeCount { small: 162, large: 0 }),
+        ]),
+    }));
+
+    assert_eq!(
+        test_contract
+            .get_visited_segments(&HashSet::from([807, 907, 0, 1, 255, 425, 431, 1103]))
+            .unwrap(),
+        [0, 255, 425, 807, 1103]
+    );
+
+    assert_matches!(
+        test_contract
+            .get_visited_segments(&HashSet::from([907, 0, 1, 255, 425, 431, 1103]))
+            .unwrap_err(),
+        TransactionExecutionError::InvalidSegmentStructure(907, 807)
+    );
+}
+
+/// Tests that the hash of the compiled contract class (CASM) matches the hash of the corresponding
+/// runnable contract class.
+#[rstest]
+#[case(RunnableCairo1::Casm)]
+#[cfg_attr(feature = "cairo_native", case(RunnableCairo1::Native))]
+fn test_compiled_class_hash(
+    #[case] runnable_cairo_version: RunnableCairo1,
+    #[values(HashVersion::V1, HashVersion::V2)] hash_version: HashVersion,
+) {
+    // Compute the hash of a Casm contract.
+    let feature_contract =
+        FeatureContract::TestContract(CairoVersion::Cairo1(RunnableCairo1::Casm));
+    let casm = match feature_contract.get_class() {
+        ContractClass::V1((casm, _sierra_version)) => casm,
+
+        _ => panic!("Expected ContractClass::V1"),
+    };
+    let casm_hash = casm.hash(&hash_version);
+
+    // Compute the hash of a runnable contract.
+    let runnable_feature_contract =
+        FeatureContract::TestContract(CairoVersion::Cairo1(runnable_cairo_version));
+    let runnable_contact_class = runnable_feature_contract.get_runnable_class();
+    let runnable_contact_class_hash = match runnable_contact_class {
+        RunnableCompiledClass::V1(runnable_contact_class) => {
+            runnable_contact_class.hash(&hash_version)
+        }
+        #[cfg(feature = "cairo_native")]
+        RunnableCompiledClass::V1Native(runnable_contact_class) => {
+            runnable_contact_class.hash(&hash_version)
+        }
+        _ => panic!("RunnableCompiledClass::V0 does not support hash"),
+    };
+    assert_eq!(casm_hash, runnable_contact_class_hash);
+}
+
+#[rstest]
+#[case::empty(
+    NestedIntList::Leaf(0),
+    vec![],
+    NestedFeltCounts::Leaf(0, FeltSizeCount::default())
+)]
+#[case::leaf(
+    NestedIntList::Leaf(3),
+    vec![
+        BigUintAsHex::from(1u64),
+        BigUintAsHex::from(1u64 << 63),
+        BigUintAsHex::from(1u64 << 63),
+    ],
+    NestedFeltCounts::Leaf(3, FeltSizeCount { small: 1, large: 2 })
+)]
+#[case::node(
+    NestedIntList::Node(vec![
+        NestedIntList::Leaf(1),
+        NestedIntList::Leaf(2),
+    ]),
+    vec![
+        BigUintAsHex::from(1u64),
+        BigUintAsHex::from(1u64),
+        BigUintAsHex::from(1u64 << 63),
+    ],
+    NestedFeltCounts::Node(vec![
+        NestedFeltCounts::Leaf(1, FeltSizeCount { small: 1, large: 0 }),
+        NestedFeltCounts::Leaf(2, FeltSizeCount { small: 1, large: 1 }),
+    ])
+)]
+fn test_create_bytecode_segment_felt_sizes(
+    #[case] bytecode_segment_lengths: NestedIntList,
+    #[case] bytecode: Vec<BigUintAsHex>,
+    #[case] expected_structure: NestedFeltCounts,
+) {
+    let result = NestedFeltCounts::new(&bytecode_segment_lengths, &bytecode);
+    assert_eq!(result, expected_structure);
+
+    // Verify round-trip: NestedFeltCounts -> NestedIntList returns original.
+    let round_tripped: NestedIntList = (&result).into();
+    assert_eq!(round_tripped, bytecode_segment_lengths);
+}
+
+#[rstest]
+#[case::empty(0, 0)]
+#[case::small_and_large(2, 3)]
+/// Test that the `FeltSizeCount` constructor works as expected.
+/// For both Felt and BigUintAsHex slices.
+fn felt_size_count_from_slices(#[case] expected_small: usize, #[case] expected_large: usize) {
+    // Build inputs inline: values straddling the threshold.
+    let small_felt = Blake2Felt252::SMALL_THRESHOLD - 1_u64;
+    let large_felt = Blake2Felt252::SMALL_THRESHOLD;
+
+    let items: Vec<Felt> =
+        repeat_n(small_felt, expected_small).chain(repeat_n(large_felt, expected_large)).collect();
+
+    // Case 1: directly from Felt slice
+    let count_from_felts = FeltSizeCount::from(&items[..]);
+    assert_eq!(count_from_felts.small, expected_small);
+    assert_eq!(count_from_felts.large, expected_large);
+
+    // Case 2: from BigUintAsHex slice
+    let biguint_items: Vec<BigUintAsHex> =
+        items.iter().map(|x| BigUintAsHex::from(x.to_biguint())).collect();
+    let count_from_biguints = FeltSizeCount::from(&biguint_items[..]);
+    assert_eq!(count_from_biguints.small, expected_small);
+    assert_eq!(count_from_biguints.large, expected_large);
+}
+
+#[rstest]
+#[case::boundary_small_felt(&[Felt::from((1u64 << 63) - 1)])]
+#[case::boundary_large_felt(&[Felt::from(1u64 << 63)])]
+#[case::very_small_felt(&[Felt::from(1u64)])]
+#[case::very_large_felt(&[Felt::from_hex("0x800000000000011000000000000000000000000000000000000000000000000").unwrap()])]
+#[case::many_small(&[Felt::from(1u64); 100])]
+#[case::many_large(&[Felt::from(1u64 << 63); 100])]
+#[case::mixed_small_large(&[Felt::from(42), Felt::from(1u64 << 63), Felt::from(1337)])]
+fn test_encoded_u32_len(#[case] test_data: &[Felt]) {
+    let estimated_u32_len = FeltSizeCount::from(test_data).encoded_u32_len();
+    let actual_u32_len = Blake2Felt252::encode_felts_to_u32s(test_data).len();
+
+    assert_eq!(actual_u32_len, estimated_u32_len);
+}
+
+#[rstest]
+#[case::empty(CasmContractEntryPoints::default())]
+#[case::single_external(CasmContractEntryPoints {
+    external: vec![CasmContractEntryPoint {
+        selector: BigUint::from(123u64),
+        offset: 42,
+        builtins: vec!["range_check".to_string(), "pedersen".to_string()],
+    }],
+    l1_handler: vec![],
+    constructor: vec![],
+})]
+#[case::all_types(CasmContractEntryPoints {
+    external: vec![
+        CasmContractEntryPoint {
+            selector: BigUint::from(100u64),
+            offset: 10,
+            builtins: vec!["range_check".to_string()],
+        },
+        CasmContractEntryPoint {
+            selector: BigUint::from(200u64),
+            offset: 20,
+            builtins: vec![],
+        },
+    ],
+    l1_handler: vec![CasmContractEntryPoint {
+        selector: BigUint::from(300u64),
+        offset: 30,
+        builtins: vec!["pedersen".to_string()],
+    }],
+    constructor: vec![CasmContractEntryPoint {
+        selector: BigUint::from(400u64),
+        offset: 40,
+        builtins: vec!["range_check".to_string(), "bitwise".to_string()],
+    }],
+})]
+fn test_entry_points_round_trip(#[case] original: CasmContractEntryPoints) {
+    // Convert CasmContractEntryPoints -> EntryPointsByType<EntryPointV1>.
+    let entry_points_by_type: EntryPointsByType<EntryPointV1> = (&original).into();
+
+    // Convert back: EntryPointsByType<EntryPointV1> -> CasmContractEntryPoints.
+    let round_tripped: CasmContractEntryPoints = (&entry_points_by_type).into();
+
+    assert_eq!(round_tripped, original);
+}
+
+#[rstest]
+fn test_hints_round_trip() {
+    // Get a test contract that has hints.
+    let feature_contract =
+        FeatureContract::TestContract(CairoVersion::Cairo1(RunnableCairo1::Casm));
+    let (casm, sierra_version) = match feature_contract.get_class() {
+        ContractClass::V1(versioned_casm) => versioned_casm,
+        _ => panic!("Expected ContractClass::V1"),
+    };
+
+    // Panic if the contract has no hints - we need hints to test the roundtrip.
+    assert!(!casm.hints.is_empty(), "Test contract must have hints for roundtrip test");
+
+    // Get original hints from the CasmContractClass.
+    let original_hints = casm.hints.clone();
+
+    // Forward conversion: Convert CasmContractClass convert the hints from Vec<(usize, Vec<Hint>)>
+    // to HashMap<usize, Vec<HintParams>>.
+    let compiled_class = CompiledClassV1::try_from((casm, sierra_version)).unwrap();
+
+    // Reverse conversion: Access the hints from the VM program and convert back.
+    // The program stores hints as a HintsCollection, which can be converted to BTreeMap.
+    let program_hints = &compiled_class.program.shared_program_data.hints_collection;
+    let round_tripped_hints = program_hints_to_casm_hints(program_hints).unwrap();
+
+    // Compare with original.
+    assert_eq!(round_tripped_hints, original_hints);
+}

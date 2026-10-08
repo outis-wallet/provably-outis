@@ -1,0 +1,376 @@
+use std::collections::BTreeMap;
+use std::net::ToSocketAddrs;
+
+use apollo_config::dumping::{ser_optional_sub_config, ser_param, SerializeConfig};
+use apollo_config::validators::create_validation_error;
+use apollo_config::{ParamPath, ParamPrivacyInput, SerializedParam};
+use apollo_infra::component_client::RemoteClientConfig;
+use apollo_infra::component_server::{LocalServerConfig, RemoteServerConfig};
+use serde::{Deserialize, Serialize};
+use tracing::error;
+use validator::{Validate, ValidationError};
+
+use crate::definitions::ConfigExpectation::{self, Redundant, Required};
+use crate::definitions::ConfigPresence::{self, Absent, Present};
+
+pub const DEFAULT_URL: &str = "localhost";
+pub const DEFAULT_INVALID_PORT: u16 = 0;
+
+// TODO(Tsabary): create custom configs per service, considering the required throughput and spike
+// tolerance.
+
+pub trait ExpectedComponentConfig {
+    fn is_running_locally(&self) -> bool;
+    fn is_disabled(&self) -> bool;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ReactiveComponentExecutionMode {
+    Disabled,
+    Remote,
+    LocalExecutionWithRemoteEnabled,
+    LocalExecutionWithRemoteDisabled,
+}
+
+impl ExpectedComponentConfig for ReactiveComponentExecutionMode {
+    fn is_running_locally(&self) -> bool {
+        match self {
+            ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => {
+                false
+            }
+            ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled
+            | ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled => true,
+        }
+    }
+
+    fn is_disabled(&self) -> bool {
+        *self == ReactiveComponentExecutionMode::Disabled
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ActiveComponentExecutionMode {
+    Disabled,
+    Enabled,
+}
+
+impl ExpectedComponentConfig for ActiveComponentExecutionMode {
+    fn is_running_locally(&self) -> bool {
+        match self {
+            ActiveComponentExecutionMode::Disabled => false,
+            ActiveComponentExecutionMode::Enabled => true,
+        }
+    }
+
+    fn is_disabled(&self) -> bool {
+        *self == ActiveComponentExecutionMode::Disabled
+    }
+}
+
+/// Reactive component configuration.
+#[derive(Clone, Debug, Serialize, Deserialize, Validate, PartialEq)]
+#[validate(schema(function = "validate_reactive_component_execution_config"))]
+pub struct ReactiveComponentExecutionConfig {
+    pub execution_mode: ReactiveComponentExecutionMode,
+    pub local_server_config: Option<LocalServerConfig>,
+    pub remote_server_config: Option<RemoteServerConfig>,
+    pub remote_client_config: Option<RemoteClientConfig>,
+    pub url: String,
+    pub port: u16,
+}
+
+impl SerializeConfig for ReactiveComponentExecutionConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        let members = BTreeMap::from_iter([
+            ser_param(
+                "execution_mode",
+                &self.execution_mode,
+                "The component execution mode.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "url",
+                &self.url,
+                "URL of the remote component server.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "port",
+                &self.port,
+                "Listening port of the remote component server.",
+                ParamPrivacyInput::Public,
+            ),
+        ]);
+        vec![
+            members,
+            ser_optional_sub_config(&self.local_server_config, "local_server_config"),
+            ser_optional_sub_config(&self.remote_server_config, "remote_server_config"),
+            ser_optional_sub_config(&self.remote_client_config, "remote_client_config"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+impl Default for ReactiveComponentExecutionConfig {
+    fn default() -> Self {
+        Self::local_with_remote_disabled()
+    }
+}
+
+impl ReactiveComponentExecutionConfig {
+    pub fn disabled() -> Self {
+        Self {
+            execution_mode: ReactiveComponentExecutionMode::Disabled,
+            local_server_config: None,
+            remote_server_config: None,
+            remote_client_config: None,
+            url: DEFAULT_URL.to_string(),
+            port: DEFAULT_INVALID_PORT,
+        }
+    }
+
+    pub fn remote(url: String, port: u16) -> Self {
+        Self {
+            execution_mode: ReactiveComponentExecutionMode::Remote,
+            local_server_config: None,
+            remote_server_config: None,
+            remote_client_config: Some(RemoteClientConfig::default()),
+            url,
+            port,
+        }
+    }
+
+    pub fn local_with_remote_enabled(url: String, port: u16) -> Self {
+        Self {
+            execution_mode: ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled,
+            local_server_config: Some(LocalServerConfig::default()),
+            remote_server_config: Some(RemoteServerConfig::default()),
+            remote_client_config: None,
+            url,
+            port,
+        }
+    }
+
+    pub fn local_with_remote_disabled() -> Self {
+        Self {
+            execution_mode: ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled,
+            local_server_config: Some(LocalServerConfig::default()),
+            remote_server_config: None,
+            remote_client_config: None,
+            url: DEFAULT_URL.to_string(),
+            port: DEFAULT_INVALID_PORT,
+        }
+    }
+
+    fn is_valid_socket(&self) -> bool {
+        self.port != DEFAULT_INVALID_PORT
+    }
+
+    /// Whether the component is reached over the network, i.e. has a url to resolve.
+    fn connects_remotely(&self) -> bool {
+        matches!(
+            (&self.execution_mode, self.is_valid_socket()),
+            (ReactiveComponentExecutionMode::Remote, true)
+                | (ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled, true)
+        )
+    }
+
+    pub fn validate_url(&self) -> Result<(), ValidationError> {
+        if self.connects_remotely() { resolve_url(&self.url) } else { Ok(()) }
+    }
+
+    pub fn with_idle_connections(mut self, idle_connections: usize) -> Self {
+        self.remote_client_config
+            .as_mut()
+            .expect("Remote client config should be available")
+            .idle_connections = idle_connections;
+        self
+    }
+
+    pub fn with_retries(mut self, retries: usize) -> Self {
+        self.remote_client_config
+            .as_mut()
+            .expect("Remote client config should be available")
+            .retries = retries;
+        self
+    }
+
+    #[cfg(any(feature = "testing", test))]
+    pub fn set_url_to_localhost(&mut self) {
+        self.url = std::net::Ipv4Addr::LOCALHOST.to_string();
+    }
+}
+
+impl ExpectedComponentConfig for ReactiveComponentExecutionConfig {
+    fn is_running_locally(&self) -> bool {
+        self.execution_mode.is_running_locally()
+    }
+
+    fn is_disabled(&self) -> bool {
+        self.execution_mode.is_disabled()
+    }
+}
+
+/// Active component configuration.
+#[derive(Clone, Debug, Serialize, Deserialize, Validate, PartialEq)]
+#[validate(schema(function = "validate_active_component_execution_config"))]
+pub struct ActiveComponentExecutionConfig {
+    pub execution_mode: ActiveComponentExecutionMode,
+}
+
+impl SerializeConfig for ActiveComponentExecutionConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        BTreeMap::from_iter([ser_param(
+            "execution_mode",
+            &self.execution_mode,
+            "The component execution mode.",
+            ParamPrivacyInput::Public,
+        )])
+    }
+}
+
+impl Default for ActiveComponentExecutionConfig {
+    fn default() -> Self {
+        ActiveComponentExecutionConfig::enabled()
+    }
+}
+
+impl ExpectedComponentConfig for ActiveComponentExecutionConfig {
+    fn is_running_locally(&self) -> bool {
+        self.execution_mode.is_running_locally()
+    }
+
+    fn is_disabled(&self) -> bool {
+        self.execution_mode.is_disabled()
+    }
+}
+
+impl ActiveComponentExecutionConfig {
+    pub fn disabled() -> Self {
+        Self { execution_mode: ActiveComponentExecutionMode::Disabled }
+    }
+
+    pub fn enabled() -> Self {
+        Self { execution_mode: ActiveComponentExecutionMode::Enabled }
+    }
+}
+
+// Resolves the configured URL. If the URL cannot be resolved, it returns an error.
+fn resolve_url(url: &str) -> Result<(), ValidationError> {
+    let arbitrary_port: u16 = 0;
+    let socket_addrs = (url, arbitrary_port).to_socket_addrs().map_err(|e| {
+        create_url_validation_error(format!("Failed to resolve url: {url}, error: {e:?}"))
+    })?;
+
+    if socket_addrs.count() > 0 {
+        Ok(())
+    } else {
+        Err(create_url_validation_error(format!("No IP address found for url: {url}")))
+    }
+}
+
+fn create_url_validation_error(error_msg: String) -> ValidationError {
+    error!(error_msg);
+    ValidationError::new("Failed to resolve url")
+        .with_message(format!("{error_msg}. Ensure the url is valid.").into())
+}
+
+fn check_presence(
+    field: &str,
+    presence: ConfigPresence,
+    config_expectation: ConfigExpectation,
+    execution_mode: &ReactiveComponentExecutionMode,
+) -> Result<(), ValidationError> {
+    match (presence, config_expectation) {
+        (Absent, Required) => Err(create_validation_error(
+            format!("{field} config is required when execution mode is {execution_mode:?}."),
+            "Missing expected server config.",
+            "Ensure the server config is set.",
+        )),
+        (Present, Redundant) => Err(create_validation_error(
+            format!("{field} config should not be set when execution mode is {execution_mode:?}."),
+            "Unexpected server config.",
+            "Ensure the server config is not set.",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn validate_reactive_component_execution_config(
+    component_config: &ReactiveComponentExecutionConfig,
+) -> Result<(), ValidationError> {
+    // Validate the execution mode matches presence/absence of local and remote server configs.
+    let has_local: ConfigPresence = (&component_config.local_server_config).into();
+    let has_remote: ConfigPresence = (&component_config.remote_client_config).into();
+
+    // Which local/remote server configs are required or redundant for each execution mode.
+    let (local_req, remote_req) = match &component_config.execution_mode {
+        ReactiveComponentExecutionMode::Disabled => (Redundant, Redundant),
+        ReactiveComponentExecutionMode::Remote => (Redundant, Required),
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => (Required, Redundant),
+    };
+    check_presence("local server", has_local, local_req, &component_config.execution_mode)?;
+    check_presence("remote client", has_remote, remote_req, &component_config.execution_mode)?;
+
+    // Validate a remote server config is set iff required.
+    if !(matches!(
+        &component_config.execution_mode,
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled
+    )
+    .eq(&component_config.remote_server_config.is_some()))
+    {
+        error!(
+            "Execution mode and remote server config misalignment: execution mode: {:?}, socket: \
+             {:?}",
+            &component_config.execution_mode, &component_config.remote_server_config
+        );
+        let mut error = ValidationError::new("Invalid reactive component execution configuration.");
+        error.message = Some("Ensure settings align with the chosen execution mode.".into());
+        return Err(error);
+    }
+
+    // Validate the execution mode matches socket validity.
+    match (&component_config.execution_mode, component_config.is_valid_socket()) {
+        (ReactiveComponentExecutionMode::Disabled, _) => Ok(()),
+        (ReactiveComponentExecutionMode::Remote, true)
+        | (ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled, true) => Ok(()),
+        (ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled, _) => Ok(()),
+        (mode, socket) => {
+            error!(
+                "Invalid reactive component execution configuration: mode: {:?}, socket: {:?}",
+                mode, socket
+            );
+            let mut error =
+                ValidationError::new("Invalid reactive component execution configuration.");
+            error.message = Some("Ensure settings align with the chosen execution mode.".into());
+            Err(error)
+        }
+    }
+}
+
+fn validate_active_component_execution_config(
+    _component_config: &ActiveComponentExecutionConfig,
+) -> Result<(), ValidationError> {
+    Ok(())
+}
+
+// There are components that are described with a reactive mode setting, however, result in the
+// creation of two components: one reactive and one active. The defined behavior is such that
+// the active component is active if and only if the local component is running locally. The
+// following function applies this logic.
+impl From<ReactiveComponentExecutionMode> for ActiveComponentExecutionMode {
+    fn from(mode: ReactiveComponentExecutionMode) -> Self {
+        match mode {
+            ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => {
+                ActiveComponentExecutionMode::Disabled
+            }
+            ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled
+            | ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled => {
+                ActiveComponentExecutionMode::Enabled
+            }
+        }
+    }
+}

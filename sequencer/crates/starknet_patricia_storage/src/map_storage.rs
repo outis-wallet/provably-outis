@@ -1,0 +1,422 @@
+use std::collections::BTreeMap;
+use std::fmt::Display;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use apollo_config::dumping::{prepend_sub_config_name, ser_param, SerializeConfig};
+use apollo_config::{ParamPath, ParamPrivacyInput, SerializedParam};
+use async_trait::async_trait;
+use lru::LruCache;
+use serde::{Deserialize, Serialize};
+use validator::{Validate, ValidationErrors};
+
+use crate::storage_trait::{
+    run_tasks_and_collect_reads,
+    AsyncStorage,
+    DbHashMap,
+    DbKey,
+    DbOperation,
+    DbOperationMap,
+    DbValue,
+    EmptyStorageConfig,
+    GatherableStorage,
+    ImmutableReadOnlyStorage,
+    NoStats,
+    NullStorage,
+    PatriciaStorageResult,
+    ReadOnlyStorage,
+    Storage,
+    StorageConfigTrait,
+    StorageStats,
+    StorageTask,
+};
+
+// 10M entries.
+const DEFAULT_CACHE_SIZE: usize = 10000000;
+
+#[derive(Debug, Default, PartialEq, Serialize)]
+pub struct MapStorage(pub DbHashMap);
+
+impl ImmutableReadOnlyStorage for MapStorage {
+    async fn get(&self, key: &DbKey) -> PatriciaStorageResult<Option<DbValue>> {
+        Ok(self.0.get(key).cloned())
+    }
+
+    async fn mget(&self, keys: &[&DbKey]) -> PatriciaStorageResult<Vec<Option<DbValue>>> {
+        Ok(keys.iter().map(|key| self.0.get(key).cloned()).collect())
+    }
+}
+
+impl ReadOnlyStorage for MapStorage {
+    async fn get_mut(&mut self, key: &DbKey) -> PatriciaStorageResult<Option<DbValue>> {
+        ImmutableReadOnlyStorage::get(self, key).await
+    }
+
+    async fn mget_mut(&mut self, keys: &[&DbKey]) -> PatriciaStorageResult<Vec<Option<DbValue>>> {
+        ImmutableReadOnlyStorage::mget(self, keys).await
+    }
+
+    fn as_gatherable_storage(&mut self) -> Option<&mut impl GatherableStorage> {
+        Some(self)
+    }
+}
+
+impl Storage for MapStorage {
+    type Stats = NoStats;
+    type Config = EmptyStorageConfig;
+
+    async fn set(&mut self, key: DbKey, value: DbValue) -> PatriciaStorageResult<()> {
+        self.0.insert(key, value);
+        Ok(())
+    }
+
+    async fn mset(&mut self, key_to_value: DbHashMap) -> PatriciaStorageResult<()> {
+        self.0.extend(key_to_value);
+        Ok(())
+    }
+
+    async fn delete(&mut self, key: &DbKey) -> PatriciaStorageResult<()> {
+        self.0.remove(key);
+        Ok(())
+    }
+
+    async fn multi_set_and_delete(
+        &mut self,
+        key_to_operation: DbOperationMap,
+    ) -> PatriciaStorageResult<()> {
+        for (key, operation) in key_to_operation.into_iter() {
+            match operation {
+                DbOperation::Set(value) => self.0.insert(key, value),
+                DbOperation::Delete => self.0.remove(&key),
+            };
+        }
+        Ok(())
+    }
+
+    fn get_stats(&self) -> PatriciaStorageResult<Self::Stats> {
+        Ok(NoStats)
+    }
+
+    fn get_async_self(&self) -> Option<impl AsyncStorage> {
+        // Need a concrete Option type.
+        None::<NullStorage>
+    }
+}
+
+impl GatherableStorage for MapStorage {}
+
+/// A storage wrapper that adds an LRU cache to an underlying storage.
+/// Only getter methods are cached.
+pub struct CachedStorage<S: Storage> {
+    pub storage: S,
+    pub cache: LruCache<DbKey, Option<DbValue>>,
+    reads: AtomicU64,
+    cached_reads: AtomicU64,
+    writes: u128,
+    include_inner_stats: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CachedStorageConfig<InnerStorageConfig: StorageConfigTrait> {
+    // Max number of entries in the cache.
+    pub cache_size: NonZeroUsize,
+
+    // If true, the inner stats are included when collecting statistics.
+    pub include_inner_stats: bool,
+
+    // The config of the underlying storage.
+    pub inner_storage_config: InnerStorageConfig,
+}
+
+impl<InnerStorageConfig: StorageConfigTrait> Default for CachedStorageConfig<InnerStorageConfig> {
+    fn default() -> Self {
+        Self {
+            cache_size: NonZeroUsize::new(DEFAULT_CACHE_SIZE).unwrap(),
+            include_inner_stats: true,
+            inner_storage_config: InnerStorageConfig::default(),
+        }
+    }
+}
+
+impl<InnerStorageConfig: StorageConfigTrait> Validate for CachedStorageConfig<InnerStorageConfig> {
+    fn validate(&self) -> Result<(), ValidationErrors> {
+        self.inner_storage_config.validate()
+    }
+}
+
+impl<InnerStorageConfig: StorageConfigTrait> SerializeConfig
+    for CachedStorageConfig<InnerStorageConfig>
+{
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        let mut cached_storage_config = BTreeMap::from([
+            ser_param(
+                "cache_size",
+                &self.cache_size,
+                "Max number of entries in the cache",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "include_inner_stats",
+                &self.include_inner_stats,
+                "If true, the inner stats are included when collecting statistics",
+                ParamPrivacyInput::Public,
+            ),
+        ]);
+
+        cached_storage_config.extend(prepend_sub_config_name(
+            self.inner_storage_config.dump(),
+            "inner_storage_config",
+        ));
+
+        cached_storage_config
+    }
+}
+
+impl<InnerStorageConfig: StorageConfigTrait> StorageConfigTrait
+    for CachedStorageConfig<InnerStorageConfig>
+{
+}
+
+#[derive(Default)]
+pub struct CachedStorageStats<S: StorageStats> {
+    pub reads: u128,
+    pub cached_reads: u128,
+    pub writes: u128,
+    pub inner_stats: Option<S>,
+}
+
+impl<S: StorageStats> CachedStorageStats<S> {
+    fn cache_hit_rate(&self) -> f64 {
+        #[allow(clippy::as_conversions)]
+        let ratio = self.cached_reads as f64 / self.reads as f64;
+        ratio
+    }
+}
+
+impl<S: StorageStats> Display for CachedStorageStats<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CachedStorageStats: {}", self.stat_string())
+    }
+}
+
+impl<S: StorageStats> StorageStats for CachedStorageStats<S> {
+    fn column_titles() -> Vec<&'static str> {
+        [vec!["reads", "cached reads", "writes", "cache hit rate"], S::column_titles()].concat()
+    }
+
+    fn column_values(&self) -> Vec<String> {
+        [
+            vec![
+                self.reads.to_string(),
+                self.cached_reads.to_string(),
+                self.writes.to_string(),
+                self.cache_hit_rate().to_string(),
+            ],
+            self.inner_stats.as_ref().map(|s| s.column_values()).unwrap_or(vec![
+                "".to_string();
+                S::column_titles()
+                    .len()
+            ]),
+        ]
+        .concat()
+    }
+}
+
+impl<S: Storage> CachedStorage<S> {
+    pub fn new(storage: S, config: CachedStorageConfig<S::Config>) -> Self {
+        Self {
+            storage,
+            cache: LruCache::new(config.cache_size),
+            reads: AtomicU64::new(0),
+            cached_reads: AtomicU64::new(0),
+            writes: 0,
+            include_inner_stats: config.include_inner_stats,
+        }
+    }
+
+    pub fn total_writes(&self) -> u128 {
+        self.writes
+    }
+}
+
+/// [ImmutableReadOnlyStorage] implementation for [CachedStorage].
+/// Uses [LruCache::peek] to fetch the value from the immutable cache, this doesn't update the cache
+/// internal state.
+/// Stats are being updated using atomic counters.
+impl<S: Storage + ImmutableReadOnlyStorage> ImmutableReadOnlyStorage for CachedStorage<S> {
+    async fn get(&self, key: &DbKey) -> PatriciaStorageResult<Option<DbValue>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        if let Some(cached_value) = self.cache.peek(key) {
+            self.cached_reads.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached_value.clone());
+        }
+        self.storage.get(key).await
+    }
+
+    async fn mget(&self, keys: &[&DbKey]) -> PatriciaStorageResult<Vec<Option<DbValue>>> {
+        let mut values = vec![None; keys.len()];
+        let mut keys_to_fetch = Vec::new();
+        let mut indices_to_fetch = Vec::new();
+
+        for (index, key) in keys.iter().enumerate() {
+            if let Some(cached_value) = self.cache.peek(key) {
+                values[index] = cached_value.clone();
+            } else {
+                keys_to_fetch.push(*key);
+                indices_to_fetch.push(index);
+            }
+        }
+
+        let n_keys = u64::try_from(keys.len()).expect("keys length should fit in u64");
+        let cached_reads =
+            u64::try_from(keys.len() - keys_to_fetch.len()).expect("usize should fit in u64");
+        self.reads.fetch_add(n_keys, Ordering::Relaxed);
+        self.cached_reads.fetch_add(cached_reads, Ordering::Relaxed);
+
+        let fetched_values = self.storage.mget(keys_to_fetch.as_slice()).await?;
+        indices_to_fetch.iter().zip(fetched_values).for_each(|(index, value)| {
+            values[*index] = value;
+        });
+
+        Ok(values)
+    }
+}
+
+#[async_trait]
+impl<S: Storage + ImmutableReadOnlyStorage + 'static> GatherableStorage for CachedStorage<S> {
+    async fn gather<T>(&mut self, tasks: Vec<T>) -> Vec<T::Output>
+    where
+        T: for<'s> StorageTask<'s, Self> + Send,
+        Self: Sized,
+    {
+        let (reads, outputs) = run_tasks_and_collect_reads(&*self, tasks).await;
+        for (key, value) in reads {
+            self.cache.put(key, Some(value));
+        }
+        outputs
+    }
+}
+
+// TODO(Nimrod): Find a way to share the implementation with `ImmutableReadOnlyStorage`.
+impl<S: Storage + ImmutableReadOnlyStorage + 'static> ReadOnlyStorage for CachedStorage<S> {
+    async fn get_mut(&mut self, key: &DbKey) -> PatriciaStorageResult<Option<DbValue>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        if let Some(cached_value) = self.cache.get(key) {
+            self.cached_reads.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached_value.clone());
+        }
+
+        let storage_value = self.storage.get_mut(key).await?;
+        self.cache.put(key.clone(), storage_value.clone());
+        Ok(storage_value)
+    }
+
+    async fn mget_mut(&mut self, keys: &[&DbKey]) -> PatriciaStorageResult<Vec<Option<DbValue>>> {
+        let mut values = vec![None; keys.len()]; // The None values are placeholders.
+        let mut keys_to_fetch = Vec::new();
+        let mut indices_to_fetch = Vec::new();
+
+        for (index, key) in keys.iter().enumerate() {
+            if let Some(cached_value) = self.cache.get(key) {
+                values[index] = cached_value.clone();
+            } else {
+                keys_to_fetch.push(*key);
+                indices_to_fetch.push(index);
+            }
+        }
+
+        let n_keys = u64::try_from(keys.len()).expect("keys length should fit in u64");
+        let cached_reads =
+            u64::try_from(keys.len() - keys_to_fetch.len()).expect("usize should fit in u64");
+        self.reads.fetch_add(n_keys, Ordering::Relaxed);
+        self.cached_reads.fetch_add(cached_reads, Ordering::Relaxed);
+
+        let fetched_values = self.storage.mget_mut(keys_to_fetch.as_slice()).await?;
+        indices_to_fetch.iter().zip(keys_to_fetch).zip(fetched_values).for_each(
+            |((index, key), value)| {
+                self.cache.put((*key).clone(), value.clone());
+                values[*index] = value;
+            },
+        );
+
+        Ok(values)
+    }
+
+    fn as_gatherable_storage(&mut self) -> Option<&mut impl GatherableStorage> {
+        Some(self)
+    }
+}
+
+impl<S: Storage + ImmutableReadOnlyStorage + 'static> Storage for CachedStorage<S> {
+    type Stats = CachedStorageStats<S::Stats>;
+    type Config = CachedStorageConfig<S::Config>;
+
+    async fn set(&mut self, key: DbKey, value: DbValue) -> PatriciaStorageResult<()> {
+        self.writes += 1;
+        self.storage.set(key.clone(), value.clone()).await?;
+        self.cache.put(key.clone(), Some(value.clone()));
+        Ok(())
+    }
+
+    async fn mset(&mut self, key_to_value: DbHashMap) -> PatriciaStorageResult<()> {
+        self.writes += u128::try_from(key_to_value.len()).expect("usize should fit in u128");
+        self.storage.mset(key_to_value.clone()).await?;
+        for (key, value) in key_to_value.into_iter() {
+            self.cache.put(key, Some(value));
+        }
+        Ok(())
+    }
+
+    async fn delete(&mut self, key: &DbKey) -> PatriciaStorageResult<()> {
+        self.cache.pop(key);
+        self.storage.delete(key).await
+    }
+
+    async fn multi_set_and_delete(
+        &mut self,
+        key_to_operation: DbOperationMap,
+    ) -> PatriciaStorageResult<()> {
+        self.storage.multi_set_and_delete(key_to_operation.clone()).await?;
+        for (key, operation) in key_to_operation.into_iter() {
+            match operation {
+                DbOperation::Set(value) => {
+                    self.writes += 1;
+                    self.cache.put(key, Some(value));
+                }
+                DbOperation::Delete => {
+                    self.cache.pop(&key);
+                }
+            };
+        }
+
+        Ok(())
+    }
+
+    fn get_stats(&self) -> PatriciaStorageResult<Self::Stats> {
+        let reads = u128::from(self.reads.load(Ordering::Acquire));
+        let cached_reads = u128::from(self.cached_reads.load(Ordering::Acquire));
+        let writes = self.writes;
+        Ok(CachedStorageStats {
+            reads,
+            cached_reads,
+            writes,
+            inner_stats: if self.include_inner_stats {
+                Some(self.storage.get_stats()?)
+            } else {
+                None
+            },
+        })
+    }
+
+    fn reset_stats(&mut self) -> PatriciaStorageResult<()> {
+        self.reads.store(0, Ordering::Release);
+        self.cached_reads.store(0, Ordering::Release);
+        self.writes = 0;
+        self.storage.reset_stats()
+    }
+
+    fn get_async_self(&self) -> Option<impl AsyncStorage> {
+        // Need a concrete Option type.
+        None::<NullStorage>
+    }
+}

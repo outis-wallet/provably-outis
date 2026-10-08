@@ -1,0 +1,336 @@
+use std::fs;
+use std::path::Path;
+
+use blockifier::blockifier::config::{CairoNativeRunConfig, ContractClassManagerConfig};
+use blockifier::state::contract_class_manager::ContractClassManager;
+use blockifier_reexecution::cli::{
+    parse_block_numbers_args,
+    BlockifierReexecutionCliArgs,
+    Command,
+    TransactionInput,
+    FULL_RESOURCES_DIR,
+};
+use blockifier_reexecution::rpc_replay::run_rpc_replay;
+use blockifier_reexecution::state_reader::config::RpcStateReaderConfig;
+use blockifier_reexecution::state_reader::offline_state_reader::OfflineBlockReexecutor;
+use blockifier_reexecution::state_reader::reexecution_state_reader::BlockReexecutor;
+use blockifier_reexecution::state_reader::rpc_state_reader::RpcBlockReexecutor;
+use blockifier_reexecution::utils::get_chain_info;
+use clap::Parser;
+use google_cloud_storage::client::{Client, ClientConfig};
+use google_cloud_storage::http::objects::download::Range;
+use google_cloud_storage::http::objects::get::GetObjectRequest;
+use google_cloud_storage::http::objects::upload::{Media, UploadObjectRequest, UploadType};
+use starknet_api::block::BlockNumber;
+use tracing::info;
+
+const BUCKET: &str = "reexecution_artifacts";
+const RESOURCES_DIR: &str = "/resources";
+const FILE_NAME: &str = "/reexecution_data.json";
+const OFFLINE_PREFIX_FILE: &str = "/offline_reexecution_files_prefix";
+
+/// Main entry point of the blockifier reexecution CLI.
+/// TODO(Aner): run by default from the root of the project.
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(
+            |_| {
+                tracing_subscriber::EnvFilter::new(
+                    "warn,blockifier=info,blockifier_reexecution=info",
+                )
+            },
+        ))
+        .init();
+
+    let args = BlockifierReexecutionCliArgs::parse();
+
+    // Lambda functions for single point of truth.
+    let block_dir = |block_number| format!("/block_{block_number}");
+    let block_data_file = |block_number| block_dir(block_number) + FILE_NAME;
+    let block_full_directory =
+        |directory_path: String, block_number| directory_path + &block_dir(block_number);
+    let block_full_file_path = |directory_path, block_number| {
+        block_full_directory(directory_path, block_number) + FILE_NAME
+    };
+    let prefix_dir = |directory_path| {
+        fs::read_to_string(directory_path + OFFLINE_PREFIX_FILE)
+            .expect("Failed to read files' prefix.")
+            .trim()
+            .to_string()
+            + RESOURCES_DIR
+    };
+
+    let make_contract_class_manager = || {
+        let mut config = ContractClassManagerConfig::default();
+        if cfg!(feature = "cairo_native") {
+            config.cairo_native_run_config =
+                CairoNativeRunConfig::wait_on_compilation_for_testing();
+        }
+        ContractClassManager::start(config)
+    };
+    let contract_class_manager = make_contract_class_manager();
+
+    match args.command {
+        Command::RpcTest { block_number, rpc_args } => {
+            info!(
+                "Running RPC test for block number {block_number} using node url {}.",
+                rpc_args.node_url
+            );
+            let rpc_state_reader_config = RpcStateReaderConfig::from_url(rpc_args.node_url.clone());
+            let prefetch_initial_reads = true;
+            // RPC calls are "synchronous IO" (see, e.g., https://stackoverflow.com/questions/74547541/when-should-you-use-tokios-spawn-blocking)
+            // for details), so should be executed in a blocking thread.
+            // TODO(Aner): make only the RPC calls blocking, not the whole function.
+            tokio::task::spawn_blocking(move || {
+                let chain_info = get_chain_info(&rpc_args.parse_chain_id(), None);
+                let block_reexecutor = RpcBlockReexecutor::new(
+                    BlockNumber(block_number),
+                    Some(rpc_state_reader_config),
+                    chain_info,
+                    false,
+                    contract_class_manager,
+                    prefetch_initial_reads,
+                );
+                assert!(
+                    block_reexecutor.reexecute_and_verify_correctness(BlockNumber(block_number)),
+                    "Block {block_number} reexecution failed."
+                );
+            })
+            .await
+            .unwrap();
+
+            info!("RPC test passed successfully.");
+        }
+
+        Command::ReexecuteSingleTx { block_number, rpc_args, tx_input } => {
+            let tx_source = match tx_input {
+                TransactionInput::FromFile { ref tx_path } => format!("from file {tx_path}"),
+                TransactionInput::FromHash { ref tx_hash } => format!("with hash {tx_hash}"),
+            };
+
+            info!(
+                "Executing single transaction {tx_source}, for block number {block_number}, using \
+                 node url {}.",
+                rpc_args.node_url
+            );
+
+            let rpc_state_reader_config = RpcStateReaderConfig::from_url(rpc_args.node_url.clone());
+            let chain_info = get_chain_info(&rpc_args.parse_chain_id(), None);
+            let prefetch_initial_reads = true;
+
+            // RPC calls are "synchronous IO" (see, e.g., https://stackoverflow.com/questions/74547541/when-should-you-use-tokios-spawn_blocking)
+            // for details), so should be executed in a blocking thread.
+            // TODO(Aner): make only the RPC calls blocking, not the whole function.
+            #[allow(clippy::result_large_err)]
+            tokio::task::spawn_blocking(move || {
+                RpcBlockReexecutor::new(
+                    BlockNumber(block_number),
+                    Some(rpc_state_reader_config),
+                    chain_info,
+                    false,
+                    contract_class_manager,
+                    prefetch_initial_reads,
+                )
+                .execute_single_transaction(tx_input)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+            info!("Single transaction execution completed.");
+        }
+
+        Command::WriteToFile { block_numbers, directory_path, rpc_args } => {
+            let directory_path = directory_path.unwrap_or(FULL_RESOURCES_DIR.to_string());
+
+            let block_numbers = parse_block_numbers_args(block_numbers);
+            info!("Computing reexecution data for blocks {block_numbers:?}.");
+
+            let mut task_set = tokio::task::JoinSet::new();
+            for block_number in block_numbers {
+                let full_file_path = block_full_file_path(directory_path.clone(), block_number);
+                let node_url = rpc_args.node_url.clone();
+                let chain_info = get_chain_info(&rpc_args.parse_chain_id(), None);
+                // Each block gets a fresh ContractClassManager so contract classes accessed during
+                // one block's execution are not silently served from a shared cache, which would
+                // prevent them from being recorded in that block's contract_class_mapping_dumper.
+                let contract_class_manager = make_contract_class_manager();
+                // Prefetching initial reads is not supported for write-to-file.
+                let prefetch_initial_reads = false;
+
+                // RPC calls are "synchronous IO" (see, e.g., https://stackoverflow.com/questions/74547541/when-should-you-use-tokios-spawn-blocking)
+                // for details), so should be executed in a blocking thread.
+                // TODO(Aner): make only the RPC calls blocking, not the whole function.
+                let rpc_state_reader_config = RpcStateReaderConfig::from_url(node_url);
+                task_set.spawn(async move {
+                    info!("Computing reexecution data for block {block_number}.");
+                    tokio::task::spawn_blocking(move || {
+                        RpcBlockReexecutor::new(
+                            block_number,
+                            Some(rpc_state_reader_config),
+                            chain_info,
+                            true,
+                            contract_class_manager,
+                            prefetch_initial_reads,
+                        )
+                        .write_block_reexecution_data_to_file(&full_file_path)
+                    })
+                    .await
+                });
+            }
+            info!("Waiting for all blocks to be processed.");
+            task_set.join_all().await;
+        }
+
+        Command::Reexecute { block_numbers, directory_path } => {
+            let directory_path = directory_path.unwrap_or(FULL_RESOURCES_DIR.to_string());
+
+            let block_numbers = parse_block_numbers_args(block_numbers);
+            info!("Reexecuting blocks {block_numbers:?}.");
+
+            let mut task_set = tokio::task::JoinSet::new();
+            for block in block_numbers {
+                let full_file_path = block_full_file_path(directory_path.clone(), block);
+                let contract_class_manager = contract_class_manager.clone();
+                task_set.spawn_blocking(move || {
+                    let block_reexecutor = OfflineBlockReexecutor::new_from_file(
+                        &full_file_path,
+                        contract_class_manager,
+                    )
+                    .unwrap();
+                    let block_number =
+                        block_reexecutor.reexecuted_block_context.block_info().block_number;
+                    let matched = block_reexecutor.reexecute_and_verify_correctness(block_number);
+                    if matched {
+                        info!("Reexecution test for block {block} passed successfully.");
+                    }
+                    matched
+                });
+            }
+            info!("Waiting for all blocks to be processed.");
+            let results = task_set.join_all().await;
+            assert!(results.iter().all(|&matched| matched), "Some blocks failed reexecution.");
+        }
+
+        // Uploading the files requires authentication; please run
+        // `gcloud auth application-default login` in terminal before running this command.
+        Command::UploadFiles { block_numbers, directory_path } => {
+            let directory_path = directory_path.unwrap_or(FULL_RESOURCES_DIR.to_string());
+
+            let block_numbers = parse_block_numbers_args(block_numbers);
+            info!("Uploading blocks {block_numbers:?}.");
+
+            let files_prefix = prefix_dir(directory_path.clone());
+
+            // Get the client with authentication.
+            let config = ClientConfig::default()
+                .with_auth()
+                .await
+                .expect("Failed to get client. Please run `gcloud auth application-default login`");
+            let client = Client::new(config);
+
+            // Verify all required files exist locally, and do not exist in the gc bucket.
+            for block_number in block_numbers.clone() {
+                assert!(
+                    Path::exists(Path::new(&block_full_file_path(
+                        directory_path.clone(),
+                        block_number
+                    ))),
+                    "Block {block_number} reexecution data file does not exist."
+                );
+                assert!(
+                    client
+                        .get_object(&GetObjectRequest {
+                            bucket: BUCKET.to_string(),
+                            object: files_prefix.clone()
+                                + &block_data_file(block_number),
+                            ..Default::default()
+                        })
+                        .await
+                        // TODO(Aner): check that the error is not found error.
+                        .is_err(),
+                    "Block {block_number} reexecution data file already exists in bucket."
+                )
+            }
+
+            // Upload all files to the gc bucket.
+            for block_number in block_numbers {
+                client
+                    .upload_object(
+                        &UploadObjectRequest { bucket: BUCKET.to_string(), ..Default::default() },
+                        fs::read(block_full_file_path(directory_path.clone(), block_number))
+                            .unwrap(),
+                        &UploadType::Simple(Media::new(
+                            files_prefix.clone() + &block_data_file(block_number),
+                        )),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            info!(
+                "All blocks uploaded successfully to \
+                 https://console.cloud.google.com/storage/browser/{BUCKET}/{files_prefix}."
+            );
+        }
+
+        Command::DownloadFiles { block_numbers, directory_path } => {
+            let directory_path = directory_path.unwrap_or(FULL_RESOURCES_DIR.to_string());
+
+            let block_numbers = parse_block_numbers_args(block_numbers);
+            info!("Downloading blocks {block_numbers:?}.");
+
+            let files_prefix = prefix_dir(directory_path.clone());
+
+            // Get the client with authentication.
+            let config = ClientConfig::default()
+                .with_auth()
+                .await
+                .expect("Failed to get client. Please run `gcloud auth application-default login`");
+            let client = Client::new(config);
+
+            // Download all files from the gc bucket.
+            for block_number in block_numbers {
+                let res = client
+                    .download_object(
+                        &GetObjectRequest {
+                            bucket: BUCKET.to_string(),
+                            object: files_prefix.clone() + &block_data_file(block_number),
+                            ..Default::default()
+                        },
+                        &Range::default(),
+                    )
+                    .await
+                    .unwrap();
+                fs::create_dir_all(block_full_directory(directory_path.clone(), block_number))
+                    .unwrap();
+                fs::write(block_full_file_path(directory_path.clone(), block_number), res).unwrap();
+            }
+
+            info!("All blocks downloaded successfully to {directory_path}.");
+        }
+
+        Command::RpcReplay {
+            rpc_args,
+            start_block,
+            end_block,
+            n_workers,
+            compare_native,
+            prefetch_initial_reads,
+        } => {
+            let chain_id = rpc_args.parse_chain_id();
+            run_rpc_replay(
+                rpc_args.node_url,
+                chain_id,
+                start_block,
+                end_block,
+                n_workers,
+                contract_class_manager,
+                compare_native,
+                prefetch_initial_reads,
+            )
+            .await;
+        }
+    }
+}

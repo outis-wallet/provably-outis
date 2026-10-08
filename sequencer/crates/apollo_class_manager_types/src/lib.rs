@@ -1,0 +1,343 @@
+use std::error::Error;
+use std::sync::Arc;
+
+use apollo_compile_to_casm_types::{RawClass, RawExecutableClass, SierraCompilerError};
+use apollo_infra::component_client::{ClientError, LocalComponentClient, RemoteComponentClient};
+use apollo_infra::component_definitions::{
+    ComponentClient,
+    PrioritizedRequest,
+    RequestPriority,
+    RequestWrapper,
+};
+use apollo_infra::{
+    handle_all_response_variants,
+    impl_debug_for_infra_requests_and_responses,
+    impl_labeled_request,
+};
+use async_trait::async_trait;
+#[cfg(any(feature = "testing", test))]
+use mockall::automock;
+use serde::{Deserialize, Serialize};
+use starknet_api::contract_class::ContractClass;
+use starknet_api::core::{ClassHash, CompiledClassHash};
+use starknet_api::deprecated_contract_class::ContractClass as DeprecatedClass;
+use starknet_api::state::SierraContractClass;
+use strum::{AsRefStr, EnumDiscriminants, EnumIter, IntoStaticStr, VariantNames};
+use thiserror::Error;
+
+pub type ClassManagerResult<T> = Result<T, ClassManagerError>;
+pub type ClassManagerClientResult<T> = Result<T, ClassManagerClientError>;
+
+pub type LocalClassManagerClient = LocalComponentClient<ClassManagerRequest, ClassManagerResponse>;
+pub type RemoteClassManagerClient =
+    RemoteComponentClient<ClassManagerRequest, ClassManagerResponse>;
+
+pub type SharedClassManagerClient = Arc<dyn ClassManagerClient>;
+pub type ClassManagerRequestWrapper = RequestWrapper<ClassManagerRequest, ClassManagerResponse>;
+
+// TODO(Elin): export.
+pub type ClassId = ClassHash;
+pub type Class = SierraContractClass;
+pub type ExecutableClass = ContractClass;
+pub type ExecutableClassHash = CompiledClassHash;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassHashes {
+    pub class_hash: ClassHash,
+    pub executable_class_hash_v2: ExecutableClassHash,
+}
+
+/// Serves as the class manager's shared interface.
+/// Requires `Send + Sync` to allow transferring and sharing resources (inputs, futures) across
+/// threads.
+#[cfg_attr(any(test, feature = "testing"), automock)]
+#[async_trait]
+pub trait ClassManagerClient: Send + Sync {
+    async fn add_class(&self, class: Class) -> ClassManagerClientResult<ClassHashes>;
+
+    // TODO(Elin): separate V0 and V1 APIs; remove Sierra version.
+    async fn get_executable(
+        &self,
+        class_id: ClassId,
+    ) -> ClassManagerClientResult<Option<ExecutableClass>>;
+
+    async fn get_sierra(&self, class_id: ClassId) -> ClassManagerClientResult<Option<Class>>;
+
+    async fn get_executable_class_hash_v2(
+        &self,
+        class_id: ClassId,
+    ) -> ClassManagerClientResult<Option<ExecutableClassHash>>;
+
+    async fn add_deprecated_class(
+        &self,
+        class_id: ClassId,
+        class: DeprecatedClass,
+    ) -> ClassManagerClientResult<()>;
+
+    // This method should only be used through state sync.
+    // It acts as a writer to the class storage, and bypasses compilation - thus unsafe.
+    async fn add_class_and_executable_unsafe(
+        &self,
+        class_id: ClassId,
+        class: Class,
+        executable_class_hash_v2: ExecutableClassHash,
+        executable_class: ExecutableClass,
+    ) -> ClassManagerClientResult<()>;
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CachedClassStorageError<E: Error> {
+    #[error(transparent)]
+    Storage(E),
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ClassManagerError {
+    #[error("Internal client error: {0}")]
+    Client(String),
+    #[error("Failed to deserialize Sierra class: {0}")]
+    ClassSerde(String),
+    #[error("Class storage error: {0}")]
+    ClassStorage(String),
+    #[error("Sierra compiler error for class hash {class_hash}: {error}")]
+    SierraCompiler {
+        class_hash: ClassHash,
+        #[source]
+        error: SierraCompilerError,
+    },
+    #[error(
+        "Cannot declare contract class with size of {contract_class_object_size}; max allowed \
+         size: {max_contract_class_object_size}."
+    )]
+    ContractClassObjectSizeTooLarge {
+        contract_class_object_size: usize,
+        max_contract_class_object_size: usize,
+    },
+    #[error("Unsupported contract class version: {0}.")]
+    UnsupportedContractClassVersion(String),
+}
+
+impl<E: Error> From<CachedClassStorageError<E>> for ClassManagerError {
+    fn from(error: CachedClassStorageError<E>) -> Self {
+        ClassManagerError::ClassStorage(error.to_string())
+    }
+}
+
+impl From<serde_json::Error> for ClassManagerError {
+    fn from(error: serde_json::Error) -> Self {
+        ClassManagerError::ClassSerde(error.to_string())
+    }
+}
+
+#[derive(Clone, Debug, Error, PartialEq)]
+pub enum ClassManagerClientError {
+    #[error(transparent)]
+    ClientError(#[from] ClientError),
+    #[error(transparent)]
+    ClassManagerError(#[from] ClassManagerError),
+}
+
+#[derive(Serialize, Deserialize, Clone, AsRefStr, EnumDiscriminants)]
+#[strum_discriminants(
+    name(ClassManagerRequestLabelValue),
+    derive(IntoStaticStr, EnumIter, VariantNames),
+    strum(serialize_all = "snake_case")
+)]
+pub enum ClassManagerRequest {
+    AddClass(RawClass),
+    AddClassAndExecutableUnsafe(ClassId, RawClass, ExecutableClassHash, RawExecutableClass),
+    AddDeprecatedClass(ClassId, RawExecutableClass),
+    GetExecutable(ClassId),
+    GetSierra(ClassId),
+    GetExecutableClassHashV2(ClassId),
+}
+impl_debug_for_infra_requests_and_responses!(ClassManagerRequest);
+impl_labeled_request!(ClassManagerRequest, ClassManagerRequestLabelValue);
+impl PrioritizedRequest for ClassManagerRequest {
+    fn priority(&self) -> RequestPriority {
+        match self {
+            ClassManagerRequest::GetExecutable(_) | ClassManagerRequest::GetSierra(_) => {
+                RequestPriority::High
+            }
+
+            ClassManagerRequest::AddClass(_)
+            | ClassManagerRequest::AddClassAndExecutableUnsafe(_, _, _, _)
+            | ClassManagerRequest::AddDeprecatedClass(_, _)
+            | ClassManagerRequest::GetExecutableClassHashV2(_) => RequestPriority::Normal,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, AsRefStr)]
+pub enum ClassManagerResponse {
+    AddClass(ClassManagerResult<ClassHashes>),
+    AddClassAndExecutableUnsafe(ClassManagerResult<()>),
+    AddDeprecatedClass(ClassManagerResult<()>),
+    GetExecutable(ClassManagerResult<Option<RawExecutableClass>>),
+    GetSierra(ClassManagerResult<Option<RawClass>>),
+    GetExecutableClassHashV2(ClassManagerResult<Option<ExecutableClassHash>>),
+}
+impl_debug_for_infra_requests_and_responses!(ClassManagerResponse);
+
+#[async_trait]
+impl<ComponentClientType> ClassManagerClient for ComponentClientType
+where
+    ComponentClientType: Send + Sync + ComponentClient<ClassManagerRequest, ClassManagerResponse>,
+{
+    async fn add_class(&self, class: Class) -> ClassManagerClientResult<ClassHashes> {
+        let raw_class = RawClass::try_from(class).map_err(ClassManagerError::from)?;
+        let request = ClassManagerRequest::AddClass(raw_class);
+        handle_all_response_variants!(
+            self,
+            request,
+            ClassManagerResponse,
+            AddClass,
+            ClassManagerClientError,
+            ClassManagerError,
+            Direct
+        )
+    }
+
+    async fn add_deprecated_class(
+        &self,
+        class_id: ClassId,
+        class: DeprecatedClass,
+    ) -> ClassManagerClientResult<()> {
+        let raw_executable = RawExecutableClass::try_from(ContractClass::V0(class))
+            .map_err(ClassManagerError::from)?;
+        let request = ClassManagerRequest::AddDeprecatedClass(class_id, raw_executable);
+        handle_all_response_variants!(
+            self,
+            request,
+            ClassManagerResponse,
+            AddDeprecatedClass,
+            ClassManagerClientError,
+            ClassManagerError,
+            Direct
+        )
+    }
+
+    async fn get_executable(
+        &self,
+        class_id: ClassId,
+    ) -> ClassManagerClientResult<Option<ExecutableClass>> {
+        let request = ClassManagerRequest::GetExecutable(class_id);
+        let raw_result = handle_all_response_variants!(
+            self,
+            request,
+            ClassManagerResponse,
+            GetExecutable,
+            ClassManagerClientError,
+            ClassManagerError,
+            Direct
+        )?;
+        let converted = match raw_result {
+            Some(raw) => Some(ExecutableClass::try_from(raw).map_err(ClassManagerError::from)?),
+            None => None,
+        };
+        Ok(converted)
+    }
+
+    async fn get_sierra(&self, class_id: ClassId) -> ClassManagerClientResult<Option<Class>> {
+        let request = ClassManagerRequest::GetSierra(class_id);
+        let raw_result = handle_all_response_variants!(
+            self,
+            request,
+            ClassManagerResponse,
+            GetSierra,
+            ClassManagerClientError,
+            ClassManagerError,
+            Direct
+        )?;
+        let converted = match raw_result {
+            Some(raw) => Some(Class::try_from(raw).map_err(ClassManagerError::from)?),
+            None => None,
+        };
+        Ok(converted)
+    }
+
+    async fn get_executable_class_hash_v2(
+        &self,
+        class_id: ClassId,
+    ) -> ClassManagerClientResult<Option<ExecutableClassHash>> {
+        let request = ClassManagerRequest::GetExecutableClassHashV2(class_id);
+        handle_all_response_variants!(
+            self,
+            request,
+            ClassManagerResponse,
+            GetExecutableClassHashV2,
+            ClassManagerClientError,
+            ClassManagerError,
+            Direct
+        )
+    }
+
+    async fn add_class_and_executable_unsafe(
+        &self,
+        class_id: ClassId,
+        class: Class,
+        executable_class_hash_v2: ExecutableClassHash,
+        executable_class: ExecutableClass,
+    ) -> ClassManagerClientResult<()> {
+        let request = ClassManagerRequest::AddClassAndExecutableUnsafe(
+            class_id,
+            RawClass::try_from(class).map_err(ClassManagerError::from)?,
+            executable_class_hash_v2,
+            RawExecutableClass::try_from(executable_class).map_err(ClassManagerError::from)?,
+        );
+        handle_all_response_variants!(
+            self,
+            request,
+            ClassManagerResponse,
+            AddClassAndExecutableUnsafe,
+            ClassManagerClientError,
+            ClassManagerError,
+            Direct
+        )
+    }
+}
+
+pub struct EmptyClassManagerClient;
+
+#[async_trait]
+impl ClassManagerClient for EmptyClassManagerClient {
+    async fn add_class(&self, _class: Class) -> ClassManagerClientResult<ClassHashes> {
+        Ok(Default::default())
+    }
+
+    async fn add_deprecated_class(
+        &self,
+        _class_id: ClassId,
+        _class: DeprecatedClass,
+    ) -> ClassManagerClientResult<()> {
+        Ok(())
+    }
+
+    async fn get_executable(
+        &self,
+        _class_id: ClassId,
+    ) -> ClassManagerClientResult<Option<ExecutableClass>> {
+        Ok(Some(ExecutableClass::V0(Default::default())))
+    }
+
+    async fn get_sierra(&self, _class_id: ClassId) -> ClassManagerClientResult<Option<Class>> {
+        Ok(Some(Default::default()))
+    }
+
+    async fn get_executable_class_hash_v2(
+        &self,
+        _class_id: ClassId,
+    ) -> ClassManagerClientResult<Option<ExecutableClassHash>> {
+        Ok(Some(ExecutableClassHash::default()))
+    }
+
+    async fn add_class_and_executable_unsafe(
+        &self,
+        _class_id: ClassId,
+        _class: Class,
+        _executable_class_hash_v2: ExecutableClassHash,
+        _executable_class: ExecutableClass,
+    ) -> ClassManagerClientResult<()> {
+        Ok(())
+    }
+}

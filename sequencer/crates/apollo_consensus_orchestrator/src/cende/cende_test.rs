@@ -1,0 +1,402 @@
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::Duration;
+
+use apollo_class_manager_types::MockClassManagerClient;
+use blockifier::blockifier_versioned_constants::VersionedConstants;
+use blockifier::execution::call_info::{CallInfo, StorageAccessTracker};
+use blockifier::execution::entry_point::CallEntryPoint;
+use blockifier::state::cached_state::CommitmentStateDiff;
+use blockifier::state::stateful_compression::ALIAS_COUNTER_STORAGE_KEY;
+use blockifier::transaction::objects::TransactionExecutionInfo;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use reqwest::StatusCode;
+use rstest::rstest;
+use shared_execution_objects::central_objects::CentralTransactionExecutionInfo;
+use starknet_api::block::{BlockInfo, BlockNumber};
+use starknet_api::core::{ContractAddress, BLOCK_HASH_TABLE_ADDRESS};
+use starknet_api::state::StorageKey;
+use starknet_api::transaction::fields::{snos_block_number_from_proof_facts, ProofFacts};
+use starknet_api::versioned_constants_logic::VersionedConstantsTrait;
+use starknet_types_core::felt::Felt;
+use url::Url;
+
+use super::{
+    CendeAmbassador,
+    RECORDER_GET_ACCESSED_KEYS_INPUT_PATH,
+    RECORDER_GET_LATEST_RECEIVED_BLOCK_PATH,
+    RECORDER_WRITE_BLOB_PATH,
+};
+use crate::cende::{BlobParameters, BlockAccessedKeysData, CendeConfig, CendeContext};
+use crate::metrics::{
+    register_metrics,
+    CendeWriteFailureReason,
+    CENDE_LAST_PREPARED_BLOB_BLOCK_NUMBER,
+    CENDE_WRITE_BLOB_FAILURE,
+    CENDE_WRITE_BLOB_SUCCESS,
+    LABEL_CENDE_FAILURE_REASON,
+};
+
+const HEIGHT_TO_WRITE: BlockNumber = BlockNumber(10);
+
+impl BlobParameters {
+    fn with_block_number(block_number: BlockNumber) -> Self {
+        Self { block_info: BlockInfo { block_number, ..Default::default() }, ..Default::default() }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ExpectedMetrics {
+    success: usize,
+    failure_no_latest_block: usize,
+    failure_recorder_ahead: usize,
+    failure_block_height_mismatch: usize,
+    failure_recorder_error: usize,
+}
+
+impl ExpectedMetrics {
+    fn success() -> Self {
+        Self { success: 1, ..Default::default() }
+    }
+
+    fn no_latest_block() -> Self {
+        Self { failure_no_latest_block: 1, ..Default::default() }
+    }
+
+    fn recorder_ahead() -> Self {
+        Self { failure_recorder_ahead: 1, ..Default::default() }
+    }
+
+    fn height_mismatch() -> Self {
+        Self { failure_block_height_mismatch: 1, ..Default::default() }
+    }
+
+    fn recorder_error() -> Self {
+        Self { failure_recorder_error: 1, ..Default::default() }
+    }
+
+    fn verify_metrics(&self, metrics: &str) {
+        CENDE_WRITE_BLOB_FAILURE.assert_eq(
+            metrics,
+            self.failure_no_latest_block,
+            &[(
+                LABEL_CENDE_FAILURE_REASON,
+                CendeWriteFailureReason::NoLatestBlockFromRecorder.into(),
+            )],
+        );
+        CENDE_WRITE_BLOB_FAILURE.assert_eq(
+            metrics,
+            self.failure_recorder_ahead,
+            &[(
+                LABEL_CENDE_FAILURE_REASON,
+                CendeWriteFailureReason::RecorderAheadOfProposalHeight.into(),
+            )],
+        );
+        CENDE_WRITE_BLOB_FAILURE.assert_eq(
+            metrics,
+            self.failure_block_height_mismatch,
+            &[(LABEL_CENDE_FAILURE_REASON, CendeWriteFailureReason::HeightMismatch.into())],
+        );
+        CENDE_WRITE_BLOB_FAILURE.assert_eq(
+            metrics,
+            self.failure_recorder_error,
+            &[(LABEL_CENDE_FAILURE_REASON, CendeWriteFailureReason::CendeRecorderError.into())],
+        );
+        CENDE_WRITE_BLOB_SUCCESS.assert_eq(metrics, self.success);
+    }
+}
+
+#[rstest]
+#[case::success(200, Some(9), 1, true, ExpectedMetrics::success())]
+#[case::no_prev_block(200, None, 0, false, ExpectedMetrics::no_latest_block())]
+#[case::prev_block_height_mismatch(200, Some(7), 0, false, ExpectedMetrics::height_mismatch())]
+#[case::recorder_return_fatal_error(400, Some(9), 1, false, ExpectedMetrics::recorder_error())]
+#[tokio::test]
+async fn write_prev_height_blob(
+    #[case] mock_status_code: usize,
+    #[case] prev_block: Option<u64>,
+    #[case] expected_calls: usize,
+    #[case] expected_result: bool,
+    #[case] expected_metrics: ExpectedMetrics,
+) {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+    register_metrics();
+
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+    let mock = server.mock("POST", RECORDER_WRITE_BLOB_PATH).with_status(mock_status_code).create();
+
+    let cende_ambassador = CendeAmbassador::new(
+        CendeConfig { recorder_url: url.parse::<Url>().unwrap(), ..Default::default() },
+        Arc::new(MockClassManagerClient::new()),
+    );
+
+    if let Some(prev_block) = prev_block {
+        cende_ambassador
+            .prepare_blob_for_next_height(BlobParameters::with_block_number(BlockNumber(
+                prev_block,
+            )))
+            .await
+            .unwrap();
+    }
+
+    let receiver = cende_ambassador.write_prev_height_blob(HEIGHT_TO_WRITE);
+
+    assert_eq!(receiver.await.unwrap(), expected_result);
+    mock.expect(expected_calls).assert();
+
+    expected_metrics.verify_metrics(&recorder.handle().render());
+}
+
+/// When prev_height_blob is None (e.g. after a restart), write_prev_height_blob queries cende's
+/// get_latest_received_block and returns true if the previous block exists at cende
+/// (no write needed), false otherwise.
+#[rstest]
+#[case::height_0_returns_true(0, None, true, ExpectedMetrics::default(), 0)] // Block 0 → skip get_latest, proceed, no failures
+#[case::recorder_has_prev_returns_true(10, Some(9), true, ExpectedMetrics::default(), 1)] // current=10, cende latest=9 → prev already there → proceed, no failures
+#[case::recorder_has_current_returns_false(
+    10,
+    Some(10),
+    false,
+    ExpectedMetrics::recorder_ahead(),
+    1
+)] // current=10, cende latest=10 → ahead → fail, RecorderAheadOfProposalHeight
+#[case::recorder_has_none_returns_false(10, None, false, ExpectedMetrics::no_latest_block(), 1)] // Cende has no block → fail, NoLatestBlockFromRecorder
+#[case::recorder_behind_returns_false(10, Some(7), false, ExpectedMetrics::default(), 1)] // current=10, cende latest=7 → behind prev 9 → fail (warn only, no metric)
+#[tokio::test]
+async fn write_prev_height_blob_when_memory_blob_missing(
+    #[case] current_height: u64,
+    #[case] latest_cende_received_block: Option<u64>,
+    #[case] expected_result: bool,
+    #[case] expected_metrics: ExpectedMetrics,
+    #[case] expected_get_latest_calls: usize,
+) {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+    register_metrics();
+
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    let get_latest_body = latest_cende_received_block
+        .map(|n| format!(r#"{{"block_number": {n}}}"#))
+        .unwrap_or_else(|| r#"{"block_number": null}"#.to_string());
+    let mock_get_latest = server
+        .mock("GET", RECORDER_GET_LATEST_RECEIVED_BLOCK_PATH)
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(get_latest_body)
+        .create();
+
+    let cende_ambassador = CendeAmbassador::new(
+        CendeConfig { recorder_url: url.parse::<Url>().unwrap(), ..Default::default() },
+        Arc::new(MockClassManagerClient::new()),
+    );
+
+    let receiver = cende_ambassador.write_prev_height_blob(BlockNumber(current_height));
+
+    assert_eq!(receiver.await.unwrap(), expected_result);
+    mock_get_latest.expect(expected_get_latest_calls).assert();
+
+    expected_metrics.verify_metrics(&recorder.handle().render());
+}
+
+#[rstest]
+#[case::success_after_multiple_retries(StatusCode::OK, 1, true)]
+#[case::failure_after_multiple_retries(StatusCode::TOO_MANY_REQUESTS, 50, false)]
+#[tokio::test]
+async fn write_prev_height_blob_multiple_retries(
+    #[case] final_status_code: StatusCode,
+    #[case] expected_retries_max: usize,
+    #[case] expected_result: bool,
+) {
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    let mock_error = server
+        .mock("POST", RECORDER_WRITE_BLOB_PATH)
+        .with_status(StatusCode::TOO_MANY_REQUESTS.as_u16().into())
+        .create();
+    let mock_final = server
+        .mock("POST", RECORDER_WRITE_BLOB_PATH)
+        .with_status(final_status_code.as_u16().into())
+        .create();
+
+    let cende_ambassador = CendeAmbassador::new(
+        CendeConfig {
+            recorder_url: url.parse::<Url>().unwrap(),
+            max_retry_duration_secs: Duration::from_millis(50),
+            ..Default::default()
+        },
+        Arc::new(MockClassManagerClient::new()),
+    );
+
+    cende_ambassador
+        .prepare_blob_for_next_height(BlobParameters::with_block_number(
+            HEIGHT_TO_WRITE.prev().unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let receiver = cende_ambassador.write_prev_height_blob(HEIGHT_TO_WRITE);
+
+    assert_eq!(receiver.await.unwrap(), expected_result);
+    mock_error.expect(1).assert();
+    mock_final.expect_at_least(1).expect_at_most(expected_retries_max).assert();
+}
+
+#[tokio::test]
+async fn prepare_blob_for_next_height() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+    register_metrics();
+
+    let cende_ambassador =
+        CendeAmbassador::new(CendeConfig::default(), Arc::new(MockClassManagerClient::new()));
+
+    cende_ambassador
+        .prepare_blob_for_next_height(BlobParameters::with_block_number(HEIGHT_TO_WRITE))
+        .await
+        .unwrap();
+    assert_eq!(
+        cende_ambassador.prev_height_blob.lock().await.as_ref().unwrap().block_number,
+        HEIGHT_TO_WRITE
+    );
+
+    CENDE_LAST_PREPARED_BLOB_BLOCK_NUMBER.assert_eq(&recorder.handle().render(), HEIGHT_TO_WRITE.0);
+}
+
+#[rstest]
+// Recorder returns the block's transactions and execution infos → `Ok(Some(..))`.
+#[case::parses_some(200, true, false)]
+// Recorder responds with `null` (it has no data stored) → `Ok(None)`.
+#[case::none_when_recorder_has_none(200, false, false)]
+// Non-transient failure status → `Err`.
+#[case::errors_on_failure_status(400, true, true)]
+#[tokio::test]
+async fn get_accessed_keys_input(
+    #[case] mock_status_code: usize,
+    #[case] recorder_has_block: bool,
+    #[case] expect_error: bool,
+) {
+    const BLOCK_NUMBER: BlockNumber = BlockNumber(7);
+
+    let mut server = mockito::Server::new_async().await;
+    let url = server.url();
+
+    // The block's data matching the recorder's `AccessedKeysInput`: one transaction's proof facts
+    // (empty, as for a transaction that carries no client-side proof) and one execution info in
+    // central-object form.
+    let execution_info = CentralTransactionExecutionInfo::from(TransactionExecutionInfo::default());
+    let block_data_body = serde_json::json!({
+        "proof_facts": [[]],
+        "execution_infos": [serde_json::to_value(&execution_info).unwrap()],
+    })
+    .to_string();
+    // `null` matches the recorder's response when it does not have the block.
+    let response_body = if recorder_has_block { block_data_body } else { "null".to_string() };
+
+    let mock = server
+        .mock("GET", RECORDER_GET_ACCESSED_KEYS_INPUT_PATH)
+        .match_query(mockito::Matcher::UrlEncoded(
+            "block_number".into(),
+            BLOCK_NUMBER.0.to_string(),
+        ))
+        .with_status(mock_status_code)
+        .with_header("content-type", "application/json")
+        .with_body(response_body)
+        .create();
+
+    let cende_ambassador = CendeAmbassador::new(
+        CendeConfig { recorder_url: url.parse::<Url>().unwrap(), ..Default::default() },
+        Arc::new(MockClassManagerClient::new()),
+    );
+
+    let result = cende_ambassador.get_accessed_keys_input(BLOCK_NUMBER).await;
+
+    if expect_error {
+        assert!(result.is_err());
+    } else if recorder_has_block {
+        let block_data = result.unwrap().expect("expected block data");
+        assert_eq!(block_data.proof_facts.len(), 1);
+        assert_eq!(block_data.execution_infos.len(), 1);
+        assert!(block_data.proof_facts[0].is_empty());
+    } else {
+        assert!(result.unwrap().is_none());
+    }
+    mock.assert();
+}
+
+#[test]
+fn compute_accessed_keys() {
+    // A transaction carrying proof facts of a client-side proof; the block number the proof is
+    // verified against must map to a block hash table entry.
+    let proof_facts = ProofFacts::snos_proof_facts_for_testing();
+    let proof_facts_block_number = snos_block_number_from_proof_facts(&proof_facts)
+        .expect("the test proof facts must carry a block number");
+
+    // An execution info whose call info read a storage key.
+    let read_address = ContractAddress::from(0x300_u16);
+    let read_key = StorageKey::from(0x400_u16);
+    let execution_info = CentralTransactionExecutionInfo::from(TransactionExecutionInfo {
+        execute_call_info: Some(CallInfo {
+            call: CallEntryPoint { storage_address: read_address, ..Default::default() },
+            storage_access_tracker: StorageAccessTracker {
+                accessed_storage_keys: [read_key].into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+
+    // A state diff writing to a storage key of another contract.
+    let written_address = ContractAddress::from(0x500_u16);
+    let written_key = StorageKey::from(0x600_u16);
+    let mut state_diff = CommitmentStateDiff::default();
+    state_diff.storage_updates.entry(written_address).or_default().insert(written_key, Felt::ONE);
+
+    let block_accessed_keys_data = BlockAccessedKeysData {
+        proof_facts: vec![proof_facts],
+        execution_infos: vec![execution_info],
+    };
+    let accessed_keys = block_accessed_keys_data.compute_accessed_keys(&state_diff);
+
+    // The latest versioned constants enable stateful compression, so the alias contract entries
+    // predicted from the state diff are also included: the alias counter, the written address and
+    // the written key.
+    let alias_contract_address = VersionedConstants::latest_constants()
+        .os_constants
+        .os_contract_addresses
+        .alias_contract_address();
+    // 6 storage keys and 4 accessed contracts, all asserted below.
+    assert_eq!(accessed_keys.len(), 10);
+    assert!(accessed_keys.storage_keys.contains(&(read_address, read_key)));
+    assert!(accessed_keys.storage_keys.contains(&(written_address, written_key)));
+    assert!(
+        accessed_keys
+            .storage_keys
+            .contains(&(BLOCK_HASH_TABLE_ADDRESS, StorageKey::from(proof_facts_block_number.0)))
+    );
+    assert!(
+        accessed_keys.storage_keys.contains(&(alias_contract_address, ALIAS_COUNTER_STORAGE_KEY))
+    );
+    assert!(
+        accessed_keys
+            .storage_keys
+            .contains(&(alias_contract_address, StorageKey(written_address.0)))
+    );
+    assert!(accessed_keys.storage_keys.contains(&(alias_contract_address, written_key)));
+    // Assert all the contracts are present.
+    assert_eq!(
+        accessed_keys.accessed_contracts,
+        BTreeSet::from([
+            read_address,
+            written_address,
+            BLOCK_HASH_TABLE_ADDRESS,
+            alias_contract_address
+        ])
+    );
+    assert!(accessed_keys.accessed_class_hashes.is_empty());
+}

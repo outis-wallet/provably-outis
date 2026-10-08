@@ -1,0 +1,37 @@
+[package]
+name = "starknet_patricia"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license-file.workspace = true
+description = "Library for computing and updating Patricia trees."
+
+[lints]
+workspace = true
+
+[features]
+deserialize = []
+testing = []
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+rand.workspace = true
+rstest.workspace = true
+
+[dependencies]
+async-recursion.workspace = true
+derive_more = { workspace = true, features = ["add", "display"] }
+ethnum.workspace = true
+rand.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+starknet-rust-core.workspace = true
+starknet-types-core.workspace = true
+starknet_api.workspace = true
+starknet_patricia_storage.workspace = true
+strum = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

@@ -1,0 +1,346 @@
+block 16266000, tx 0x25cd61682d0a31c4ac2b23babd8131a33226a69c40c5a1af440f21e96478e6
+prefetched 6 storage, 1 nonces, 2 class hashes
+[wasm 68 live 9 peak 10]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 68 live 9 peak 10]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 74 live 15 peak 15]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 74 live 15 peak 15]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 83 live 19 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 19 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+round 1 missed 1 storage, 0 nonces, 0 class hashes, 0 classes
+[wasm 83 live 9 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 9 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 83 live 15 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 15 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 83 live 19 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 19 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+round 2 missed 1 storage, 0 nonces, 0 class hashes, 0 classes
+[wasm 83 live 9 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 9 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 83 live 15 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 15 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 83 live 19 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 19 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+round 3 missed 1 storage, 0 nonces, 0 class hashes, 0 classes
+[wasm 83 live 9 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 9 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 83 live 15 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 15 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 83 live 19 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 19 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 83 live 19 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 19 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 83 live 10 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 83 live 10 peak 19]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+executed in round 4; 1 storage proof request(s)
+storage proof params match the recording
+building the virtual OS input from the storage proofs
+MEM input built: wasm 83 live 13 peak 19
+input built in 0.40 s from 10 calls: starknet_getBlockWithTxHashes, starknet_simulateTransactions, starknet_getCompiledCasm, starknet_getClass, starknet_getStorageAt, starknet_getStorageProof
+[wasm 83 live 20 peak 21]  INFO cairo_vm::vm::runners::cairo_runner: Initializing builtins.
+[wasm 83 live 20 peak 21]  INFO cairo_vm::vm::runners::cairo_runner: Initializing segments.
+[wasm 83 live 20 peak 21]  INFO cairo_vm::vm::runners::cairo_runner: Initializing main entrypoint.
+[wasm 83 live 20 peak 21]  INFO cairo_vm::vm::runners::cairo_runner: Initializing zero segments.
+[wasm 83 live 20 peak 21]  INFO cairo_vm::vm::runners::cairo_runner: Initializing VM.
+[wasm 96 live 33 peak 36]  INFO starknet_os::hints::hint_implementation::os: execute_blocks: 1 blocks remaining.
+[wasm 96 live 33 peak 36]  INFO starknet_os::hint_processor::os_logger: Entering transaction: 0x25cd61682d0a31c4ac2b23babd8131a33226a69c40c5a1af440f21e96478e6 (type: InvokeFunction)
+[wasm 96 live 34 peak 36]  INFO starknet_os::hints::hint_implementation::os: execute_blocks: finished executing block 16266000, 0 blocks remaining.
+[wasm 119 live 48 peak 54]  INFO cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 119 live 48 peak 54]  INFO cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+n_steps=381442 n_memory_holes=106267 memory=cbc687804a267515 metadata=052b0338ad9d2c91 additional_data=519695c6563fa008 resources=34ed8dcb678d90cc in 1.12 s
+MEM virtual OS done: wasm 185 live 37 peak 93
+[wasm 185 live 37 peak 93]  INFO prepare_privacy_recursiveprover_precomputes: privacy_prove: enter
+[wasm 302 live 117 peak 223]  INFO prepare_privacy_recursiveprover_precomputes: privacy_prove: Prepare the twiddles
+[wasm 302 live 149 peak 223]  INFO prepare_privacy_recursiveprover_precomputes: privacy_prove: Prepare the cairo prover preprocessed trace
+[wasm 302 live 198 peak 223]  INFO prepare_privacy_recursiveprover_precomputes: privacy_prove: Prepare the cairo prover preprocessed tree
+[wasm 302 live 198 peak 223]  INFO prepare_privacy_recursiveprover_precomputes:Striped commitment: stwo::prover::pcs: enter
+[wasm 302 live 198 peak 223]  INFO prepare_privacy_recursiveprover_precomputes:Striped commitment:Extension and Merkle{stripe=1}: stwo::prover::pcs: enter
+[wasm 318 live 239 peak 253]  INFO prepare_privacy_recursiveprover_precomputes:Striped commitment:Extension and Merkle{stripe=2}: stwo::prover::pcs: enter
+[wasm 318 live 241 peak 255]  INFO prepare_privacy_recursiveprover_precomputes:Striped commitment:Extension and Merkle{stripe=3}: stwo::prover::pcs: enter
+[wasm 318 live 243 peak 257]  INFO prepare_privacy_recursiveprover_precomputes:Striped commitment:Extension and Merkle{stripe=4}: stwo::prover::pcs: enter
+[wasm 318 live 245 peak 259]  INFO prepare_privacy_recursiveprover_precomputes:Striped commitment:Extension and Merkle{stripe=5}: stwo::prover::pcs: enter
+[wasm 326 live 247 peak 261]  INFO prepare_privacy_recursiveprover_precomputes:Striped commitment:Extension and Merkle{stripe=6}: stwo::prover::pcs: enter
+[wasm 326 live 249 peak 263]  INFO prepare_privacy_recursiveprover_precomputes:Striped commitment:Extension and Merkle{stripe=7}: stwo::prover::pcs: enter
+[wasm 326 live 251 peak 265]  INFO prepare_privacy_recursiveprover_precomputes:Striped commitment:Extension and Merkle{stripe=0}: stwo::prover::pcs: enter
+[wasm 326 live 214 peak 265]  INFO prepare_privacy_recursiveprover_precomputes: privacy_prove: Prepare the circuit prover preprocessed trace and tree (built on first use)
+[wasm 326 live 214 peak 265]  INFO privacy_recursive_prove: privacy_prove: enter
+[wasm 326 live 214 peak 265]  INFO privacy_recursive_prove: privacy_prove: Run privacy bootloader and get the prover input and output preimage
+[wasm 326 live 214 peak 265]  INFO privacy_recursive_prove:get_prover_input: privacy_prove: enter
+[wasm 326 live 215 peak 265]  INFO privacy_recursive_prove:get_prover_input: privacy_prove: Running the program
+[wasm 326 live 215 peak 265]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program: cairo_program_runner_lib: enter
+[wasm 326 live 215 peak 265]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::cairo_run: enter
+[wasm 326 live 215 peak 265]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::cairo_run: Initializing Cairo runner. layout=stwo_no_ecop proof_mode=true trace_enabled=true disable_trace_padding=true allow_missing_builtins=true
+[wasm 326 live 215 peak 265]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::vm::runners::cairo_runner: Initializing builtins.
+[wasm 326 live 215 peak 265]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::vm::runners::cairo_runner: Initializing segments.
+[wasm 326 live 215 peak 265]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::vm::runners::cairo_runner: Initializing main entrypoint.
+[wasm 326 live 216 peak 265]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::vm::runners::cairo_runner: Initializing zero segments.
+[wasm 326 live 216 peak 265]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::vm::runners::cairo_runner: Initializing VM.
+[wasm 326 live 216 peak 265]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::cairo_run: Running until PC.
+[wasm 368 live 271 peak 272]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::cairo_run: Ending run. disable_trace_padding=true fill_holes=true
+[wasm 368 live 271 peak 272]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::vm::runners::cairo_runner: Relocating memory.
+[wasm 368 live 271 peak 272]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::vm::runners::cairo_runner: Computing effective sizes of segments.
+[wasm 368 live 271 peak 272]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::cairo_run: Reading return values.
+[wasm 368 live 271 peak 272]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::cairo_run: In proof mode, finalizing segments.
+[wasm 368 live 271 peak 272]  INFO privacy_recursive_prove:get_prover_input:cairo_run_program:cairo run: cairo_vm::cairo_run: Relocating. relocate_mem=false relocate_trace=false
+[wasm 368 live 271 peak 272]  INFO privacy_recursive_prove:get_prover_input: privacy_prove: Reading the bootloader output preimage
+[wasm 368 live 271 peak 272]  INFO privacy_recursive_prove:get_prover_input: privacy_prove: Adapting the runner output for the prover
+[wasm 368 live 271 peak 272]  INFO privacy_recursive_prove:get_prover_input:adapt: stwo_cairo_adapter::adapter: enter
+[wasm 368 live 271 peak 272]  INFO privacy_recursive_prove:get_prover_input:adapt: stwo_cairo_adapter::adapter: Num steps: 632304
+[wasm 387 live 300 peak 300]  INFO privacy_recursive_prove:get_prover_input:adapt:pad_relocatble_builtin_segments: stwo_cairo_adapter::builtins: enter
+[wasm 387 live 300 peak 300]  INFO privacy_recursive_prove:get_prover_input:adapt:pad_relocatble_builtin_segments: stwo_cairo_adapter::builtins: Padded builtin segment 'pedersen_builtin' from 128 to 128 instances.
+[wasm 387 live 301 peak 301]  INFO privacy_recursive_prove:get_prover_input:adapt:pad_relocatble_builtin_segments: stwo_cairo_adapter::builtins: Padded builtin segment 'range_check_builtin' from 31789 to 32768 instances.
+[wasm 387 live 301 peak 301]  INFO privacy_recursive_prove:get_prover_input:adapt:pad_relocatble_builtin_segments: stwo_cairo_adapter::builtins: Padded builtin segment 'bitwise_builtin' from 1 to 16 instances.
+[wasm 387 live 302 peak 302]  INFO privacy_recursive_prove:get_prover_input:adapt:pad_relocatble_builtin_segments: stwo_cairo_adapter::builtins: Padded builtin segment 'poseidon_builtin' from 111 to 128 instances.
+[wasm 387 live 302 peak 302]  INFO privacy_recursive_prove:get_prover_input:adapt:Relocator::new: stwo_cairo_adapter::relocator: enter
+[wasm 387 live 302 peak 302]  INFO privacy_recursive_prove:get_prover_input:adapt:get_relocated_memory: stwo_cairo_adapter::relocator: enter
+[wasm 416 live 331 peak 331]  INFO privacy_recursive_prove:get_prover_input:adapt:relocate_trace: stwo_cairo_adapter::relocator: enter
+[wasm 416 live 338 peak 338]  INFO privacy_recursive_prove:get_prover_input:adapt:get_builtin_segments: stwo_cairo_adapter::relocator: enter
+[wasm 416 live 338 peak 338]  INFO privacy_recursive_prove:get_prover_input:adapt: stwo_cairo_adapter::adapter: Builtin segments: BuiltinSegments { add_mod_builtin: None, bitwise_builtin: Some(MemorySegmentAddresses { begin_addr: 513546, stop_ptr: 513626 }), output: Some(MemorySegmentAddresses { begin_addr: 480392, stop_ptr: 480394 }), mul_mod_builtin: None, pedersen_builtin: Some(MemorySegmentAddresses { begin_addr: 480394, stop_ptr: 480778 }), poseidon_builtin: Some(MemorySegmentAddresses { begin_addr: 513626, stop_ptr: 514394 }), range_check96_builtin: None, range_check_builtin: Some(MemorySegmentAddresses { begin_addr: 480778, stop_ptr: 513546 }), ec_op_builtin: None }
+[wasm 416 live 338 peak 338]  INFO privacy_recursive_prove:get_prover_input:adapt:relocate_public_addresses: stwo_cairo_adapter::relocator: enter
+[wasm 416 live 338 peak 338]  INFO privacy_recursive_prove:get_prover_input:adapt:MemoryBuilder::from_iter: stwo_cairo_adapter::memory: enter
+[wasm 428 live 329 peak 359]  INFO privacy_recursive_prove:get_prover_input:adapt:StateTransitions::from_slice_parallel: stwo_cairo_adapter::opcodes: enter
+[wasm 428 live 337 peak 359]  INFO privacy_recursive_prove:get_prover_input:adapt: stwo_cairo_adapter::adapter: Opcode counts: [("generic_opcode", 0), ("add_ap_opcode", 33621), ("add_opcode", 84457), ("add_opcode_small", 136710), ("assert_eq_opcode", 24192), ("assert_eq_opcode_double_deref", 154979), ("assert_eq_opcode_imm", 33397), ("call_opcode_abs", 6), ("call_opcode_rel_imm", 8781), ("jnz_opcode_non_taken", 5680), ("jnz_opcode_taken", 43149), ("jump_opcode_rel_imm", 34607), ("jump_opcode_rel", 23), ("jump_opcode_double_deref", 6), ("jump_opcode_abs", 1), ("mul_opcode_small", 33723), ("mul_opcode", 25420), ("ret_opcode", 8787), ("blake_compress_opcode", 4764), ("qm_31_add_mul_opcode", 0)]
+[wasm 428 live 207 peak 359]  INFO privacy_recursive_prove: privacy_prove: Generate the cairo proof
+[wasm 428 live 207 peak 359]  INFO privacy_recursive_prove:prove_cairo: stwo_cairo_prover::prover: enter
+[wasm 428 live 331 peak 359]  INFO privacy_recursive_prove:prove_cairo:Write Base trace: stwo_cairo_prover::prover: enter
+[wasm 1810 live 1748 peak 1749]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment: stwo_cairo_prover::prover: enter
+[wasm 1810 live 1748 peak 1749]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Interpolation for commitment: stwo::prover::pcs: enter
+[wasm 1817 live 1755 peak 1756]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment: stwo::prover::pcs: enter
+[wasm 1817 live 1755 peak 1756]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment:Commitment: stwo::prover::pcs: enter
+[wasm 1817 live 1755 peak 1756]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment:Commitment:Striped commitment: stwo::prover::pcs: enter
+[wasm 1817 live 1756 peak 1756]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=1}: stwo::prover::pcs: enter
+[wasm 2336 live 2245 peak 2275]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=2}: stwo::prover::pcs: enter
+[wasm 2336 live 2248 peak 2278]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=3}: stwo::prover::pcs: enter
+[wasm 2368 live 2251 peak 2281]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=4}: stwo::prover::pcs: enter
+[wasm 2368 live 2254 peak 2284]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=5}: stwo::prover::pcs: enter
+[wasm 2368 live 2257 peak 2287]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=6}: stwo::prover::pcs: enter
+[wasm 2368 live 2260 peak 2290]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=7}: stwo::prover::pcs: enter
+[wasm 2368 live 2262 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute base trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=0}: stwo::prover::pcs: enter
+[wasm 2368 live 1781 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Write interaction trace: stwo_cairo_prover::prover: enter
+[wasm 2368 live 1181 peak 2292]  INFO privacy_recursive_prove:prove_cairo: stwo_cairo_prover::prover: Witness trace cells: [10161776, 128381920, 122441088]
+[wasm 2368 live 1181 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment: stwo_cairo_prover::prover: enter
+[wasm 2368 live 1181 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Interpolation for commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1188 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1188 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment:Commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1188 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment:Commitment:Striped commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1188 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=1}: stwo::prover::pcs: enter
+[wasm 2368 live 1655 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=2}: stwo::prover::pcs: enter
+[wasm 2368 live 1657 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=3}: stwo::prover::pcs: enter
+[wasm 2368 live 1659 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=4}: stwo::prover::pcs: enter
+[wasm 2368 live 1661 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=5}: stwo::prover::pcs: enter
+[wasm 2368 live 1663 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=6}: stwo::prover::pcs: enter
+[wasm 2368 live 1665 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=7}: stwo::prover::pcs: enter
+[wasm 2368 live 1667 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Compute interaction trace commitment:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=0}: stwo::prover::pcs: enter
+[wasm 2368 live 1199 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs: stwo_cairo_prover::prover: enter
+[wasm 2368 live 1199 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover: enter
+[wasm 2368 live 1199 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}: stwo::prover: enter
+[wasm 2368 live 1199 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}: stwo::prover: enter
+[wasm 2368 live 1203 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1203 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1211 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1213 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1214 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1215 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1231 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1231 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1263 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraints interpolation{class="ConstraintInterpolation"}: stwo::prover::air::accumulation: enter
+[wasm 2368 live 1247 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1247 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment:Commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1247 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1247 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=1}: stwo::prover::pcs: enter
+[wasm 2368 live 1281 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=2}: stwo::prover::pcs: enter
+[wasm 2368 live 1283 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=3}: stwo::prover::pcs: enter
+[wasm 2368 live 1285 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=4}: stwo::prover::pcs: enter
+[wasm 2368 live 1287 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=5}: stwo::prover::pcs: enter
+[wasm 2368 live 1289 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=6}: stwo::prover::pcs: enter
+[wasm 2368 live 1291 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=7}: stwo::prover::pcs: enter
+[wasm 2368 live 1293 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=0}: stwo::prover::pcs: enter
+[wasm 2368 live 1245 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Evaluate columns out of domain{class="EvaluateOutOfDomain"}: stwo::prover::pcs: enter
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 11: 21
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 16: 944
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 19: 720
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 18: 323
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 23: 84
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 8: 29
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 13: 151
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 12: 1
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 20: 124
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 15: 211
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 17: 486
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 7: 295
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 22: 90
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 9: 41
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 10: 697
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 14: 6
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover::pcs: Log size 21: 165
+[wasm 2368 live 1246 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Compute FRI quotients{class="FRIQuotients"}: stwo::prover::pcs::quotient_ops: enter
+[wasm 2368 live 1374 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:commit: stwo::prover::fri: enter
+[wasm 2368 live 1387 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Grind{class="Queries POW"}: stwo::prover::pcs: enter
+[wasm 2368 live 1374 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Decommit from stripes: stwo::prover::pcs: enter
+[wasm 2368 live 1374 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Decommit from stripes: stwo::prover::pcs: enter
+[wasm 2368 live 1375 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Decommit from stripes: stwo::prover::pcs: enter
+[wasm 2368 live 1375 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex:Decommit from stripes: stwo::prover::pcs: enter
+[wasm 2368 live 192 peak 2292]  INFO privacy_recursive_prove:prove_cairo:Prove STARKs:prove_ex: stwo::prover: proof_size_estimate=576084
+[wasm 2368 live 192 peak 2292]  INFO privacy_recursive_prove: privacy_prove: Prepare the cairo proof for the cairo-circuit verifier
+[wasm 2368 live 194 peak 2292]  INFO privacy_recursive_prove: privacy_prove: Build the cairo-circuit verifier context
+[wasm 2368 live 392 peak 2292]  INFO privacy_recursive_prove: privacy_prove: Prove the cairo-circuit verifier
+[wasm 2368 live 392 peak 2292]  INFO privacy_recursive_prove:prepare_circuit_preprocessed_tree: privacy_prove: enter
+[wasm 2368 live 523 peak 2292]  INFO privacy_recursive_prove:prepare_circuit_preprocessed_tree:Striped commitment: stwo::prover::pcs: enter
+[wasm 2368 live 523 peak 2292]  INFO privacy_recursive_prove:prepare_circuit_preprocessed_tree:Striped commitment:Extension and Merkle{stripe=1}: stwo::prover::pcs: enter
+[wasm 2368 live 658 peak 2292]  INFO privacy_recursive_prove:prepare_circuit_preprocessed_tree:Striped commitment:Extension and Merkle{stripe=2}: stwo::prover::pcs: enter
+[wasm 2368 live 662 peak 2292]  INFO privacy_recursive_prove:prepare_circuit_preprocessed_tree:Striped commitment:Extension and Merkle{stripe=3}: stwo::prover::pcs: enter
+[wasm 2368 live 666 peak 2292]  INFO privacy_recursive_prove:prepare_circuit_preprocessed_tree:Striped commitment:Extension and Merkle{stripe=0}: stwo::prover::pcs: enter
+[wasm 2368 live 1486 peak 2292]  INFO privacy_recursive_prove:Commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1486 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1486 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment:Striped commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1486 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=1}: stwo::prover::pcs: enter
+[wasm 2368 live 1876 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=2}: stwo::prover::pcs: enter
+[wasm 2368 live 1880 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=3}: stwo::prover::pcs: enter
+[wasm 2368 live 1884 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=0}: stwo::prover::pcs: enter
+[wasm 2368 live 1373 peak 2292]  INFO privacy_recursive_prove:Commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1373 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1373 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment:Striped commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1373 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=1}: stwo::prover::pcs: enter
+[wasm 2368 live 1810 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=2}: stwo::prover::pcs: enter
+[wasm 2368 live 1814 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=3}: stwo::prover::pcs: enter
+[wasm 2368 live 1818 peak 2292]  INFO privacy_recursive_prove:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=0}: stwo::prover::pcs: enter
+[wasm 2368 live 1389 peak 2292]  INFO privacy_recursive_prove:prove_ex: stwo::prover: enter
+[wasm 2368 live 1389 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}: stwo::prover: enter
+[wasm 2368 live 1389 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}: stwo::prover: enter
+[wasm 2368 live 1393 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1393 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1393 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1393 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1457 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1457 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1465 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1465 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1465 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1465 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1497 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1497 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1497 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1497 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1499 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1499 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1499 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1499 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1499 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1500 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1500 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraint point-wise eval{class="ConstraintEval"}:Constraint part extension: stwo_constraint_framework::prover::component_prover: enter
+[wasm 2368 live 1500 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Generation{class="CompositionPolynomialGeneration"}:Constraints interpolation{class="ConstraintInterpolation"}: stwo::prover::air::accumulation: enter
+[wasm 2368 live 1485 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1485 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Commitment:Commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1485 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment: stwo::prover::pcs: enter
+[wasm 2368 live 1485 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=1}: stwo::prover::pcs: enter
+[wasm 2368 live 1553 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=2}: stwo::prover::pcs: enter
+[wasm 2368 live 1557 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=3}: stwo::prover::pcs: enter
+[wasm 2368 live 1561 peak 2292]  INFO privacy_recursive_prove:prove_ex:Composition{class="Composition"}:Commitment:Commitment:Striped commitment:Extension and Merkle{stripe=0}: stwo::prover::pcs: enter
+[wasm 2368 live 1469 peak 2292]  INFO privacy_recursive_prove:prove_ex:Evaluate columns out of domain{class="EvaluateOutOfDomain"}: stwo::prover::pcs: enter
+[wasm 2368 live 1469 peak 2292]  INFO privacy_recursive_prove:prove_ex: stwo::prover::pcs: Log size 10: 8
+[wasm 2368 live 1469 peak 2292]  INFO privacy_recursive_prove:prove_ex: stwo::prover::pcs: Log size 18: 15
+[wasm 2368 live 1469 peak 2292]  INFO privacy_recursive_prove:prove_ex: stwo::prover::pcs: Log size 19: 59
+[wasm 2368 live 1469 peak 2292]  INFO privacy_recursive_prove:prove_ex: stwo::prover::pcs: Log size 20: 27
+[wasm 2368 live 1469 peak 2292]  INFO privacy_recursive_prove:prove_ex: stwo::prover::pcs: Log size 16: 8
+[wasm 2368 live 1469 peak 2292]  INFO privacy_recursive_prove:prove_ex: stwo::prover::pcs: Log size 23: 36
+[wasm 2368 live 1469 peak 2292]  INFO privacy_recursive_prove:prove_ex: stwo::prover::pcs: Log size 22: 166
+[wasm 2368 live 1469 peak 2292]  INFO privacy_recursive_prove:prove_ex:Compute FRI quotients{class="FRIQuotients"}: stwo::prover::pcs::quotient_ops: enter
+[wasm 2368 live 1597 peak 2292]  INFO privacy_recursive_prove:prove_ex:commit: stwo::prover::fri: enter
+[wasm 2368 live 1610 peak 2292]  INFO privacy_recursive_prove:prove_ex:Grind{class="Queries POW"}: stwo::prover::pcs: enter
+[wasm 2368 live 1598 peak 2292]  INFO privacy_recursive_prove:prove_ex:Decommit from stripes: stwo::prover::pcs: enter
+[wasm 2368 live 1598 peak 2292]  INFO privacy_recursive_prove:prove_ex:Decommit from stripes: stwo::prover::pcs: enter
+[wasm 2368 live 1598 peak 2292]  INFO privacy_recursive_prove:prove_ex:Decommit from stripes: stwo::prover::pcs: enter
+[wasm 2368 live 1598 peak 2292]  INFO privacy_recursive_prove:prove_ex:Decommit from stripes: stwo::prover::pcs: enter
+[wasm 2368 live 540 peak 2292]  INFO privacy_recursive_prove:prove_ex: stwo::prover: proof_size_estimate=191032
+[wasm 2368 live 540 peak 2292]  INFO privacy_recursive_prove: privacy_prove: Prepare the circuit proof for the circuit verifier
+[wasm 2368 live 540 peak 2292]  INFO privacy_recursive_prove: privacy_prove: Serialize and compress the proof
+MEM proved: wasm 2368 live 337 peak 2292
+proved in 153.1 s: proof 305540 chars, IDENTICAL to the native proof; proof_facts match; l2_to_l1_messages match; wasm memory 2.60 GiB rss

@@ -1,0 +1,190 @@
+use starknet_api::core::{ClassHash, CompiledClassHash};
+use starknet_types_core::felt::Felt;
+
+use crate::blockifier::config::NativeClassesWhitelist;
+use crate::execution::contract_class::RunnableCompiledClass;
+use crate::metrics::CacheMetrics;
+use crate::state::contract_class_manager::ContractClassManager;
+use crate::state::errors::StateError;
+use crate::state::global_cache::CompiledClasses;
+use crate::state::state_api::{StateReader, StateResult};
+
+#[cfg(test)]
+#[path = "state_reader_and_contract_manager_test.rs"]
+pub mod state_reader_and_contract_manager_test;
+
+pub trait FetchCompiledClasses: StateReader {
+    fn get_compiled_classes(&self, class_hash: ClassHash) -> StateResult<CompiledClasses>;
+
+    /// Returns whether the given class hash corresponds to a declared Cairo 1 class.
+    /// Cairo 0 classes always return `false`.
+    fn is_declared(&self, class_hash: ClassHash) -> StateResult<bool>;
+}
+
+impl<T: FetchCompiledClasses + ?Sized> FetchCompiledClasses for Box<T> {
+    fn get_compiled_classes(&self, class_hash: ClassHash) -> StateResult<CompiledClasses> {
+        self.as_ref().get_compiled_classes(class_hash)
+    }
+
+    fn is_declared(&self, class_hash: ClassHash) -> StateResult<bool> {
+        self.as_ref().is_declared(class_hash)
+    }
+}
+
+pub struct StateReaderAndContractManager<S: FetchCompiledClasses> {
+    pub state_reader: S,
+    contract_class_manager: ContractClassManager,
+    native_classes_whitelist: NativeClassesWhitelist,
+    class_cache_metrics: Option<CacheMetrics>,
+}
+
+impl<S: FetchCompiledClasses> StateReaderAndContractManager<S> {
+    pub fn new(
+        state_reader: S,
+        contract_class_manager: ContractClassManager,
+        class_cache_metrics: Option<CacheMetrics>,
+    ) -> Self {
+        Self::new_with_native_classes_whitelist(
+            state_reader,
+            contract_class_manager,
+            NativeClassesWhitelist::All,
+            class_cache_metrics,
+        )
+    }
+
+    pub fn new_with_native_classes_whitelist(
+        state_reader: S,
+        contract_class_manager: ContractClassManager,
+        native_classes_whitelist: NativeClassesWhitelist,
+        class_cache_metrics: Option<CacheMetrics>,
+    ) -> Self {
+        Self { state_reader, contract_class_manager, native_classes_whitelist, class_cache_metrics }
+    }
+}
+
+impl<S: FetchCompiledClasses> StateReaderAndContractManager<S> {
+    fn get_compiled_from_class_manager(
+        &self,
+        class_hash: ClassHash,
+    ) -> StateResult<RunnableCompiledClass> {
+        if let Some(runnable_class) =
+            self.contract_class_manager.get_runnable(&class_hash, &self.native_classes_whitelist)
+        {
+            match &runnable_class {
+                RunnableCompiledClass::V0(_) => {}
+                _ => {
+                    // The Cairo1 class is cached; verify it is declared,
+                    // since existence in the cache does not guarantee that
+                    // (it might contain a declared class from a reverted block, for example).
+                    if !self.state_reader.is_declared(class_hash)? {
+                        return Err(StateError::UndeclaredClassHash(class_hash));
+                    }
+                }
+            }
+            self.increment_cache_hit_metric();
+            self.update_native_metrics(&runnable_class);
+            return Ok(runnable_class);
+        }
+        self.increment_cache_miss_metric();
+
+        let compiled_class = self.state_reader.get_compiled_classes(class_hash)?;
+        self.contract_class_manager.set_and_compile(class_hash, compiled_class.clone());
+        // Access the cache again in case the class was compiled.
+        let runnable_class = self
+            .contract_class_manager
+            .get_runnable(&class_hash, &self.native_classes_whitelist)
+            .unwrap_or_else(|| {
+                // Edge case that should not be happen if the cache size is big enough.
+                // TODO(Yoni): consider having an atomic set-and-get.
+                log::error!("Class is missing immediately after being cached.");
+                compiled_class.to_runnable()
+            });
+        self.update_native_metrics(&runnable_class);
+        Ok(runnable_class)
+    }
+
+    fn increment_cache_hit_metric(&self) {
+        if let Some(ref class_cache_metrics) = self.class_cache_metrics {
+            class_cache_metrics.increment_hit();
+        }
+    }
+
+    fn increment_cache_miss_metric(&self) {
+        if let Some(ref class_cache_metrics) = self.class_cache_metrics {
+            class_cache_metrics.increment_miss();
+        }
+    }
+
+    fn update_native_metrics(&self, _runnable_class: &RunnableCompiledClass) {
+        #[cfg(feature = "cairo_native")]
+        {
+            if matches!(_runnable_class, RunnableCompiledClass::V1Native(_)) {
+                crate::metrics::NATIVE_CLASS_RETURNED.increment(1);
+            }
+        }
+    }
+}
+
+impl<S: FetchCompiledClasses> StateReader for StateReaderAndContractManager<S> {
+    fn get_storage_at(
+        &self,
+        contract_address: starknet_api::core::ContractAddress,
+        key: starknet_api::state::StorageKey,
+    ) -> StateResult<Felt> {
+        self.state_reader.get_storage_at(contract_address, key)
+    }
+
+    fn get_nonce_at(
+        &self,
+        contract_address: starknet_api::core::ContractAddress,
+    ) -> StateResult<starknet_api::core::Nonce> {
+        self.state_reader.get_nonce_at(contract_address)
+    }
+
+    fn get_class_hash_at(
+        &self,
+        contract_address: starknet_api::core::ContractAddress,
+    ) -> StateResult<ClassHash> {
+        self.state_reader.get_class_hash_at(contract_address)
+    }
+
+    fn get_compiled_class(&self, class_hash: ClassHash) -> StateResult<RunnableCompiledClass> {
+        self.get_compiled_from_class_manager(class_hash)
+    }
+
+    fn get_compiled_class_hash(&self, class_hash: ClassHash) -> StateResult<CompiledClassHash> {
+        self.state_reader.get_compiled_class_hash(class_hash)
+    }
+
+    /// Returns the compiled class hash v2 for the given class hash.
+    /// The function assumes that the class hash is already declared,
+    /// and of cairo1 contract class.
+    fn get_compiled_class_hash_v2(
+        &self,
+        class_hash: ClassHash,
+        compiled_class: &RunnableCompiledClass,
+    ) -> StateResult<CompiledClassHash> {
+        // First, try getting from class manager cache.
+        match self.contract_class_manager.get_compiled_class_hash_v2(&class_hash) {
+            Some(compiled_class_hash) => Ok(compiled_class_hash),
+            None => {
+                // Not in cache → fetch from state reader.
+                let compiled_class_hash =
+                    self.state_reader.get_compiled_class_hash_v2(class_hash, compiled_class)?;
+                // Verify that the returned compiled_class_hash_v2 is not the default value.
+                // default value is used to mark classes that are not declared or cairo0 classes.
+                assert_ne!(
+                    compiled_class_hash,
+                    CompiledClassHash::default(),
+                    "Default compiled class hash is for marking classes that are not declared or \
+                     cairo0 classes. class_hash: {class_hash:?}"
+                );
+                // Store in cache.
+                self.contract_class_manager
+                    .set_compiled_class_hash_v2(class_hash, compiled_class_hash);
+
+                Ok(compiled_class_hash)
+            }
+        }
+    }
+}

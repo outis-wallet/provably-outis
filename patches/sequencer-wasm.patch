@@ -1,0 +1,2179 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index d6161a1..6c97149 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -4,6 +4,7 @@
+ resolver = "2"
+ 
+ members = [
++    "crates/os_wasm_probe",
+   "crates/apollo_base_layer_tests",
+   "crates/apollo_batcher",
+   "crates/apollo_batcher_config",
+@@ -251,7 +252,7 @@ byteorder = "1.4.3"
+ bytes = "1"
+ bzip2 = { version = "0.5.0", default-features = false }
+ c-kzg = "2.1.5"
+-cached = "0.44.0"
++cached = { version = "0.44.0", default-features = false }
+ cairo-air = "1.1.0"
+ cairo-felt = "0.9.1"
+ cairo-lang-casm = "2.19.4"
+@@ -462,3 +463,32 @@ inherits = "dev"
+ as_conversions = "warn"
+ await_holding_lock = "warn"
+ await_holding_refcell_ref = "warn"
++
++[patch."https://github.com/starkware-libs/proving"]
++cairo-air = { path = "/home/broody/development/provably-fast/s144-wasm/crates/cairo-air" }
++cairo-program-runner-lib = { path = "/home/broody/development/provably-fast/s144-wasm/crates/cairo-program-runner-lib" }
++circuit-cairo-verifier = { path = "/home/broody/development/provably-fast/s144-wasm/crates/cairo_verifier" }
++circuit-common = { path = "/home/broody/development/provably-fast/s144-wasm/crates/circuit_common" }
++circuit-prover = { path = "/home/broody/development/provably-fast/s144-wasm/crates/circuit_prover" }
++circuit-registry = { path = "/home/broody/development/provably-fast/s144-wasm/crates/circuit_registry" }
++circuit-serialize = { path = "/home/broody/development/provably-fast/s144-wasm/crates/circuit_serialize" }
++circuit-verifier = { path = "/home/broody/development/provably-fast/s144-wasm/crates/circuit_verifier" }
++circuits = { path = "/home/broody/development/provably-fast/s144-wasm/crates/circuits" }
++circuits-stark-verifier = { path = "/home/broody/development/provably-fast/s144-wasm/crates/stark_verifier" }
++leaf-proof-format = { path = "/home/broody/development/provably-fast/s144-wasm/crates/leaf_proof_format" }
++leaf-prover = { path = "/home/broody/development/provably-fast/s144-wasm/crates/leaf_prover" }
++privacy-circuit-verify = { path = "/home/broody/development/provably-fast/s144-wasm/crates/privacy_circuit_verify" }
++privacy-prove = { path = "/home/broody/development/provably-fast/s144-wasm/crates/privacy_prove" }
++stwo = { path = "/home/broody/development/provably-fast/s144-wasm/crates/stwo" }
++stwo-air-utils = { path = "/home/broody/development/provably-fast/s144-wasm/crates/air-utils" }
++stwo-air-utils-derive = { path = "/home/broody/development/provably-fast/s144-wasm/crates/air-utils-derive" }
++stwo-cairo-adapter = { path = "/home/broody/development/provably-fast/s144-wasm/crates/adapter" }
++stwo-cairo-common = { path = "/home/broody/development/provably-fast/s144-wasm/crates/common" }
++stwo-cairo-prover = { path = "/home/broody/development/provably-fast/s144-wasm/crates/prover" }
++stwo-cairo-serialize = { path = "/home/broody/development/provably-fast/s144-wasm/crates/cairo-serialize" }
++stwo-cairo-serialize-derive = { path = "/home/broody/development/provably-fast/s144-wasm/crates/cairo-serialize-derive" }
++stwo-cairo-utils = { path = "/home/broody/development/provably-fast/s144-wasm/crates/utils" }
++stwo-constraint-framework = { path = "/home/broody/development/provably-fast/s144-wasm/crates/constraint-framework" }
++
++[patch.crates-io]
++c-kzg = { path = "wasm-stubs/c-kzg" }
+diff --git a/crates/apollo_infra_utils/Cargo.toml b/crates/apollo_infra_utils/Cargo.toml
+index b0bb956..e77a59e 100644
+--- a/crates/apollo_infra_utils/Cargo.toml
++++ b/crates/apollo_infra_utils/Cargo.toml
+@@ -24,12 +24,15 @@ socket2 = { workspace = true, optional = true }
+ strum = { workspace = true, optional = true, features = ["derive"] }
+ tempfile = { workspace = true, optional = true }
+ thiserror.workspace = true
+-tikv-jemallocator.workspace = true
+-tokio = { workspace = true, features = ["process", "rt", "time"] }
+ tracing.workspace = true
+ tracing-subscriber.workspace = true
+ url.workspace = true
+ 
++# jemalloc has no WebAssembly build.
++[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++tikv-jemallocator.workspace = true
++tokio = { workspace = true, features = ["process", "rt", "time"] }
++
+ [dev-dependencies]
+ assert-json-diff.workspace = true
+ colored.workspace = true
+diff --git a/crates/apollo_infra_utils/src/lib.rs b/crates/apollo_infra_utils/src/lib.rs
+index 3e5995c..489b75c 100644
+--- a/crates/apollo_infra_utils/src/lib.rs
++++ b/crates/apollo_infra_utils/src/lib.rs
+@@ -2,11 +2,15 @@ pub mod cairo0_compiler;
+ #[cfg(any(feature = "testing", test))]
+ pub mod cairo0_compiler_test_utils;
+ pub mod cairo_compiler_version;
++#[cfg(not(target_arch = "wasm32"))]
+ pub mod command;
+ pub mod dumping;
++#[cfg(not(target_arch = "wasm32"))]
+ pub mod global_allocator;
+ pub mod path;
++#[cfg(not(target_arch = "wasm32"))]
+ pub mod run_until;
++#[cfg(not(target_arch = "wasm32"))]
+ pub mod tasks;
+ pub mod template;
+ #[cfg(any(feature = "testing", test))]
+@@ -19,4 +23,5 @@ pub mod url;
+ pub extern crate apollo_proc_macros as _apollo_proc_macros;
+ 
+ // Re-export tikv-jemallocator for the [set_global_allocator] macro in downstream crates.
++#[cfg(not(target_arch = "wasm32"))]
+ pub use tikv_jemallocator;
+diff --git a/crates/starknet_os/src/hints/enum_generation.rs b/crates/starknet_os/src/hints/enum_generation.rs
+index 27dd267..e47fede 100644
+--- a/crates/starknet_os/src/hints/enum_generation.rs
++++ b/crates/starknet_os/src/hints/enum_generation.rs
+@@ -190,11 +190,19 @@ macro_rules! define_hint_extension_enum {
+ 
+ #[macro_export]
+ macro_rules! log_time {
++    // wasm32-unknown-unknown has no clock: Instant::now() panics there, so skip the timing.
+     ($command:expr, $hint:expr) => {{
++        #[cfg(target_arch = "wasm32")]
++        let result = $command;
++        #[cfg(not(target_arch = "wasm32"))]
+         let start = std::time::Instant::now();
++        #[cfg(not(target_arch = "wasm32"))]
+         let result = $command;
+-        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+-        log::debug!("Took {elapsed:>7.3} ms to execute hint {:?}.", $hint);
++        #[cfg(not(target_arch = "wasm32"))]
++        {
++            let elapsed = start.elapsed().as_secs_f64() * 1000.0;
++            log::debug!("Took {elapsed:>7.3} ms to execute hint {:?}.", $hint);
++        }
+         result
+     }};
+ }
+diff --git a/crates/starknet_os/src/hints/hint_implementation/compiled_class/implementation.rs b/crates/starknet_os/src/hints/hint_implementation/compiled_class/implementation.rs
+index e656b91..82eb365 100644
+--- a/crates/starknet_os/src/hints/hint_implementation/compiled_class/implementation.rs
++++ b/crates/starknet_os/src/hints/hint_implementation/compiled_class/implementation.rs
+@@ -198,7 +198,7 @@ pub(crate) fn load_classes_and_create_bytecode_segment_structures<S: StateReader
+         )?;
+         let bytecode_ptr = ctx.vm.get_relocatable(bytecode_ptr_address)?;
+         let builtin_costs = ctx.get_ptr(Ids::BuiltinCosts)?;
+-        let encoded_ret_opcode = 0x208b7fff7fff7ffe;
++        let encoded_ret_opcode = Felt::from(0x208b7fff7fff7ffe_u64);
+         let data = [encoded_ret_opcode.into(), builtin_costs.into()];
+         ctx.vm.load_data((bytecode_ptr + compiled_class.bytecode.len())?, &data)?;
+ 
+diff --git a/crates/starknet_patricia/Cargo.toml b/crates/starknet_patricia/Cargo.toml
+index f15fae3..a717f81 100644
+--- a/crates/starknet_patricia/Cargo.toml
++++ b/crates/starknet_patricia/Cargo.toml
+@@ -13,6 +13,9 @@ workspace = true
+ deserialize = []
+ testing = []
+ 
++[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++tokio = { workspace = true, features = ["rt-multi-thread"] }
++
+ [dev-dependencies]
+ pretty_assertions.workspace = true
+ rand.workspace = true
+@@ -31,4 +34,4 @@ starknet_api.workspace = true
+ starknet_patricia_storage.workspace = true
+ strum = { workspace = true, features = ["derive"] }
+ thiserror.workspace = true
+-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
++tokio = { workspace = true, features = ["macros", "rt"] }
+diff --git a/crates/os_wasm_probe/Cargo.toml b/crates/os_wasm_probe/Cargo.toml
+new file mode 100644
+index 0000000..2730921
+--- /dev/null
++++ b/crates/os_wasm_probe/Cargo.toml
+@@ -0,0 +1,54 @@
++[package]
++name = "os_wasm_probe"
++version = "0.1.0"
++edition = "2024"
++publish = false
++
++[lib]
++crate-type = ["cdylib", "rlib"]
++
++[[bin]]
++name = "os_native_probe"
++path = "src/main.rs"
++
++[dependencies]
++blockifier = { workspace = true, features = ["transaction_serde"] }
++cairo-lang-starknet-classes.workspace = true
++cairo-vm.workspace = true
++serde = { workspace = true, features = ["derive"] }
++serde_json.workspace = true
++sha2.workspace = true
++starknet_committer.workspace = true
++starknet_patricia.workspace = true
++starknet_patricia_storage.workspace = true
++starknet-rust-core.workspace = true
++indexmap.workspace = true
++thiserror.workspace = true
++futures.workspace = true
++tracing.workspace = true
++tracing-subscriber = { workspace = true, features = ["fmt"] }
++privacy-prove.workspace = true
++starknet_proof_verifier.workspace = true
++cairo-lang-utils.workspace = true
++starknet-types-core.workspace = true
++tokio = { workspace = true, features = ["rt"] }
++shared_execution_objects = { workspace = true, features = ["deserialize"] }
++starknet_api.workspace = true
++starknet_os = { workspace = true, features = ["deserialize"] }
++# Pinned to the prover wasm build and the installed wasm-bindgen-cli.
++wasm-bindgen = "=0.2.126"
++js-sys = "=0.3.103"
++
++[target.'cfg(target_arch = "wasm32")'.dependencies]
++# A rayon thread pool on Web Workers sharing the module's memory.
++wasm-bindgen-rayon = { version = "1.3", optional = true }
++# Without `nightly`, parking_lot_core's wasm parker panics on any park, which kills a rayon worker
++# the first time a DashMap lock is contended (the adapter's MemoryBuilder) and hangs the proof.
++parking_lot_core = { version = "0.9", optional = true, features = ["nightly"] }
++getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
++getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
++getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
++
++[features]
++# The threaded build (needs atomics and shared memory).
++threads = ["dep:wasm-bindgen-rayon", "dep:parking_lot_core"]
+diff --git a/crates/os_wasm_probe/src/committer_utils.rs b/crates/os_wasm_probe/src/committer_utils.rs
+new file mode 100644
+index 0000000..57f6991
+--- /dev/null
++++ b/crates/os_wasm_probe/src/committer_utils.rs
+@@ -0,0 +1,388 @@
++// Copied from starknet_transaction_prover/src/running/committer_utils.rs (PRIVACY-0.14.4-RC.0).
++
++use std::collections::HashSet;
++use std::hash::BuildHasher;
++
++use blockifier::state::accessed_keys::AccessedKeys;
++use blockifier::state::cached_state::{CommitmentStateDiff, StateMaps, StorageDiff, StorageView};
++use indexmap::IndexMap;
++use starknet_api::core::{ClassHash, Nonce};
++use starknet_api::hash::{HashOutput, StateRoots};
++use starknet_committer::block_committer::commit::{
++    commit_block,
++    commit_block_with_witnesses,
++    CommitBlockWithWitnessesOutput,
++};
++use starknet_committer::block_committer::input::{
++    Input,
++    ReaderConfig,
++    StarknetStorageKey,
++    StarknetStorageValue,
++    StateDiff,
++};
++use starknet_committer::block_committer::measurements_util::NoMeasurements;
++use starknet_committer::db::facts_db::db::{FactDbFilledNode, FactsDb};
++use starknet_committer::db::facts_db::node_serde::{PatriciaPrefix, FACT_LAYOUT_DB_KEY_SEPARATOR};
++use starknet_committer::db::facts_db::types::FactsDbInitialRead;
++use starknet_committer::db::forest_trait::{ForestWriter, StorageInitializer};
++use starknet_committer::db::index_db::{IndexDb, IndexDbReadContext};
++use starknet_committer::hash_function::hash::TreeHashFunctionImpl;
++use starknet_committer::patricia_merkle_tree::leaf::leaf_impl::ContractState;
++use starknet_committer::patricia_merkle_tree::tree::LeavesRequest;
++use starknet_committer::patricia_merkle_tree::types::{CompiledClassHash, StateCommitmentInfos};
++use starknet_patricia::patricia_merkle_tree::filled_tree::node::FilledNode;
++use starknet_patricia::patricia_merkle_tree::node_data::inner_node::{BinaryData, NodeData};
++use starknet_patricia::patricia_merkle_tree::node_data::leaf::Leaf;
++use starknet_patricia::patricia_merkle_tree::updated_skeleton_tree::hash_function::TreeHashFunction;
++use starknet_patricia_storage::db_object::{DBObject, EmptyKeyContext, HasStaticPrefix};
++use starknet_patricia_storage::map_storage::MapStorage;
++use starknet_patricia_storage::storage_trait::{create_db_key, DbHashMap, DbKeyPrefix, DbValue};
++use starknet_rust_core::types::{Felt, MerkleNode, StorageProof as RpcStorageProof};
++
++use crate::errors::ProofProviderError;
++use crate::storage_proofs::RpcStorageProofsQuery;
++
++/// Converts blockifier's StateMaps to committer's StateDiff format.
++pub fn state_maps_to_committer_state_diff(state_maps: StateMaps) -> StateDiff {
++    StateDiff {
++        address_to_class_hash: state_maps.class_hashes,
++        address_to_nonce: state_maps.nonces,
++        class_hash_to_compiled_class_hash: state_maps
++            .compiled_class_hashes
++            .into_iter()
++            .map(|(class_hash, compiled_class_hash)| {
++                (class_hash, CompiledClassHash(compiled_class_hash.0))
++            })
++            .collect(),
++        storage_updates: StorageDiff::from(StorageView(state_maps.storage))
++            .into_iter()
++            .map(|(address, updates)| {
++                (
++                    address,
++                    updates
++                        .into_iter()
++                        .map(|(key, value)| (StarknetStorageKey(key), StarknetStorageValue(value)))
++                        .collect(),
++                )
++            })
++            .collect(),
++    }
++}
++
++/// Converts blockifier's CommitmentStateDiff to committer's StateDiff format.
++pub fn commitment_state_diff_to_committer_state_diff(
++    commitment_state_diff: CommitmentStateDiff,
++) -> StateDiff {
++    StateDiff {
++        address_to_class_hash: commitment_state_diff.address_to_class_hash.into_iter().collect(),
++        address_to_nonce: commitment_state_diff.address_to_nonce.into_iter().collect(),
++        class_hash_to_compiled_class_hash: commitment_state_diff
++            .class_hash_to_compiled_class_hash
++            .into_iter()
++            .map(|(class_hash, compiled_class_hash)| {
++                (class_hash, CompiledClassHash(compiled_class_hash.0))
++            })
++            .collect(),
++        storage_updates: commitment_state_diff
++            .storage_updates
++            .into_iter()
++            .map(|(address, updates)| {
++                (
++                    address,
++                    updates
++                        .into_iter()
++                        .map(|(key, value)| (StarknetStorageKey(key), StarknetStorageValue(value)))
++                        .collect(),
++                )
++            })
++            .collect(),
++    }
++}
++
++/// Validates that the committer state diff contains only allowed state transitions.
++///
++/// This function enforces the following constraints:
++/// * **No Storage Deletions:** Storage entries cannot be updated to `Felt::ZERO`.
++/// * **No Class Declarations:** The `class_hash_to_compiled_class_hash` map must be empty.
++/// * **No Contract Deployments:** The `address_to_class_hash` map must be empty.
++pub(crate) fn validate_virtual_os_state_diff(
++    state_diff: &StateDiff,
++) -> Result<(), ProofProviderError> {
++    // validate no storage deletions.
++    for (address, storage_diffs) in &state_diff.storage_updates {
++        for (key, value) in storage_diffs {
++            if value.0 == Felt::ZERO {
++                return Err(ProofProviderError::InvalidStateDiff(format!(
++                    "Storage deletion not allowed: try to delete storage at address {address:?}, \
++                     key {key:?}"
++                )));
++            }
++        }
++    }
++    // validate no contract deployments (or replaced classes).
++    if !state_diff.address_to_class_hash.is_empty() {
++        return Err(ProofProviderError::InvalidStateDiff(format!(
++            "Contract deployments not allowed: try to deploy contracts(address to class hash): \
++             {0:?}",
++            state_diff.address_to_class_hash
++        )));
++    }
++    // validate no contract declarations (or compiled class hash updates).
++    if !state_diff.class_hash_to_compiled_class_hash.is_empty() {
++        return Err(ProofProviderError::InvalidStateDiff(format!(
++            "Contract declarations not allowed: try to declare classes(class hash to compiled \
++             class hash): {0:?}",
++            state_diff.class_hash_to_compiled_class_hash
++        )));
++    }
++    Ok(())
++}
++
++/// Builds a FactsDb from RPC storage proofs and execution initial reads.
++///
++/// This stores:
++/// - Inner nodes for contracts, classes, and storage proofs.
++/// - Contract state leaves from the RPC proof.
++/// - Storage leaves and compiled class leaves from initial reads.
++/// - Dummy binary nodes for orphan child hashes (sibling hashes without preimages).
++pub(crate) fn create_facts_db_from_storage_proof(
++    rpc_proof: &RpcStorageProof,
++    query: &RpcStorageProofsQuery,
++    initial_reads: &StateMaps,
++) -> Result<FactsDb<MapStorage>, ProofProviderError> {
++    let mut db_map: DbHashMap = DbHashMap::new();
++
++    insert_inner_nodes(&mut db_map, &rpc_proof.contracts_proof.nodes)?;
++    insert_inner_nodes(&mut db_map, &rpc_proof.classes_proof)?;
++    for storage_proof in &rpc_proof.contracts_storage_proofs {
++        insert_inner_nodes(&mut db_map, storage_proof)?;
++    }
++
++    insert_contract_leaves(&mut db_map, rpc_proof, query)?;
++    insert_storage_leaves(&mut db_map, initial_reads)?;
++    insert_compiled_class_leaves(&mut db_map, initial_reads)?;
++
++    // Add dummy nodes for orphan hashes (sibling hashes without preimages).
++    add_dummy_nodes_for_orphan_hashes(&mut db_map, &rpc_proof.contracts_proof.nodes)?;
++    add_dummy_nodes_for_orphan_hashes(&mut db_map, &rpc_proof.classes_proof)?;
++    for storage_proof in &rpc_proof.contracts_storage_proofs {
++        add_dummy_nodes_for_orphan_hashes(&mut db_map, storage_proof)?;
++    }
++
++    Ok(FactsDb::new(MapStorage(db_map)))
++}
++
++/// Inserts binary/edge nodes for a proof into facts storage.
++fn insert_inner_nodes<S: std::hash::BuildHasher>(
++    db_map: &mut DbHashMap,
++    nodes: &IndexMap<Felt, MerkleNode, S>,
++) -> Result<(), ProofProviderError> {
++    for (hash, node) in nodes {
++        // The leaf type is irrelevant here because we only serialize Binary/Edge nodes.
++        let filled_node = FactDbFilledNode::<StarknetStorageValue>::from((HashOutput(*hash), node));
++        let value = filled_node.serialize()?;
++        let node_prefix: DbKeyPrefix = PatriciaPrefix::InnerNode.into();
++        let key = create_db_key(node_prefix, FACT_LAYOUT_DB_KEY_SEPARATOR, &hash.to_bytes_be());
++        db_map.insert(key, value);
++    }
++
++    Ok(())
++}
++
++/// Helper to insert a leaf node into facts storage.
++///
++/// Creates a `FactDbFilledNode` from the leaf, computes the key using the leaf's context,
++/// serializes it, and inserts it into storage.
++fn insert_leaf_node<L: Leaf>(
++    db_map: &mut DbHashMap,
++    leaf_hash: HashOutput,
++    leaf: L,
++    key_context: &<L as HasStaticPrefix>::KeyContext,
++) -> Result<(), ProofProviderError> {
++    let filled_node =
++        FactDbFilledNode::<L>(FilledNode { hash: leaf_hash, data: NodeData::Leaf(leaf) });
++    let key = filled_node.get_db_key(key_context, &leaf_hash.0.to_bytes_be());
++    let serialized = filled_node.serialize()?;
++    db_map.insert(key, serialized);
++    Ok(())
++}
++
++/// Inserts contract state leaves (class hash, nonce, storage root) from the RPC proof.
++fn insert_contract_leaves(
++    db_map: &mut DbHashMap,
++    rpc_proof: &RpcStorageProof,
++    query: &RpcStorageProofsQuery,
++) -> Result<(), ProofProviderError> {
++    // TODO(Aviv): Consider deleating this validation since it's already validated in the RPC proof.
++    let leaves_len = rpc_proof.contracts_proof.contract_leaves_data.len();
++    let addresses_len = query.contract_addresses.len();
++    if leaves_len != addresses_len {
++        return Err(ProofProviderError::InvalidProofResponse(format!(
++            "Contract leaves length mismatch: expected {addresses_len} leaves for requested \
++             contracts, got {leaves_len}"
++        )));
++    }
++
++    for (leaf, _address) in
++        rpc_proof.contracts_proof.contract_leaves_data.iter().zip(&query.contract_addresses)
++    {
++        let contract_state = ContractState {
++            nonce: Nonce(leaf.nonce),
++            class_hash: ClassHash(leaf.class_hash),
++            // Empty storage root is represented as 0x0
++            storage_root_hash: HashOutput(leaf.storage_root.unwrap_or(Felt::ZERO)),
++        };
++        let leaf_hash = TreeHashFunctionImpl::compute_leaf_hash(&contract_state);
++        insert_leaf_node(db_map, leaf_hash, contract_state, &EmptyKeyContext)?;
++    }
++
++    Ok(())
++}
++
++/// Inserts storage leaves derived from execution initial reads.
++fn insert_storage_leaves(
++    db_map: &mut DbHashMap,
++    initial_reads: &StateMaps,
++) -> Result<(), ProofProviderError> {
++    for ((address, _storagekey), value) in &initial_reads.storage {
++        let storage_value = StarknetStorageValue(*value);
++        let leaf_hash = TreeHashFunctionImpl::compute_leaf_hash(&storage_value);
++        insert_leaf_node(db_map, leaf_hash, storage_value, address)?;
++    }
++
++    Ok(())
++}
++
++/// Inserts compiled class hash leaves from execution initial reads.
++fn insert_compiled_class_leaves(
++    db_map: &mut DbHashMap,
++    initial_reads: &StateMaps,
++) -> Result<(), ProofProviderError> {
++    for class_hash_value in initial_reads.compiled_class_hashes.values() {
++        let compiled_class_hash = CompiledClassHash(class_hash_value.0);
++        let leaf_hash = TreeHashFunctionImpl::compute_leaf_hash(&compiled_class_hash);
++        insert_leaf_node(db_map, leaf_hash, compiled_class_hash, &EmptyKeyContext)?;
++    }
++
++    Ok(())
++}
++
++/// Adds a dummy node for an orphan child hash if it doesn't have a preimage.
++fn add_dummy_node_for_orphan_child(
++    db_map: &mut DbHashMap,
++    child_hash: &Felt,
++    has_preimage: &HashSet<&Felt>,
++    dummy_value: &DbValue,
++) {
++    if !has_preimage.contains(child_hash) {
++        let node_prefix: DbKeyPrefix = PatriciaPrefix::InnerNode.into();
++        let key =
++            create_db_key(node_prefix, FACT_LAYOUT_DB_KEY_SEPARATOR, &child_hash.to_bytes_be());
++        db_map.entry(key).or_insert_with(|| dummy_value.clone());
++    }
++}
++
++/// Adds dummy binary nodes for orphan child hashes that are referenced but have no preimage.
++///
++/// RPC storage proofs include sibling hashes for verification but don't provide their preimages.
++/// The committer needs to traverse these nodes when deletions are allowed. Since we don't allow
++/// deletions, we insert dummy binary nodes (with zero hashes) to satisfy the committer's
++/// traversal requirements without requiring full preimages.
++fn add_dummy_nodes_for_orphan_hashes(
++    db_map: &mut DbHashMap,
++    nodes: &IndexMap<Felt, MerkleNode, impl BuildHasher>,
++) -> Result<(), ProofProviderError> {
++    // Build set of hashes that have preimages in current proof batch.
++    let has_preimage: HashSet<&Felt> = nodes.keys().collect();
++
++    // Create dummy binary node value (both children point to zero hash).
++    let dummy_hash = HashOutput(Felt::ZERO);
++    let dummy_binary = FactDbFilledNode::<StarknetStorageValue>(FilledNode {
++        hash: dummy_hash,
++        data: NodeData::Binary(BinaryData { left_data: dummy_hash, right_data: dummy_hash }),
++    });
++    let dummy_value = dummy_binary.serialize()?;
++
++    // Insert dummy nodes for orphan child hashes.
++    for (_, node) in nodes {
++        match node {
++            MerkleNode::BinaryNode(bn) => {
++                add_dummy_node_for_orphan_child(db_map, &bn.left, &has_preimage, &dummy_value);
++                add_dummy_node_for_orphan_child(db_map, &bn.right, &has_preimage, &dummy_value);
++            }
++            MerkleNode::EdgeNode(en) => {
++                add_dummy_node_for_orphan_child(db_map, &en.child, &has_preimage, &dummy_value);
++            }
++        }
++    }
++
++    Ok(())
++}
++
++/// Commits the state diff, populates the DB with the new facts and returns the new state roots.
++pub async fn commit_state_diff(
++    facts_db: &mut FactsDb<MapStorage>,
++    contracts_trie_root_hash: HashOutput,
++    classes_trie_root_hash: HashOutput,
++    state_diff: StateDiff,
++) -> Result<StateRoots, ProofProviderError> {
++    let warn_on_trivial_modifications = false;
++    let build_storage_tries_concurrently = false; // Map storage is used, no need for concurrency.
++    let config = ReaderConfig::new(warn_on_trivial_modifications, build_storage_tries_concurrently);
++    let initial_read_context =
++        FactsDbInitialRead(StateRoots { contracts_trie_root_hash, classes_trie_root_hash });
++    let input = Input { state_diff, initial_read_context, config };
++
++    let (filled_forest, _deleted_nodes) = commit_block(input, facts_db, &mut NoMeasurements)
++        .await
++        .map_err(|e| ProofProviderError::BlockCommitmentError(e.to_string()))?;
++    facts_db.write(&filled_forest).await?;
++
++    Ok(StateRoots {
++        contracts_trie_root_hash: filled_forest.get_contract_root_hash(),
++        classes_trie_root_hash: filled_forest.get_compiled_class_root_hash(),
++    })
++}
++
++/// Commits the state diff, collects the OS-input Patricia witness paths, and returns the new state
++/// roots together with the [`StateCommitmentInfos`] needed by the OS.
++pub async fn commit_state_diff_with_witnesses(
++    index_db: &mut IndexDb<MapStorage>,
++    state_diff: StateDiff,
++    accessed_keys: &AccessedKeys,
++) -> Result<(StateRoots, StateCommitmentInfos), ProofProviderError> {
++    let warn_on_trivial_modifications = false;
++    let build_storage_tries_concurrently = false; // Map storage is used, no need for concurrency.
++    let config = ReaderConfig::new(warn_on_trivial_modifications, build_storage_tries_concurrently);
++    let input = Input { state_diff, initial_read_context: IndexDbReadContext, config };
++
++    let mut leaves_request = LeavesRequest::from(accessed_keys);
++    let sorted_leaves = leaves_request.sorted();
++
++    let CommitBlockWithWitnessesOutput {
++        filled_forest,
++        deleted_nodes: _,
++        state_commitment_infos,
++        global_root: _,
++    } = commit_block_with_witnesses(input, &sorted_leaves, index_db, &mut NoMeasurements)
++        .await
++        .map_err(|e| ProofProviderError::BlockCommitmentError(e.to_string()))?;
++    index_db.write(&filled_forest).await?;
++
++    let state_roots = StateRoots {
++        contracts_trie_root_hash: filled_forest.get_contract_root_hash(),
++        classes_trie_root_hash: filled_forest.get_compiled_class_root_hash(),
++    };
++    Ok((state_roots, state_commitment_infos))
++}
++
++/// Commits the state diff (without collecting witnesses), persists the new forest, and returns the
++/// new state roots.
++pub async fn commit_state_diff_to_index_db(
++    index_db: &mut IndexDb<MapStorage>,
++    state_diff: StateDiff,
++) -> Result<StateRoots, ProofProviderError> {
++    let (state_roots, _state_commitment_infos) =
++        commit_state_diff_with_witnesses(index_db, state_diff, &AccessedKeys::default()).await?;
++    Ok(state_roots)
++}
+diff --git a/crates/os_wasm_probe/src/errors.rs b/crates/os_wasm_probe/src/errors.rs
+new file mode 100644
+index 0000000..98ae661
+--- /dev/null
++++ b/crates/os_wasm_probe/src/errors.rs
+@@ -0,0 +1,15 @@
++use starknet_patricia_storage::errors::SerializationError;
++use thiserror::Error;
++
++/// The variants of starknet_transaction_prover's `ProofProviderError` the pure code uses.
++#[derive(Debug, Error)]
++pub enum ProofProviderError {
++    #[error("Invalid state diff: {0}")]
++    InvalidStateDiff(String),
++    #[error(transparent)]
++    SerializationError(#[from] SerializationError),
++    #[error("Invalid RPC proof response: {0}")]
++    InvalidProofResponse(String),
++    #[error("Block commitment error: {0}")]
++    BlockCommitmentError(String),
++}
+diff --git a/crates/os_wasm_probe/src/executor.rs b/crates/os_wasm_probe/src/executor.rs
+new file mode 100644
+index 0000000..e580db3
+--- /dev/null
++++ b/crates/os_wasm_probe/src/executor.rs
+@@ -0,0 +1,273 @@
++// Virtual block execution, copied from starknet_transaction_prover/src/running/
++// virtual_block_executor.rs and blockifier_reexecution's rpc_objects.rs (PRIVACY-0.14.4-RC.0),
++// minus the RPC transport.
++
++use std::collections::HashSet;
++
++use blockifier::blockifier::config::TransactionExecutorConfig;
++use blockifier::blockifier::transaction_executor::{
++    TransactionExecutionOutput,
++    TransactionExecutor,
++};
++use blockifier::blockifier_versioned_constants::VersionedConstants;
++use blockifier::bouncer::BouncerConfig;
++use blockifier::context::{BlockContext, ChainInfo};
++use blockifier::state::cached_state::{CachedState, StateMaps};
++use blockifier::state::contract_class_manager::ContractClassManager;
++use blockifier::state::state_reader_and_contract_manager::StateReaderAndContractManager;
++use blockifier::transaction::account_transaction::ExecutionFlags;
++use blockifier::transaction::transaction_execution::Transaction as BlockifierTransaction;
++use serde::{Deserialize, Serialize};
++use starknet_api::block::{
++    BlockHash,
++    BlockInfo,
++    BlockNumber,
++    BlockTimestamp,
++    GasPrice,
++    GasPricePerToken,
++    GasPriceVector,
++    GasPrices,
++    NonzeroGasPrice,
++    StarknetVersion,
++};
++use starknet_api::block_hash::block_hash_calculator::{concat_counts, BlockHeaderCommitments};
++use starknet_api::contract_class::SierraVersion;
++use starknet_api::core::{
++    ClassHash,
++    ContractAddress,
++    EventCommitment,
++    GlobalRoot,
++    ReceiptCommitment,
++    StateDiffCommitment,
++    TransactionCommitment,
++};
++use starknet_api::data_availability::L1DataAvailabilityMode;
++use starknet_api::transaction::fields::Fee;
++use starknet_api::transaction::{InvokeTransaction, MessageToL1, Transaction, TransactionHash};
++use starknet_api::versioned_constants_logic::VersionedConstantsTrait;
++use starknet_api::StarknetApiError;
++
++use crate::state_reader::PrefetchedState;
++
++/// The transaction prover's embedded bouncer config (its default when none is given).
++const BOUNCER_CONFIG_JSON: &str =
++    include_str!("../../starknet_transaction_prover/resources/bouncer_config.json");
++
++#[derive(Clone, Debug, Default, Deserialize, Serialize)]
++pub struct BlockHeader {
++    pub block_hash: BlockHash,
++    pub parent_hash: BlockHash,
++    pub block_number: BlockNumber,
++    pub sequencer_address: ContractAddress,
++    pub new_root: GlobalRoot,
++    pub timestamp: BlockTimestamp,
++    pub l1_gas_price: GasPricePerToken,
++    pub l1_data_gas_price: GasPricePerToken,
++    pub l2_gas_price: GasPricePerToken,
++    pub l1_da_mode: L1DataAvailabilityMode,
++    pub starknet_version: String,
++    pub state_diff_commitment: StateDiffCommitment,
++    pub event_commitment: EventCommitment,
++    pub receipt_commitment: ReceiptCommitment,
++    pub transaction_commitment: TransactionCommitment,
++    pub transaction_count: usize,
++    pub event_count: usize,
++    pub state_diff_length: usize,
++}
++
++fn parse_gas_price(gas_price: GasPrice) -> Result<NonzeroGasPrice, String> {
++    NonzeroGasPrice::new(gas_price).map_err(|_| format!("gas price parsing failure: {gas_price:?}"))
++}
++
++impl TryFrom<BlockHeader> for BlockInfo {
++    type Error = String;
++    fn try_from(header: BlockHeader) -> Result<BlockInfo, String> {
++        Ok(BlockInfo {
++            block_number: header.block_number,
++            sequencer_address: header.sequencer_address,
++            block_timestamp: header.timestamp,
++            gas_prices: GasPrices {
++                eth_gas_prices: GasPriceVector {
++                    l1_gas_price: parse_gas_price(header.l1_gas_price.price_in_wei)?,
++                    l1_data_gas_price: parse_gas_price(header.l1_data_gas_price.price_in_wei)?,
++                    l2_gas_price: parse_gas_price(header.l2_gas_price.price_in_wei)?,
++                },
++                strk_gas_prices: GasPriceVector {
++                    l1_gas_price: parse_gas_price(header.l1_gas_price.price_in_fri)?,
++                    l1_data_gas_price: parse_gas_price(header.l1_data_gas_price.price_in_fri)?,
++                    l2_gas_price: parse_gas_price(header.l2_gas_price.price_in_fri)?,
++                },
++            },
++            use_kzg_da: header.l1_da_mode.is_use_kzg_da(),
++            starknet_version: header.starknet_version.try_into().map_err(|e| format!("{e}"))?,
++        })
++    }
++}
++
++pub struct BaseBlockInfo {
++    pub block_context: BlockContext,
++    /// The base block's version string exactly as returned by the RPC.
++    pub raw_starknet_version: String,
++    pub base_block_hash: BlockHash,
++    pub base_block_header_commitments: BlockHeaderCommitments,
++    pub prev_base_block_hash: BlockHash,
++}
++
++impl BaseBlockInfo {
++    /// `BaseBlockInfo::new` with the prover's defaults: latest versioned constants and the
++    /// embedded bouncer config.
++    pub fn new(mut header: BlockHeader, chain_info: ChainInfo) -> Result<Self, String> {
++        let base_block_hash = header.block_hash;
++        let prev_base_block_hash = header.parent_hash;
++        let base_block_header_commitments = BlockHeaderCommitments {
++            transaction_commitment: header.transaction_commitment,
++            event_commitment: header.event_commitment,
++            receipt_commitment: header.receipt_commitment,
++            state_diff_commitment: header.state_diff_commitment,
++            concatenated_counts: concat_counts(
++                header.transaction_count,
++                header.event_count,
++                header.state_diff_length,
++                header.l1_da_mode,
++            ),
++        };
++
++        let raw_starknet_version = header.starknet_version.clone();
++        header.starknet_version = starknet_version_or_latest(&raw_starknet_version)
++            .map_err(|e| format!("Unsupported starknet version in block header: {e}"))?
++            .to_string();
++        let block_info: BlockInfo = header.try_into()?;
++        let mut versioned_constants = VersionedConstants::latest_constants().clone();
++        // Disable casm hash migration for virtual block execution.
++        versioned_constants.disable_casm_hash_migration();
++        // Enable Sierra gas for all Cairo 1 contracts.
++        versioned_constants.min_sierra_version_for_sierra_gas = SierraVersion::new(0, 0, 1);
++
++        let mut block_context = BlockContext::new(
++            block_info,
++            chain_info,
++            versioned_constants,
++            BouncerConfig::default(),
++        );
++        // Override with client-side caps, as RpcVirtualBlockExecutor::base_block_info does.
++        block_context.bouncer_config = serde_json::from_str(BOUNCER_CONFIG_JSON)
++            .map_err(|e| format!("embedded bouncer_config.json: {e}"))?;
++
++        Ok(BaseBlockInfo {
++            block_context,
++            raw_starknet_version,
++            base_block_hash,
++            base_block_header_commitments,
++            prev_base_block_hash,
++        })
++    }
++}
++
++fn starknet_version_or_latest(version_string: &str) -> Result<StarknetVersion, StarknetApiError> {
++    match StarknetVersion::try_from(version_string) {
++        Err(StarknetApiError::InvalidStarknetVersion(segments))
++            if segments > Vec::<u8>::from(StarknetVersion::LATEST) =>
++        {
++            Ok(StarknetVersion::LATEST)
++        }
++        result => result,
++    }
++}
++
++pub struct VirtualBlockExecutionData {
++    pub execution_outputs: Vec<TransactionExecutionOutput>,
++    pub initial_reads: StateMaps,
++    pub state_diff: StateMaps,
++    pub executed_class_hashes: HashSet<ClassHash>,
++    pub l2_to_l1_messages: Vec<MessageToL1>,
++    pub base_block_info: BaseBlockInfo,
++}
++
++/// `VirtualBlockExecutor::execute` over a prefetched state, with validation on (the prover's
++/// default) and no strict nonce check.
++pub fn execute(
++    base_block_info: BaseBlockInfo,
++    state: PrefetchedState,
++    contract_class_manager: ContractClassManager,
++    txs: Vec<(InvokeTransaction, TransactionHash)>,
++) -> Result<VirtualBlockExecutionData, String> {
++    let (txs, tx_hashes): (Vec<Transaction>, Vec<TransactionHash>) =
++        txs.into_iter().map(|(invoke, hash)| (Transaction::Invoke(invoke), hash)).unzip();
++    let blockifier_txs = convert_txs(txs, &tx_hashes)?;
++
++    let state_reader_and_contract_manager =
++        StateReaderAndContractManager::new(state, contract_class_manager, None);
++    let block_state = CachedState::new(state_reader_and_contract_manager);
++
++    let mut transaction_executor = TransactionExecutor::new(
++        block_state,
++        base_block_info.block_context.clone(),
++        TransactionExecutorConfig::default(),
++    );
++
++    let execution_results = transaction_executor.execute_txs(&blockifier_txs, None);
++    let execution_outputs: Vec<TransactionExecutionOutput> = execution_results
++        .into_iter()
++        .map(|result| result.map_err(|e| format!("transaction execution error: {e}")))
++        .collect::<Result<Vec<_>, _>>()?;
++
++    for (output, tx_hash) in execution_outputs.iter().zip(tx_hashes.iter()) {
++        if let Some(revert_error) = &output.0.revert_error {
++            return Err(format!("transaction {tx_hash} reverted: {revert_error}"));
++        }
++    }
++
++    let block_state =
++        transaction_executor.block_state.as_mut().ok_or("block state unavailable".to_string())?;
++    let initial_reads =
++        block_state.get_initial_reads().map_err(|e| format!("initial reads: {e}"))?;
++    let state_diff =
++        block_state.to_state_diff().map_err(|e| format!("Failed to get state diff: {e}"))?.state_maps;
++
++    let executed_class_hashes = transaction_executor
++        .bouncer
++        .lock()
++        .map_err(|e| format!("bouncer lock: {e}"))?
++        .get_executed_class_hashes();
++
++    let mut l2_to_l1_messages = Vec::new();
++    for (execution_info, _state_diff) in &execution_outputs {
++        l2_to_l1_messages.extend(
++            execution_info
++                .non_optional_call_infos()
++                .flat_map(|call_info| call_info.get_sorted_l2_to_l1_messages()),
++        );
++    }
++
++    Ok(VirtualBlockExecutionData {
++        execution_outputs,
++        base_block_info,
++        initial_reads,
++        state_diff,
++        l2_to_l1_messages,
++        executed_class_hashes,
++    })
++}
++
++fn convert_txs(
++    txs: Vec<Transaction>,
++    tx_hashes: &[TransactionHash],
++) -> Result<Vec<BlockifierTransaction>, String> {
++    txs.into_iter()
++        .zip(tx_hashes.iter().copied())
++        .map(|(tx, tx_hash)| {
++            let Transaction::Invoke(invoke_tx) = &tx else {
++                return Err(format!("only invoke transactions are supported, got {tx:?}"));
++            };
++            let execution_flags = ExecutionFlags {
++                only_query: false,
++                charge_fee: invoke_tx.resource_bounds().max_possible_fee(invoke_tx.tip())
++                    > Fee(0),
++                validate: true,
++                strict_nonce_check: false,
++            };
++            BlockifierTransaction::from_api(tx, tx_hash, None, None, None, execution_flags)
++                .map_err(|e| e.to_string())
++        })
++        .collect()
++}
+diff --git a/crates/os_wasm_probe/src/lib.rs b/crates/os_wasm_probe/src/lib.rs
+new file mode 100644
+index 0000000..8af3cb1
+--- /dev/null
++++ b/crates/os_wasm_probe/src/lib.rs
+@@ -0,0 +1,603 @@
++//! The transaction prover's pipeline without its network layer, for wasm: the caller fetches
++//! state, classes and storage proofs (JSON-RPC) and hands them in; this crate executes the
++//! transaction, builds the virtual OS input and runs the virtual OS.
++
++mod committer_utils;
++mod errors;
++mod executor;
++mod memory;
++mod state_reader;
++mod storage_proofs;
++
++use std::collections::{BTreeMap, BTreeSet, HashMap};
++use std::sync::{Arc, Mutex};
++
++use blockifier::context::{ChainInfo, FeeTokenAddresses};
++use blockifier::execution::contract_class::{
++    program_hints_to_casm_hints,
++    CompiledClassV1,
++    RunnableCompiledClass,
++};
++use blockifier::state::cached_state::StateMaps;
++use blockifier::state::contract_class_manager::ContractClassManager;
++use blockifier::state::global_cache::CompiledClasses;
++use blockifier::state::state_api::StateReader;
++use blockifier::state::utils::get_compiled_class_hash_v2;
++use cairo_lang_starknet_classes::casm_contract_class::CasmContractClass;
++use cairo_lang_utils::bigint::BigUintAsHex;
++use cairo_vm::types::relocatable::MaybeRelocatable;
++use cairo_vm::vm::runners::cairo_pie::CairoPie;
++use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
++use shared_execution_objects::central_objects::CentralTransactionExecutionInfo;
++use starknet_api::block::{BlockHash, BlockInfo, GasPrice};
++use starknet_api::block_hash::block_hash_calculator::BlockHeaderCommitments;
++use starknet_api::contract_class::SierraVersion;
++use starknet_api::core::{ChainId, ClassHash, CompiledClassHash, ContractAddress, Nonce, OsChainInfo};
++use starknet_api::executable_transaction::{AccountTransaction, Transaction};
++use starknet_api::rpc_transaction::{RpcInvokeTransaction, RpcTransaction};
++use starknet_api::state::{SierraContractClass, StorageKey};
++use starknet_api::transaction::fields::{Proof, ProofFacts, Tip, VIRTUAL_SNOS};
++use starknet_api::transaction::{InvokeTransaction, MessageToL1, TransactionHash, TransactionHasher};
++use starknet_os::commitment_infos::CommitmentInfo;
++use starknet_proof_verifier::ProgramOutput;
++use starknet_os::io::os_input::{OsBlockInput, OsHints, OsHintsConfig, StarknetOsInput};
++use starknet_rust_core::types::StorageProof as RpcStorageProof;
++use starknet_types_core::felt::Felt;
++use wasm_bindgen::prelude::*;
++#[cfg(all(target_arch = "wasm32", feature = "threads"))]
++pub use wasm_bindgen_rayon::init_thread_pool;
++
++use crate::executor::{BaseBlockInfo, BlockHeader, VirtualBlockExecutionData};
++use crate::state_reader::PrefetchedState;
++use crate::storage_proofs::RpcStorageProofsQuery;
++
++/// Sepolia and mainnet fee tokens (apollo_rpc_execution).
++const STRK_FEE_CONTRACT_ADDRESS: &str =
++    "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d";
++const ETH_FEE_CONTRACT_ADDRESS: &str =
++    "0x49d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7";
++
++/// Mirror of `VirtualOsBlockInput` in starknet_transaction_prover's runner; serializes to the
++/// same JSON as its dump.
++#[derive(Deserialize, Serialize)]
++pub struct VirtualOsBlockInput {
++    contract_state_commitment_info: CommitmentInfo,
++    address_to_storage_commitment_info: HashMap<ContractAddress, CommitmentInfo>,
++    contract_class_commitment_info: CommitmentInfo,
++    chain_info: ChainInfoDump,
++    transactions: Vec<(InvokeTransaction, TransactionHash)>,
++    tx_execution_infos: Vec<CentralTransactionExecutionInfo>,
++    block_info: BlockInfo,
++    raw_starknet_version: String,
++    initial_reads: StateMaps,
++    base_block_hash: BlockHash,
++    base_block_header_commitments: BlockHeaderCommitments,
++    prev_base_block_hash: BlockHash,
++    compiled_classes: BTreeMap<CompiledClassHash, CasmContractClass>,
++}
++
++/// `OsChainInfo` serializes its chain ID by name but only deserializes it from hex.
++#[derive(Deserialize, Serialize)]
++struct ChainInfoDump {
++    chain_id: ChainId,
++    strk_fee_token_address: ContractAddress,
++}
++
++/// Same construction as the transaction prover's `From<VirtualOsBlockInput> for OsHints`.
++impl From<VirtualOsBlockInput> for OsHints {
++    fn from(input: VirtualOsBlockInput) -> Self {
++        let os_block_input = OsBlockInput {
++            block_hash_commitments: input.base_block_header_commitments,
++            contract_state_commitment_info: input.contract_state_commitment_info,
++            address_to_storage_commitment_info: input.address_to_storage_commitment_info,
++            contract_class_commitment_info: input.contract_class_commitment_info,
++            transactions: input
++                .transactions
++                .into_iter()
++                .map(|(tx, tx_hash)| {
++                    Transaction::Account(AccountTransaction::Invoke(
++                        starknet_api::executable_transaction::InvokeTransaction { tx, tx_hash },
++                    ))
++                })
++                .collect(),
++            tx_execution_infos: input.tx_execution_infos,
++            prev_block_hash: input.prev_base_block_hash,
++            block_info: input.block_info,
++            starknet_version_override: Some(input.raw_starknet_version),
++            initial_reads: input.initial_reads,
++            declared_class_hash_to_component_hashes: HashMap::new(),
++            new_block_hash: input.base_block_hash,
++            old_block_number_and_hash: None,
++            class_hashes_to_migrate: Vec::new(),
++        };
++        OsHints {
++            os_input: StarknetOsInput {
++                os_block_inputs: vec![os_block_input],
++                deprecated_compiled_classes: BTreeMap::new(),
++                compiled_classes: input.compiled_classes,
++            },
++            os_hints_config: OsHintsConfig {
++                debug_mode: false,
++                full_output: false,
++                use_kzg_da: false,
++                chain_info: OsChainInfo {
++                    chain_id: input.chain_info.chain_id,
++                    strk_fee_token_address: input.chain_info.strk_fee_token_address,
++                },
++                public_keys: None,
++                rng_seed_salt: None,
++            },
++        }
++    }
++}
++
++/// Runs the virtual OS on a dumped (or built) virtual OS input and returns the Cairo PIE.
++pub fn run(virtual_os_input_json: &[u8]) -> Result<CairoPie, String> {
++    let input: VirtualOsBlockInput =
++        serde_json::from_slice(virtual_os_input_json).map_err(|error| error.to_string())?;
++    run_input(input)
++}
++
++fn run_input(input: VirtualOsBlockInput) -> Result<CairoPie, String> {
++    let output =
++        starknet_os::runner::run_virtual_os(input.into()).map_err(|error| format!("{error:?}"))?;
++    Ok(output.cairo_pie)
++}
++
++/// One line describing a PIE: steps, holes, and sha256 of each part, to compare runs.
++pub fn summary(pie: &CairoPie) -> String {
++    let hash = |bytes: &[u8]| {
++        Sha256::digest(bytes).iter().take(8).map(|byte| format!("{byte:02x}")).collect::<String>()
++    };
++    let json = |value: &dyn erased::Json| hash(&value.to_json());
++    format!(
++        "n_steps={} n_memory_holes={} memory={} metadata={} additional_data={} resources={}",
++        pie.execution_resources.n_steps,
++        pie.execution_resources.n_memory_holes,
++        hash(&pie.memory.to_bytes(None)),
++        json(&pie.metadata),
++        json(&pie.additional_data),
++        json(&pie.execution_resources),
++    )
++}
++
++mod erased {
++    pub trait Json {
++        fn to_json(&self) -> Vec<u8>;
++    }
++    impl<T: serde::Serialize> Json for T {
++        fn to_json(&self) -> Vec<u8> {
++            serde_json::to_vec(self).unwrap_or_default()
++        }
++    }
++}
++
++/// Verifies a `starknet_proveTransaction` result (or a whole JSON-RPC response) with the
++/// verifier the sequencer uses.
++pub fn verify_result(result_json: &str) -> Result<(), String> {
++    #[derive(Deserialize)]
++    struct ProveResult {
++        proof: Proof,
++        proof_facts: ProofFacts,
++    }
++    let mut value: serde_json::Value =
++        serde_json::from_str(result_json).map_err(|e| e.to_string())?;
++    if let Some(result) = value.get_mut("result") {
++        value = result.take();
++    }
++    let result: ProveResult = serde_json::from_value(value).map_err(|e| e.to_string())?;
++    starknet_proof_verifier::verify_proof(result.proof_facts, result.proof)
++        .map_err(|e| e.to_string())
++}
++
++#[wasm_bindgen]
++pub fn verify_prove_result(result_json: &str) -> Result<(), JsError> {
++    verify_result(result_json).map_err(|e| JsError::new(&e))
++}
++
++#[wasm_bindgen]
++pub fn run_virtual_os(virtual_os_input_json: &[u8]) -> Result<String, JsError> {
++    let pie = run(virtual_os_input_json).map_err(|error| JsError::new(&error))?;
++    Ok(summary(&pie))
++}
++
++/// `starknet_simulateTransactions`' `initial_reads`, also used to hand in reads fetched later.
++#[derive(Deserialize, Default)]
++struct RpcInitialReads {
++    #[serde(default)]
++    storage: Vec<StorageEntry>,
++    #[serde(default)]
++    nonces: Vec<NonceEntry>,
++    #[serde(default)]
++    class_hashes: Vec<ClassHashEntry>,
++    #[serde(default)]
++    declared_contracts: Vec<DeclaredEntry>,
++}
++
++#[derive(Deserialize)]
++struct StorageEntry {
++    contract_address: ContractAddress,
++    key: StorageKey,
++    value: Felt,
++}
++
++#[derive(Deserialize)]
++struct NonceEntry {
++    contract_address: ContractAddress,
++    nonce: Nonce,
++}
++
++#[derive(Deserialize)]
++struct ClassHashEntry {
++    contract_address: ContractAddress,
++    class_hash: ClassHash,
++}
++
++#[derive(Deserialize)]
++struct DeclaredEntry {
++    class_hash: ClassHash,
++    is_declared: bool,
++}
++
++/// Converts a `CompiledClassV1` back to CASM as the transaction prover's classes provider does.
++fn compiled_class_v1_to_casm(class: &CompiledClassV1) -> Result<CasmContractClass, String> {
++    let bytecode: Vec<BigUintAsHex> = class
++        .program
++        .iter_data()
++        .map(|maybe_relocatable| match maybe_relocatable {
++            MaybeRelocatable::Int(felt) => Ok(BigUintAsHex { value: felt.to_biguint() }),
++            MaybeRelocatable::RelocatableValue(relocatable) => {
++                Err(format!("bytecode contained a relocatable value: {relocatable:?}"))
++            }
++        })
++        .collect::<Result<Vec<_>, _>>()?;
++
++    Ok(CasmContractClass {
++        prime: Felt::prime(),
++        compiler_version: String::new(),
++        bytecode,
++        bytecode_segment_lengths: Some(class.bytecode_segment_felt_sizes().into()),
++        hints: program_hints_to_casm_hints(&class.program.shared_program_data.hints_collection)
++            .map_err(|e| e.to_string())?,
++        pythonic_hints: None,
++        entry_points_by_type: (&class.entry_points_by_type).into(),
++    })
++}
++
++fn js_error(error: impl std::fmt::Display) -> JsError {
++    JsError::new(&error.to_string())
++}
++
++/// One transaction's way from RPC data to a virtual OS run.
++#[wasm_bindgen]
++pub struct TxSession {
++    chain_info: ChainInfo,
++    header: BlockHeader,
++    txs: Vec<(InvokeTransaction, TransactionHash)>,
++    maps: StateMaps,
++    classes: HashMap<ClassHash, CompiledClasses>,
++    undeclared_classes: BTreeSet<ClassHash>,
++    contract_class_manager: ContractClassManager,
++    execution: Option<(VirtualBlockExecutionData, PrefetchedState)>,
++    query: Option<(RpcStorageProofsQuery, Vec<RpcStorageProofsQuery>)>,
++    os_input: Option<VirtualOsBlockInput>,
++    l2_to_l1_messages: Vec<MessageToL1>,
++    pie: Option<CairoPie>,
++}
++
++#[wasm_bindgen]
++impl TxSession {
++    /// `header_json`: a `starknet_getBlockWithTxHashes` result. `rpc_transaction_json`: the
++    /// invoke v3 transaction as sent to `starknet_proveTransaction`.
++    #[wasm_bindgen(constructor)]
++    pub fn new(
++        chain_id: &str,
++        header_json: &str,
++        rpc_transaction_json: &str,
++    ) -> Result<TxSession, JsError> {
++        let chain_id = ChainId::from(chain_id.to_string());
++        let header: BlockHeader = serde_json::from_str(header_json).map_err(js_error)?;
++        let RpcTransaction::Invoke(RpcInvokeTransaction::V3(invoke_v3)) =
++            serde_json::from_str(rpc_transaction_json).map_err(js_error)?
++        else {
++            return Err(JsError::new("only invoke v3 transactions are supported"));
++        };
++        // The prover's input checks (validate_transaction_input with zero-fee validation on).
++        if !invoke_v3.proof.is_empty() || !invoke_v3.proof_facts.is_empty() {
++            return Err(JsError::new("proof and proof_facts must be empty on input"));
++        }
++        let bounds = &invoke_v3.resource_bounds;
++        if bounds.l1_gas.max_price_per_unit != GasPrice(0)
++            || bounds.l2_gas.max_price_per_unit != GasPrice(0)
++            || bounds.l1_data_gas.max_price_per_unit != GasPrice(0)
++            || invoke_v3.tip != Tip(0)
++        {
++            return Err(JsError::new("proving is client-side: gas prices and tip must be zero"));
++        }
++        let tx = InvokeTransaction::V3(invoke_v3.into());
++        let tx_hash = tx.calculate_transaction_hash(&chain_id, &tx.version()).map_err(js_error)?;
++        let parse_address = |hex: &str| {
++            ContractAddress::try_from(Felt::from_hex(hex).expect("constant address"))
++                .expect("constant address")
++        };
++        let chain_info = ChainInfo {
++            chain_id,
++            fee_token_addresses: FeeTokenAddresses {
++                strk_fee_token_address: parse_address(STRK_FEE_CONTRACT_ADDRESS),
++                eth_fee_token_address: parse_address(ETH_FEE_CONTRACT_ADDRESS),
++            },
++            is_l3: false,
++        };
++        Ok(TxSession {
++            chain_info,
++            header,
++            txs: vec![(tx, tx_hash)],
++            maps: StateMaps::default(),
++            classes: HashMap::new(),
++            undeclared_classes: BTreeSet::new(),
++            contract_class_manager: ContractClassManager::start(Default::default()),
++            execution: None,
++            query: None,
++            os_input: None,
++            l2_to_l1_messages: Vec::new(),
++            pie: None,
++        })
++    }
++
++    pub fn tx_hash(&self) -> String {
++        self.txs[0].1.0.to_hex_string()
++    }
++
++    pub fn block_number(&self) -> u64 {
++        self.header.block_number.0
++    }
++
++    /// Adds state reads in the `initial_reads` format of `starknet_simulateTransactions`.
++    pub fn add_reads(&mut self, initial_reads_json: &str) -> Result<(), JsError> {
++        let reads: RpcInitialReads = serde_json::from_str(initial_reads_json).map_err(js_error)?;
++        self.maps.storage.extend(reads.storage.into_iter().map(|e| ((e.contract_address, e.key), e.value)));
++        self.maps.nonces.extend(reads.nonces.into_iter().map(|e| (e.contract_address, e.nonce)));
++        self.maps
++            .class_hashes
++            .extend(reads.class_hashes.into_iter().map(|e| (e.contract_address, e.class_hash)));
++        self.maps
++            .declared_contracts
++            .extend(reads.declared_contracts.into_iter().map(|e| (e.class_hash, e.is_declared)));
++        Ok(())
++    }
++
++    /// Adds a Cairo 1 class: its `starknet_getCompiledCasm` result and the first three felts of
++    /// its Sierra program (`starknet_getClass`), which encode the Sierra version.
++    pub fn add_class(
++        &mut self,
++        class_hash: &str,
++        casm_json: &str,
++        sierra_program_head_json: &str,
++    ) -> Result<(), JsError> {
++        let class_hash = ClassHash(Felt::from_hex(class_hash).map_err(js_error)?);
++        let casm: CasmContractClass = serde_json::from_str(casm_json).map_err(js_error)?;
++        let head: Vec<Felt> = serde_json::from_str(sierra_program_head_json).map_err(js_error)?;
++        let sierra_version = SierraVersion::extract_from_program(&head).map_err(js_error)?;
++        let compiled = CompiledClassV1::try_from((casm, sierra_version)).map_err(js_error)?;
++        self.classes.insert(
++            class_hash,
++            CompiledClasses::V1(compiled, Arc::new(SierraContractClass::default())),
++        );
++        Ok(())
++    }
++
++    /// Records that the node does not know this class.
++    pub fn add_undeclared_class(&mut self, class_hash: &str) -> Result<(), JsError> {
++        self.undeclared_classes.insert(ClassHash(Felt::from_hex(class_hash).map_err(js_error)?));
++        Ok(())
++    }
++
++    /// Executes the transaction. Returns `{"missing": ...}` when a read was not prefetched
++    /// (fetch it, add it, call again), else `{"storage_proof_params": [...]}`: the
++    /// `starknet_getStorageProof` requests to make.
++    pub fn execute(&mut self) -> Result<String, JsError> {
++        let state = PrefetchedState {
++            maps: Arc::new(self.maps.clone()),
++            classes: Arc::new(self.classes.clone()),
++            undeclared_classes: Arc::new(self.undeclared_classes.clone()),
++            missing: Arc::new(Mutex::new(Default::default())),
++        };
++        let base_block_info = BaseBlockInfo::new(self.header.clone(), self.chain_info.clone())
++            .map_err(|e| JsError::new(&e))?;
++        let result = executor::execute(
++            base_block_info,
++            state.clone(),
++            self.contract_class_manager.clone(),
++            self.txs.clone(),
++        );
++        // Classes compiled during a failed run stay cached; drop them so reruns start clean.
++        self.contract_class_manager = ContractClassManager::start(Default::default());
++        let missing = std::mem::take(&mut *state.missing.lock().expect("missing reads lock"));
++        if !missing.is_empty() {
++            return Ok(serde_json::json!({ "missing": missing }).to_string());
++        }
++        let execution = result.map_err(|e| JsError::new(&e))?;
++        let query =
++            storage_proofs::prepare_query(&execution.executed_class_hashes, &execution.initial_reads);
++        let split = storage_proofs::split_query(&query);
++        let params: Vec<_> = split
++            .iter()
++            .map(|q| storage_proofs::request_params(self.header.block_number, q))
++            .collect();
++        self.execution = Some((execution, state));
++        self.query = Some((query, split));
++        Ok(serde_json::json!({ "storage_proof_params": params }).to_string())
++    }
++
++    /// Takes the `starknet_getStorageProof` results (a JSON array, one per requested params),
++    /// builds the virtual OS input and returns it as JSON (the native dump's format).
++    pub fn set_storage_proofs(&mut self, storage_proofs_json: &str) -> Result<String, JsError> {
++        let (execution, state) =
++            self.execution.take().ok_or_else(|| JsError::new("execute first"))?;
++        let (query, split) = self.query.take().ok_or_else(|| JsError::new("execute first"))?;
++        let proofs: Vec<RpcStorageProof> =
++            serde_json::from_str(storage_proofs_json).map_err(js_error)?;
++        if proofs.len() != split.len() {
++            return Err(JsError::new("one storage proof per request expected"));
++        }
++        let rpc_proof = storage_proofs::merge_storage_proofs(proofs, &split, &query);
++
++        let runtime =
++            tokio::runtime::Builder::new_current_thread().build().map_err(js_error)?;
++        let storage_proofs = runtime
++            .block_on(storage_proofs::storage_proofs_from_rpc_proof(
++                &rpc_proof,
++                &query,
++                &execution.initial_reads,
++                &execution.state_diff,
++            ))
++            .map_err(js_error)?;
++
++        // Classes, as the prover's classes provider returns them.
++        let mut compiled_classes = BTreeMap::new();
++        let mut class_hash_to_compiled_class_hash = HashMap::new();
++        for class_hash in &execution.executed_class_hashes {
++            let compiled_class = state.get_compiled_class(*class_hash).map_err(js_error)?;
++            let compiled_class_hash =
++                get_compiled_class_hash_v2(&state, *class_hash, &compiled_class).map_err(js_error)?;
++            #[allow(unreachable_patterns)]
++            let casm = match &compiled_class {
++                RunnableCompiledClass::V1(class) => {
++                    compiled_class_v1_to_casm(class).map_err(|e| JsError::new(&e))?
++                }
++                _ => return Err(JsError::new("Cairo 0 classes are not supported")),
++            };
++            compiled_classes.insert(compiled_class_hash, casm);
++            class_hash_to_compiled_class_hash.insert(*class_hash, compiled_class_hash);
++        }
++
++        let mut extended_initial_reads = storage_proofs.extended_initial_reads;
++        extended_initial_reads.compiled_class_hashes.extend(&class_hash_to_compiled_class_hash);
++        // The OS calls `update_cache` with an empty class map, so this must be empty.
++        extended_initial_reads.declared_contracts.clear();
++
++        let base = &execution.base_block_info;
++        let chain_info = base.block_context.chain_info();
++        let input = VirtualOsBlockInput {
++            contract_state_commitment_info: storage_proofs
++                .commitment_infos
++                .contracts_trie_commitment_info,
++            address_to_storage_commitment_info: storage_proofs
++                .commitment_infos
++                .storage_tries_commitment_infos,
++            contract_class_commitment_info: storage_proofs
++                .commitment_infos
++                .classes_trie_commitment_info,
++            chain_info: ChainInfoDump {
++                chain_id: chain_info.chain_id.clone(),
++                strk_fee_token_address: chain_info.fee_token_addresses.strk_fee_token_address,
++            },
++            transactions: self.txs.clone(),
++            tx_execution_infos: execution
++                .execution_outputs
++                .into_iter()
++                .map(|output| output.0.into())
++                .collect(),
++            block_info: base.block_context.block_info().clone(),
++            raw_starknet_version: base.raw_starknet_version.clone(),
++            initial_reads: extended_initial_reads,
++            base_block_hash: base.base_block_hash,
++            base_block_header_commitments: base.base_block_header_commitments.clone(),
++            prev_base_block_hash: base.prev_base_block_hash,
++            compiled_classes,
++        };
++        let json = serde_json::to_string(&input).map_err(js_error)?;
++        self.os_input = Some(input);
++        self.l2_to_l1_messages = execution.l2_to_l1_messages;
++        Ok(json)
++    }
++
++    /// Runs the virtual OS on the built input; returns the PIE summary.
++    pub fn run_os(&mut self) -> Result<String, JsError> {
++        let input = self.os_input.take().ok_or_else(|| JsError::new("set_storage_proofs first"))?;
++        let pie = run_input(input).map_err(|e| JsError::new(&e))?;
++        let pie_summary = summary(&pie);
++        self.pie = Some(pie);
++        Ok(pie_summary)
++    }
++
++    /// Proves the virtual OS run as the transaction prover does; returns the
++    /// `starknet_proveTransaction` result JSON (proof, proof_facts, l2_to_l1_messages).
++    pub fn prove(&mut self) -> Result<String, JsError> {
++        if self.pie.is_none() {
++            self.run_os()?;
++        }
++        let pie = self.pie.take().expect("the virtual OS ran");
++        let precomputes = privacy_prove::prepare_recursive_prover_precomputes()
++            .map_err(|e| JsError::new(&format!("precomputes: {e}")))?;
++        let output = privacy_prove::privacy_recursive_prove(pie, precomputes)
++            .map_err(|e| JsError::new(&format!("prover: {e}")))?;
++        let proof = Proof::from(output.proof);
++        let proof_facts = ProgramOutput::from(output.output_preimage)
++            .try_into_proof_facts(VIRTUAL_SNOS)
++            .map_err(js_error)?;
++        Ok(serde_json::json!({
++            "proof": proof,
++            "proof_facts": proof_facts,
++            "l2_to_l1_messages": self.l2_to_l1_messages,
++        })
++        .to_string())
++    }
++}
++
++#[wasm_bindgen]
++extern "C" {
++    #[wasm_bindgen(js_namespace = console, js_name = error)]
++    fn console_error(message: &str);
++    #[wasm_bindgen(js_namespace = console, js_name = log)]
++    fn console_log(message: &str);
++}
++
++/// Writes each formatted tracing event to console.log.
++struct ConsoleWriter(Vec<u8>);
++
++impl std::io::Write for ConsoleWriter {
++    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++        self.0.extend_from_slice(bytes);
++        Ok(bytes.len())
++    }
++    fn flush(&mut self) -> std::io::Result<()> {
++        Ok(())
++    }
++}
++
++impl Drop for ConsoleWriter {
++    fn drop(&mut self) {
++        let line = format!("[{}] {}", memory::report(), String::from_utf8_lossy(&self.0).trim_end());
++        console_log(&line);
++    }
++}
++
++/// Wasm memory size, live heap and peak live heap, in MiB.
++#[wasm_bindgen]
++pub fn memory_report() -> String {
++    memory::report()
++}
++
++/// Sends `tracing` events at `level` and above (e.g. "info") to the console. No timestamps: there
++/// is no clock on wasm32-unknown-unknown.
++#[wasm_bindgen]
++pub fn init_logging(level: &str) -> Result<(), JsError> {
++    let level: tracing::Level = level.parse().map_err(js_error)?;
++    tracing_subscriber::fmt()
++        .without_time()
++        .with_ansi(false)
++        .with_max_level(level)
++        .with_writer(|| ConsoleWriter(Vec::new()))
++        // Span entries mark the prover's phases. Not CLOSE: its timings read the clock.
++        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ENTER)
++        .try_init()
++        .map_err(|e| JsError::new(&e.to_string()))
++}
++
++/// Prints panic messages to the console; a wasm panic otherwise shows only "unreachable".
++#[wasm_bindgen(start)]
++pub fn start() {
++    std::panic::set_hook(Box::new(|info| console_error(&info.to_string())));
++}
+diff --git a/crates/os_wasm_probe/src/main.rs b/crates/os_wasm_probe/src/main.rs
+new file mode 100644
+index 0000000..d355891
+--- /dev/null
++++ b/crates/os_wasm_probe/src/main.rs
+@@ -0,0 +1,24 @@
++//! Native checks: `os <virtual-os-input.json>` runs the virtual OS and prints the PIE summary;
++//! `verify <response.json>` verifies a starknet_proveTransaction result.
++fn main() {
++    let args: Vec<String> = std::env::args().collect();
++    let usage = "usage: os_native_probe os <virtual-os-input.json> | verify <response.json>";
++    let (mode, path) = match args.as_slice() {
++        [_, mode, path] => (mode.as_str(), path.as_str()),
++        [_, path] => ("os", path.as_str()),
++        _ => panic!("{usage}"),
++    };
++    let input = std::fs::read(path).expect("read input");
++    let started = std::time::Instant::now();
++    match mode {
++        "os" => {
++            let pie = os_wasm_probe::run(&input).expect("virtual OS run");
++            println!("{} in {:.2} s", os_wasm_probe::summary(&pie), started.elapsed().as_secs_f64());
++        }
++        "verify" => {
++            let verdict = os_wasm_probe::verify_result(std::str::from_utf8(&input).expect("utf8"));
++            println!("{verdict:?} in {:.2} s", started.elapsed().as_secs_f64());
++        }
++        _ => panic!("{usage}"),
++    }
++}
+diff --git a/crates/os_wasm_probe/src/memory.rs b/crates/os_wasm_probe/src/memory.rs
+new file mode 100644
+index 0000000..22f0b43
+--- /dev/null
++++ b/crates/os_wasm_probe/src/memory.rs
+@@ -0,0 +1,70 @@
++//! Heap accounting for memory measurements: a counting wrapper around the system allocator
++//! (dlmalloc on wasm32) and the wasm memory size, which only grows.
++
++use std::alloc::{GlobalAlloc, Layout, System};
++use std::sync::atomic::{AtomicUsize, Ordering};
++
++static LIVE: AtomicUsize = AtomicUsize::new(0);
++static PEAK_LIVE: AtomicUsize = AtomicUsize::new(0);
++
++pub struct CountingAllocator;
++
++fn grew(bytes: usize) {
++    let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
++    PEAK_LIVE.fetch_max(live, Ordering::Relaxed);
++}
++
++unsafe impl GlobalAlloc for CountingAllocator {
++    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
++        let pointer = unsafe { System.alloc(layout) };
++        if !pointer.is_null() {
++            grew(layout.size());
++        }
++        pointer
++    }
++
++    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
++        let pointer = unsafe { System.alloc_zeroed(layout) };
++        if !pointer.is_null() {
++            grew(layout.size());
++        }
++        pointer
++    }
++
++    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
++        unsafe { System.dealloc(pointer, layout) };
++        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
++    }
++
++    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
++        let new_pointer = unsafe { System.realloc(pointer, layout, new_size) };
++        if !new_pointer.is_null() {
++            if new_size >= layout.size() {
++                grew(new_size - layout.size());
++            } else {
++                LIVE.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
++            }
++        }
++        new_pointer
++    }
++}
++
++#[cfg(target_arch = "wasm32")]
++#[global_allocator]
++static ALLOCATOR: CountingAllocator = CountingAllocator;
++
++const MIB: usize = 1 << 20;
++
++/// `wasm <memory size> live <live heap> peak <peak live heap>`, in MiB.
++pub fn report() -> String {
++    #[cfg(target_arch = "wasm32")]
++    let wasm_bytes = core::arch::wasm32::memory_size::<0>() * 65536;
++    #[cfg(not(target_arch = "wasm32"))]
++    let wasm_bytes = 0;
++    format!(
++        "wasm {} live {} peak {}",
++        wasm_bytes / MIB,
++        LIVE.load(Ordering::Relaxed) / MIB,
++        PEAK_LIVE.load(Ordering::Relaxed) / MIB
++    )
++}
+diff --git a/crates/os_wasm_probe/src/state_reader.rs b/crates/os_wasm_probe/src/state_reader.rs
+new file mode 100644
+index 0000000..d8a7732
+--- /dev/null
++++ b/crates/os_wasm_probe/src/state_reader.rs
+@@ -0,0 +1,135 @@
++//! A state reader over state fetched ahead of time. A read it cannot answer fails and is recorded,
++//! so the caller can fetch it and execute again.
++
++use std::collections::{BTreeSet, HashMap};
++use std::sync::{Arc, Mutex};
++
++use blockifier::execution::contract_class::RunnableCompiledClass;
++use blockifier::state::cached_state::StateMaps;
++use blockifier::state::errors::StateError;
++use blockifier::state::global_cache::CompiledClasses;
++use blockifier::state::state_api::{StateReader, StateResult};
++use blockifier::state::state_reader_and_contract_manager::FetchCompiledClasses;
++use blockifier::state::utils::get_compiled_class_hash_v2 as default_get_compiled_class_hash_v2;
++use serde::Serialize;
++use starknet_api::core::{ClassHash, CompiledClassHash, ContractAddress, Nonce};
++use starknet_api::state::StorageKey;
++use starknet_types_core::felt::Felt;
++
++/// Reads the prefetched state could not answer.
++#[derive(Debug, Default, Serialize)]
++pub struct MissingReads {
++    pub storage: BTreeSet<(ContractAddress, StorageKey)>,
++    pub nonces: BTreeSet<ContractAddress>,
++    pub class_hashes: BTreeSet<ContractAddress>,
++    pub classes: BTreeSet<ClassHash>,
++}
++
++impl MissingReads {
++    pub fn is_empty(&self) -> bool {
++        self.storage.is_empty()
++            && self.nonces.is_empty()
++            && self.class_hashes.is_empty()
++            && self.classes.is_empty()
++    }
++}
++
++#[derive(Clone)]
++pub struct PrefetchedState {
++    pub maps: Arc<StateMaps>,
++    pub classes: Arc<HashMap<ClassHash, CompiledClasses>>,
++    /// Classes the node reported as not declared.
++    pub undeclared_classes: Arc<BTreeSet<ClassHash>>,
++    pub missing: Arc<Mutex<MissingReads>>,
++}
++
++impl PrefetchedState {
++    fn miss(&self, record: impl FnOnce(&mut MissingReads), what: String) -> StateError {
++        record(&mut self.missing.lock().expect("missing reads lock"));
++        StateError::StateReadError(format!("not prefetched: {what}"))
++    }
++}
++
++impl StateReader for PrefetchedState {
++    fn get_storage_at(
++        &self,
++        contract_address: ContractAddress,
++        key: StorageKey,
++    ) -> StateResult<Felt> {
++        match self.maps.storage.get(&(contract_address, key)) {
++            Some(value) => Ok(*value),
++            None => Err(self.miss(
++                |missing| {
++                    missing.storage.insert((contract_address, key));
++                },
++                format!("storage {contract_address:?} {key:?}"),
++            )),
++        }
++    }
++
++    fn get_nonce_at(&self, contract_address: ContractAddress) -> StateResult<Nonce> {
++        match self.maps.nonces.get(&contract_address) {
++            Some(value) => Ok(*value),
++            None => Err(self.miss(
++                |missing| {
++                    missing.nonces.insert(contract_address);
++                },
++                format!("nonce {contract_address:?}"),
++            )),
++        }
++    }
++
++    fn get_class_hash_at(&self, contract_address: ContractAddress) -> StateResult<ClassHash> {
++        match self.maps.class_hashes.get(&contract_address) {
++            Some(value) => Ok(*value),
++            None => Err(self.miss(
++                |missing| {
++                    missing.class_hashes.insert(contract_address);
++                },
++                format!("class hash {contract_address:?}"),
++            )),
++        }
++    }
++
++    fn get_compiled_class(&self, class_hash: ClassHash) -> StateResult<RunnableCompiledClass> {
++        Ok(self.get_compiled_classes(class_hash)?.to_runnable())
++    }
++
++    fn get_compiled_class_hash(&self, _class_hash: ClassHash) -> StateResult<CompiledClassHash> {
++        // Same as the RPC state reader the native prover uses.
++        Err(StateError::StateReadError(
++            "The rpc state reader does not support get_compiled_class_hash.".to_string(),
++        ))
++    }
++
++    fn get_compiled_class_hash_v2(
++        &self,
++        class_hash: ClassHash,
++        compiled_class: &RunnableCompiledClass,
++    ) -> StateResult<CompiledClassHash> {
++        default_get_compiled_class_hash_v2(self, class_hash, compiled_class)
++    }
++}
++
++impl FetchCompiledClasses for PrefetchedState {
++    fn get_compiled_classes(&self, class_hash: ClassHash) -> StateResult<CompiledClasses> {
++        if let Some(classes) = self.classes.get(&class_hash) {
++            return Ok(classes.clone());
++        }
++        if self.undeclared_classes.contains(&class_hash) {
++            return Err(StateError::UndeclaredClassHash(class_hash));
++        }
++        Err(self.miss(
++            |missing| {
++                missing.classes.insert(class_hash);
++            },
++            format!("class {class_hash:?}"),
++        ))
++    }
++
++    fn is_declared(&self, class_hash: ClassHash) -> StateResult<bool> {
++        // The native prover's SimulatedStateReader: prefetched value, else the RPC reader's
++        // answer, which is always true.
++        Ok(self.maps.declared_contracts.get(&class_hash).copied().unwrap_or(true))
++    }
++}
+diff --git a/crates/os_wasm_probe/src/storage_proofs.rs b/crates/os_wasm_probe/src/storage_proofs.rs
+new file mode 100644
+index 0000000..a8f02b3
+--- /dev/null
++++ b/crates/os_wasm_probe/src/storage_proofs.rs
+@@ -0,0 +1,286 @@
++// The network-free parts of starknet_transaction_prover/src/running/storage_proofs.rs
++// (PRIVACY-0.14.4-RC.0): query construction, proof merging, and commitment infos. The caller
++// fetches `starknet_getStorageProof` itself.
++
++use std::collections::{HashMap, HashSet};
++
++use blockifier::state::accessed_keys::AccessedKeys;
++use blockifier::state::cached_state::StateMaps;
++use indexmap::IndexMap;
++use starknet_api::block::BlockNumber;
++use starknet_api::core::{ClassHash, ContractAddress, Nonce};
++use starknet_api::hash::{HashOutput, StateRoots};
++use starknet_os::commitment_infos::{build_state_commitment_infos, StateCommitmentInfos};
++use starknet_patricia::patricia_merkle_tree::node_data::inner_node::{
++    flatten_preimages,
++    Preimage,
++    PreimageMap,
++};
++use starknet_patricia_storage::map_storage::MapStorage;
++use starknet_rust_core::types::{
++    ContractStorageKeys,
++    ContractsProof,
++    Felt,
++    MerkleNode,
++    StorageProof as RpcStorageProof,
++};
++
++use crate::committer_utils::{
++    commit_state_diff,
++    create_facts_db_from_storage_proof,
++    state_maps_to_committer_state_diff,
++    validate_virtual_os_state_diff,
++};
++use crate::errors::ProofProviderError;
++
++const MAX_KEYS_PER_REQUEST: usize = 100;
++
++#[derive(Clone, Debug, Default, PartialEq)]
++pub(crate) struct RpcStorageProofsQuery {
++    pub(crate) class_hashes: Vec<Felt>,
++    pub(crate) contract_addresses: Vec<ContractAddress>,
++    pub(crate) contract_storage_keys: Vec<ContractStorageKeys>,
++}
++
++pub(crate) struct StorageProofs {
++    pub(crate) extended_initial_reads: StateMaps,
++    pub(crate) commitment_infos: StateCommitmentInfos,
++}
++
++fn count_total_keys(query: &RpcStorageProofsQuery) -> usize {
++    query.class_hashes.len()
++        + query.contract_addresses.len()
++        + query.contract_storage_keys.iter().map(|csk| csk.storage_keys.len()).sum::<usize>()
++}
++
++enum QueryItem {
++    ClassHash(Felt),
++    ContractAddress(ContractAddress),
++    StorageKey { contract_address: Felt, key: Felt },
++}
++
++fn flatten_query(query: &RpcStorageProofsQuery) -> Vec<QueryItem> {
++    let mut items = Vec::with_capacity(count_total_keys(query));
++    items.extend(query.class_hashes.iter().copied().map(QueryItem::ClassHash));
++    items.extend(query.contract_addresses.iter().copied().map(QueryItem::ContractAddress));
++    for contract in &query.contract_storage_keys {
++        for &key in &contract.storage_keys {
++            items.push(QueryItem::StorageKey { contract_address: contract.contract_address, key });
++        }
++    }
++    items
++}
++
++fn collect_query(items: &[QueryItem]) -> RpcStorageProofsQuery {
++    let mut query = RpcStorageProofsQuery::default();
++    for item in items {
++        match item {
++            QueryItem::ClassHash(h) => query.class_hashes.push(*h),
++            QueryItem::ContractAddress(a) => query.contract_addresses.push(*a),
++            QueryItem::StorageKey { contract_address, key } => {
++                match query.contract_storage_keys.last_mut() {
++                    Some(last) if last.contract_address == *contract_address => {
++                        last.storage_keys.push(*key);
++                    }
++                    _ => {
++                        query.contract_storage_keys.push(ContractStorageKeys {
++                            contract_address: *contract_address,
++                            storage_keys: vec![*key],
++                        });
++                    }
++                }
++            }
++        }
++    }
++    query
++}
++
++/// The queries to send, at most MAX_KEYS_PER_REQUEST keys each, as the native prover splits them.
++pub(crate) fn split_query(query: &RpcStorageProofsQuery) -> Vec<RpcStorageProofsQuery> {
++    if count_total_keys(query) <= MAX_KEYS_PER_REQUEST {
++        return vec![query.clone()];
++    }
++    flatten_query(query).chunks(MAX_KEYS_PER_REQUEST).map(collect_query).collect()
++}
++
++/// `starknet_getStorageProof` params for one query, as starknet_rust sends them.
++pub(crate) fn request_params(
++    block_number: BlockNumber,
++    query: &RpcStorageProofsQuery,
++) -> serde_json::Value {
++    let contract_addresses: Vec<Felt> =
++        query.contract_addresses.iter().map(|a| *a.0.key()).collect();
++    serde_json::json!({
++        "block_id": { "block_number": block_number.0 },
++        "class_hashes": query.class_hashes,
++        "contract_addresses": contract_addresses,
++        "contracts_storage_keys": query.contract_storage_keys,
++    })
++}
++
++pub(crate) fn merge_storage_proofs(
++    proofs: Vec<RpcStorageProof>,
++    split_queries: &[RpcStorageProofsQuery],
++    original_query: &RpcStorageProofsQuery,
++) -> RpcStorageProof {
++    assert_eq!(proofs.len(), split_queries.len(), "proofs/queries length mismatch");
++    assert!(!proofs.is_empty(), "cannot merge zero proofs");
++
++    let global_roots = proofs[0].global_roots.clone();
++    let mut classes_proof: IndexMap<Felt, MerkleNode> = IndexMap::default();
++    let mut contracts_proof =
++        ContractsProof { nodes: IndexMap::default(), contract_leaves_data: Vec::new() };
++
++    let addr_to_idx: HashMap<Felt, usize> = original_query
++        .contract_storage_keys
++        .iter()
++        .enumerate()
++        .map(|(i, csk)| (csk.contract_address, i))
++        .collect();
++    let mut contracts_storage_proofs: Vec<IndexMap<Felt, MerkleNode>> =
++        vec![IndexMap::default(); original_query.contract_storage_keys.len()];
++
++    for (chunk_query, proof) in split_queries.iter().zip(proofs) {
++        classes_proof.extend(proof.classes_proof);
++        contracts_proof.nodes.extend(proof.contracts_proof.nodes);
++        contracts_proof.contract_leaves_data.extend(proof.contracts_proof.contract_leaves_data);
++        for (csk, storage_proof) in
++            chunk_query.contract_storage_keys.iter().zip(proof.contracts_storage_proofs)
++        {
++            let idx = addr_to_idx
++                .get(&csk.contract_address)
++                .expect("chunk address not in original query");
++            contracts_storage_proofs[*idx].extend(storage_proof);
++        }
++    }
++
++    RpcStorageProof { classes_proof, contracts_proof, contracts_storage_proofs, global_roots }
++}
++
++fn rpc_nodes_to_preimage_map<S: std::hash::BuildHasher>(
++    nodes: &indexmap::IndexMap<Felt, starknet_rust_core::types::MerkleNode, S>,
++) -> PreimageMap {
++    nodes.iter().map(|(hash, node)| (HashOutput(*hash), Preimage::from(node))).collect()
++}
++
++pub(crate) fn prepare_query(
++    executed_class_hashes: &HashSet<ClassHash>,
++    initial_reads: &StateMaps,
++) -> RpcStorageProofsQuery {
++    let class_hashes: Vec<Felt> = executed_class_hashes.iter().map(|ch| ch.0).collect();
++
++    // Sort contract addresses for deterministic ordering (for offline replay mode).
++    let mut contract_addresses: Vec<ContractAddress> =
++        initial_reads.get_contract_addresses().into_iter().collect();
++    contract_addresses.sort();
++
++    // Group storage keys by address, then map over all contract_addresses (which may include
++    // addresses with no storage reads) to build the output.
++    let mut storage_by_address: HashMap<ContractAddress, Vec<Felt>> = HashMap::new();
++    for (address, key) in initial_reads.storage.keys() {
++        storage_by_address.entry(*address).or_default().push(*key.0.key());
++    }
++    let contract_storage_keys: Vec<ContractStorageKeys> = contract_addresses
++        .iter()
++        .map(|address| ContractStorageKeys {
++            contract_address: *address.0.key(),
++            storage_keys: storage_by_address.get(address).cloned().unwrap_or_default(),
++        })
++        .collect();
++
++    RpcStorageProofsQuery { class_hashes, contract_addresses, contract_storage_keys }
++}
++
++async fn create_commitment_infos_with_state_changes(
++    rpc_proof: &RpcStorageProof,
++    query: &RpcStorageProofsQuery,
++    extended_initial_reads: &StateMaps,
++    state_diff: &StateMaps,
++) -> Result<StateCommitmentInfos, ProofProviderError> {
++    // Build FactsDb from RPC proofs and execution initial reads.
++    let mut facts_db =
++        create_facts_db_from_storage_proof(rpc_proof, query, extended_initial_reads)?;
++
++    // Get initial state roots from RPC proof.
++    let contracts_trie_root_hash = HashOutput(rpc_proof.global_roots.contracts_tree_root);
++    let classes_trie_root_hash = HashOutput(rpc_proof.global_roots.classes_tree_root);
++    // Convert the blockifier state maps to committer state diff and validate is stands with
++    // the virtual OS assumptions.
++    let committer_state_diff = state_maps_to_committer_state_diff(state_diff.clone());
++    validate_virtual_os_state_diff(&committer_state_diff)?;
++
++    // Commit state diff using the committer.
++    let new_roots = commit_state_diff(
++        &mut facts_db,
++        contracts_trie_root_hash,
++        classes_trie_root_hash,
++        committer_state_diff,
++    )
++    .await?;
++
++    let previous_state_roots = StateRoots { contracts_trie_root_hash, classes_trie_root_hash };
++
++    // Consume the new facts from the committer storage.
++    let mut map_storage: MapStorage = facts_db.consume_storage();
++
++    // Get extended initial reads keys.
++    let accessed_keys: AccessedKeys = extended_initial_reads.keys().into();
++
++    let mut commitment_infos = build_state_commitment_infos(
++        &previous_state_roots,
++        &new_roots,
++        &mut map_storage,
++        &accessed_keys,
++    )
++    .await
++    .map_err(|e| ProofProviderError::BlockCommitmentError(e.to_string()))?;
++
++    // The created commitment infos doesn't have the compiled class hashes,
++    // as a result it doesn't have the classes trie commitment info.
++    // We complement it with the RPC proof facts.
++    let classes_rpc_facts = flatten_preimages(&rpc_nodes_to_preimage_map(&rpc_proof.classes_proof));
++    commitment_infos.classes_trie_commitment_info.commitment_facts.extend(classes_rpc_facts);
++
++    Ok(commitment_infos)
++}
++
++/// The body of `RpcStorageProofsProvider::get_storage_proofs` after the fetch (state changes
++/// included, the prover's default).
++pub(crate) async fn storage_proofs_from_rpc_proof(
++    rpc_proof: &RpcStorageProof,
++    query: &RpcStorageProofsQuery,
++    execution_initial_reads: &StateMaps,
++    state_diff: &StateMaps,
++) -> Result<StorageProofs, ProofProviderError> {
++    // Validate that contract_leaves_data matches contract_addresses length.
++    let leaves_len = rpc_proof.contracts_proof.contract_leaves_data.len();
++    let addresses_len = query.contract_addresses.len();
++    if leaves_len != addresses_len {
++        return Err(ProofProviderError::InvalidProofResponse(format!(
++            "Contract leaves length mismatch: expected {addresses_len} leaves for requested \
++             contracts, got {leaves_len}"
++        )));
++    }
++
++    // Update initial reads with class hashes and nonces from the proof.
++    let mut extended_initial_reads = StateMaps::default();
++    for (leaf, addr) in
++        rpc_proof.contracts_proof.contract_leaves_data.iter().zip(&query.contract_addresses)
++    {
++        extended_initial_reads.class_hashes.insert(*addr, ClassHash(leaf.class_hash));
++        extended_initial_reads.nonces.insert(*addr, Nonce(leaf.nonce));
++    }
++
++    // Include storage values from execution.
++    extended_initial_reads.storage.extend(&execution_initial_reads.storage);
++
++    let commitment_infos = create_commitment_infos_with_state_changes(
++        rpc_proof,
++        query,
++        &extended_initial_reads,
++        state_diff,
++    )
++    .await?;
++
++    Ok(StorageProofs { extended_initial_reads, commitment_infos })
++}
+diff --git a/wasm-stubs/c-kzg/Cargo.toml b/wasm-stubs/c-kzg/Cargo.toml
+new file mode 100644
+index 0000000..fd291f2
+--- /dev/null
++++ b/wasm-stubs/c-kzg/Cargo.toml
+@@ -0,0 +1,20 @@
++[package]
++name = "c-kzg"
++version = "2.1.5"
++edition = "2021"
++description = "wasm stub: same API surface starknet_os uses, every KZG operation returns an error"
++
++[lib]
++path = "src/lib.rs"
++
++# Feature names other workspace crates (alloy) request; they do nothing here.
++[features]
++default = ["std", "portable", "ethereum_kzg_settings"]
++arbitrary = []
++ethereum_kzg_settings = []
++generate-bindings = []
++generate-fuzz-corpus = []
++no-threads = []
++portable = []
++serde = []
++std = []
+diff --git a/wasm-stubs/c-kzg/src/lib.rs b/wasm-stubs/c-kzg/src/lib.rs
+new file mode 100644
+index 0000000..ce70bf7
+--- /dev/null
++++ b/wasm-stubs/c-kzg/src/lib.rs
+@@ -0,0 +1,84 @@
++//! Stand-in for c-kzg on wasm32, where the C library cannot build. KZG commitments are only
++//! needed for L1 blob data availability, which the virtual OS does not use.
++
++use std::fmt;
++use std::ops::Deref;
++
++pub const BYTES_PER_FIELD_ELEMENT: usize = 32;
++pub const FIELD_ELEMENTS_PER_BLOB: usize = 4096;
++pub const BYTES_PER_BLOB: usize = BYTES_PER_FIELD_ELEMENT * FIELD_ELEMENTS_PER_BLOB;
++
++#[derive(Debug)]
++pub struct Error;
++
++impl fmt::Display for Error {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str("KZG is not available in this wasm build")
++    }
++}
++
++impl std::error::Error for Error {}
++
++pub struct Blob(());
++
++impl Blob {
++    pub fn from_bytes(_bytes: &[u8]) -> Result<Self, Error> {
++        Err(Error)
++    }
++}
++
++pub struct Bytes48([u8; 48]);
++
++impl AsRef<[u8; 48]> for Bytes48 {
++    fn as_ref(&self) -> &[u8; 48] {
++        &self.0
++    }
++}
++
++pub struct KzgCommitment(Bytes48);
++
++impl KzgCommitment {
++    pub fn to_bytes(&self) -> Bytes48 {
++        Bytes48(self.0 .0)
++    }
++}
++
++impl Deref for KzgCommitment {
++    type Target = [u8; 48];
++    fn deref(&self) -> &[u8; 48] {
++        &self.0 .0
++    }
++}
++
++pub struct KzgProof(Bytes48);
++
++impl Deref for KzgProof {
++    type Target = [u8; 48];
++    fn deref(&self) -> &[u8; 48] {
++        &self.0 .0
++    }
++}
++
++pub struct KzgSettings(());
++
++impl KzgSettings {
++    pub fn parse_kzg_trusted_setup(_trusted_setup: &str, _precompute: u64) -> Result<Self, Error> {
++        Ok(Self(()))
++    }
++
++    pub fn blob_to_kzg_commitment(&self, _blob: &Blob) -> Result<KzgCommitment, Error> {
++        Err(Error)
++    }
++
++    pub fn compute_blob_kzg_proof(
++        &self,
++        _blob: &Blob,
++        _commitment_bytes: &Bytes48,
++    ) -> Result<KzgProof, Error> {
++        Err(Error)
++    }
++
++    pub fn compute_cells_and_kzg_proofs(&self, _blob: &Blob) -> Result<((), Vec<KzgProof>), Error> {
++        Err(Error)
++    }
++}

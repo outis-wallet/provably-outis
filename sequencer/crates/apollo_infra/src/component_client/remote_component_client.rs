@@ -1,0 +1,437 @@
+use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::marker::PhantomData;
+use std::time::Duration;
+
+use apollo_config::dumping::{ser_param, SerializeConfig};
+use apollo_config::validators::create_validation_error;
+use apollo_config::{ParamPath, ParamPrivacyInput, SerializedParam};
+use async_trait::async_trait;
+use bytes::Bytes;
+use http::header::CONTENT_TYPE;
+use http::{StatusCode, Uri};
+use http_body_util::{BodyExt, Full, Limited};
+use hyper::body::Body;
+use hyper::{Request as HyperRequest, Response as HyperResponse};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
+use tokio::time::Instant;
+use tracing::field::{display, Empty};
+use tracing::{debug, instrument, trace, warn};
+use validator::{Validate, ValidationError};
+
+use crate::component_client::{ClientError, ClientResult};
+use crate::component_definitions::{
+    ComponentClient,
+    RequestId,
+    ServerError,
+    APPLICATION_OCTET_STREAM,
+    REQUEST_ID_HEADER,
+    TCP_KEEPALIVE_FACTOR,
+};
+use crate::metrics::RemoteClientMetrics;
+use crate::requests::LabeledRequest;
+use crate::serde_utils::SerdeWrapper;
+
+#[cfg(test)]
+#[path = "remote_component_client_test.rs"]
+mod remote_component_client_test;
+
+pub const DEFAULT_RETRIES: usize = 15;
+pub const REQUEST_TIMEOUT_ERROR_MESSAGE: &str = "request timed out";
+
+const DEFAULT_IDLE_CONNECTIONS: usize = 10;
+
+// 8 MiB — bounds memory materialized from a single response as defense in depth.
+const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_KEEPALIVE_TIMEOUT_MS: u64 = 30000;
+const DEFAULT_MAX_RETRY_INTERVAL_MS: u64 = 1000;
+const DEFAULT_INITIAL_RETRY_DELAY_MS: u64 = 1;
+const DEFAULT_ATTEMPTS_PER_LOG: usize = 1;
+const DEFAULT_CONNECTION_TIMEOUT_MS: u64 = 500;
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+
+// TODO(Tsabary): consider retry delay mechanisms, e.g., exponential backoff, jitter, etc.
+
+#[derive(Clone, Debug, Serialize, Deserialize, Validate, PartialEq)]
+pub struct RemoteClientConfig {
+    pub retries: usize,
+    pub idle_connections: usize,
+    // Determines client connection timeouts. Used plainly for HTTP/2 connections, and with a
+    // `TCP_KEEPALIVE_FACTOR` for TCP connections.
+    #[validate(custom(function = "validate_keepalive_timeout_ms"))]
+    pub keepalive_timeout_ms: u64,
+    pub attempts_per_log: usize,
+    pub initial_retry_delay_ms: u64,
+    pub max_retry_interval_ms: u64,
+    pub connection_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    pub set_tcp_nodelay: bool,
+    pub max_response_body_bytes: usize,
+}
+
+impl Default for RemoteClientConfig {
+    fn default() -> Self {
+        Self {
+            retries: DEFAULT_RETRIES,
+            idle_connections: DEFAULT_IDLE_CONNECTIONS,
+            keepalive_timeout_ms: DEFAULT_KEEPALIVE_TIMEOUT_MS,
+            initial_retry_delay_ms: DEFAULT_INITIAL_RETRY_DELAY_MS,
+            attempts_per_log: DEFAULT_ATTEMPTS_PER_LOG,
+            max_retry_interval_ms: DEFAULT_MAX_RETRY_INTERVAL_MS,
+            connection_timeout_ms: DEFAULT_CONNECTION_TIMEOUT_MS,
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+            set_tcp_nodelay: true,
+            max_response_body_bytes: DEFAULT_MAX_RESPONSE_BODY_BYTES,
+        }
+    }
+}
+
+/// Validates that `keepalive_timeout_ms` is positive, and that the derived TCP keepalive duration
+/// (at second granularity, as the OS stores `TCP_KEEPIDLE` in whole seconds) is greater than or
+/// equal to the HTTP keepalive duration (millisecond granularity). If the configured
+/// `keepalive_timeout_ms * TCP_KEEPALIVE_FACTOR` rounds to 0 s, the kernel rejects the socket
+/// option with `EINVAL`. If it is less than `keepalive_timeout_ms`, the TCP keepalive fires before
+/// the HTTP-level timeout.
+pub(crate) fn validate_keepalive_timeout_ms(
+    keepalive_timeout_ms: u64,
+) -> Result<(), ValidationError> {
+    if keepalive_timeout_ms == 0 {
+        return Err(create_validation_error(
+            "keepalive_timeout_ms must be greater than 0".to_string(),
+            "keepalive_timeout_ms_zero",
+            "keepalive_timeout_ms must be > 0.",
+        ));
+    }
+    let http_keepalive = Duration::from_millis(keepalive_timeout_ms);
+    let tcp_keepalive_raw = http_keepalive.mul_f64(TCP_KEEPALIVE_FACTOR);
+    // TCP_KEEPIDLE is stored in whole seconds; fractional seconds are truncated by the OS.
+    let tcp_keepalive_secs = tcp_keepalive_raw.as_secs();
+    if tcp_keepalive_secs == 0 {
+        return Err(create_validation_error(
+            format!(
+                "TCP keepalive rounds to 0 s (keepalive_timeout_ms={keepalive_timeout_ms}, \
+                 factor={TCP_KEEPALIVE_FACTOR}): increase keepalive_timeout_ms so that \
+                 keepalive_timeout_ms * {TCP_KEEPALIVE_FACTOR} is at least 1 s",
+            ),
+            "tcp_keepalive_zero",
+            "TCP keepalive (second granularity) must be > 0 s.",
+        ));
+    }
+    let tcp_keepalive = Duration::from_secs(tcp_keepalive_secs);
+    if tcp_keepalive < http_keepalive {
+        return Err(create_validation_error(
+            format!(
+                "TCP keepalive ({tcp_keepalive_secs} s) is shorter than HTTP keepalive \
+                 ({keepalive_timeout_ms} ms): increase keepalive_timeout_ms so that \
+                 keepalive_timeout_ms * {TCP_KEEPALIVE_FACTOR} rounds to at least \
+                 {keepalive_timeout_ms} ms",
+            ),
+            "tcp_keepalive_shorter_than_http_keepalive",
+            "TCP keepalive (second granularity) must be >= HTTP keepalive (ms granularity).",
+        ));
+    }
+    Ok(())
+}
+
+impl SerializeConfig for RemoteClientConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        BTreeMap::from_iter([
+            ser_param(
+                "retries",
+                &self.retries,
+                "The max number of retries for sending a message.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "idle_connections",
+                &self.idle_connections,
+                "The maximum number of idle connections to keep alive.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "keepalive_timeout_ms",
+                &self.keepalive_timeout_ms,
+                "The duration in milliseconds to keep an idle connection open before closing.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "initial_retry_delay_ms",
+                &self.initial_retry_delay_ms,
+                "Initial delay before first retry in milliseconds.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "attempts_per_log",
+                &self.attempts_per_log,
+                "Number of attempts between failure log messages.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "max_retry_interval_ms",
+                &self.max_retry_interval_ms,
+                "The maximal duration in milliseconds to wait between remote connection retries.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "connection_timeout_ms",
+                &self.connection_timeout_ms,
+                "The maximal duration in milliseconds before a client forgoes remote connection \
+                 creation attempt.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "request_timeout_ms",
+                &self.request_timeout_ms,
+                "The maximal duration in milliseconds for the full request-response cycle; \
+                 connection establishment is separate.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "set_tcp_nodelay",
+                &self.set_tcp_nodelay,
+                "Whether to set TCP_NODELAY on the client requests.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "max_response_body_bytes",
+                &self.max_response_body_bytes,
+                "Maximum allowed size in bytes for an incoming response body. Responses exceeding \
+                 this limit are treated as a communication failure.",
+                ParamPrivacyInput::Public,
+            ),
+        ])
+    }
+}
+
+/// The `RemoteComponentClient` struct is a generic client for sending component requests and
+/// receiving responses asynchronously through HTTP connection.
+pub struct RemoteComponentClient<Request, Response>
+where
+    Request: Serialize,
+    Response: DeserializeOwned,
+{
+    uri: Uri,
+    client: Client<HttpConnector, Full<Bytes>>,
+    config: RemoteClientConfig,
+    metrics: &'static RemoteClientMetrics,
+    // [`RemoteComponentClient<Request,Response>`] should be [`Send + Sync`] while [`Request`] and
+    // [`Response`] are only [`Send`]. [`Phantom<T>`] is [`Send + Sync`] only if [`T`] is, despite
+    // this bound making no sense as the phantom data field is unused. As such, we wrap it as
+    // [`PhantomData<Mutex<T>>`], not enforcing the redundant [`Sync`] bound. Alternatively,
+    // we could also use [`unsafe impl Sync for RemoteComponentClient<Request, Response> {}`], but
+    // we prefer the former for the sake of avoiding unsafe code.
+    _req: PhantomData<Mutex<Request>>,
+    _res: PhantomData<Mutex<Response>>,
+}
+
+impl<Request, Response> RemoteComponentClient<Request, Response>
+where
+    Request: Serialize + DeserializeOwned + Debug,
+    Response: Serialize + DeserializeOwned + Debug,
+{
+    pub fn new(
+        config: RemoteClientConfig,
+        url: &str,
+        port: u16,
+        metrics: &'static RemoteClientMetrics,
+    ) -> Self {
+        let uri = format!("http://{url}:{port}/").parse().unwrap();
+        let idle_timeout = Duration::from_millis(config.keepalive_timeout_ms);
+
+        // Create the tcp connector.
+        let mut connector = HttpConnector::new();
+        connector.set_nodelay(config.set_tcp_nodelay);
+        connector.set_connect_timeout(Some(Duration::from_millis(config.connection_timeout_ms)));
+        connector.set_keepalive(Some(idle_timeout.mul_f64(TCP_KEEPALIVE_FACTOR)));
+
+        // Server-side HTTP/2 keepalive uses PING frames; the `h2` stack automatically ACKs
+        // inbound pings. We still need a real timer so `pool_idle_timeout` schedules evictions
+        // (see hyper-util `Builder::pool_timer` docs) and so the HTTP/2 stack can use timers if
+        // enabled later (e.g. adaptive window).
+        let client = Client::builder(TokioExecutor::new())
+            .timer(TokioTimer::default())
+            .pool_timer(TokioTimer::default())
+            .http2_only(true)
+            .pool_max_idle_per_host(config.idle_connections)
+            .pool_idle_timeout(idle_timeout)
+            .build(connector);
+
+        debug!("RemoteComponentClient created with URI: {uri:?}");
+
+        Self { uri, client, config, metrics, _req: PhantomData, _res: PhantomData }
+    }
+
+    fn construct_http_request(
+        &self,
+        serialized_request: Bytes,
+        request_id: &RequestId,
+    ) -> HyperRequest<Full<Bytes>> {
+        trace!("Constructing remote request");
+        HyperRequest::post(self.uri.clone())
+            .header(CONTENT_TYPE, APPLICATION_OCTET_STREAM)
+            .header(REQUEST_ID_HEADER, request_id.to_string())
+            .body(Full::new(serialized_request))
+            .expect("Request building should succeed")
+    }
+
+    async fn try_send(&self, http_request: HyperRequest<Full<Bytes>>) -> ClientResult<Response> {
+        trace!("Sending HTTP request");
+        let timeout_duration = Duration::from_millis(self.config.request_timeout_ms);
+        let request_future = async {
+            let http_response = self.client.request(http_request).await.map_err(|err| {
+                warn!("HTTP request to {} failed with error: {err:?}", self.uri);
+                ClientError::CommunicationFailure(err.to_string())
+            })?;
+
+            match http_response.status() {
+                StatusCode::OK => {
+                    let response_body =
+                        get_response_body(http_response, self.config.max_response_body_bytes).await;
+                    trace!("Successfully deserialized response");
+                    response_body
+                }
+                status_code => {
+                    let body_bytes = Limited::new(
+                        http_response.into_body(),
+                        self.config.max_response_body_bytes,
+                    )
+                    .collect()
+                    .await
+                    .map_err(|e| ClientError::CommunicationFailure(e.to_string()))?
+                    .to_bytes();
+
+                    match SerdeWrapper::<ServerError>::wrapper_deserialize(&body_bytes) {
+                        Ok(server_err) => Err(ClientError::ResponseError(status_code, server_err)),
+                        Err(e) => {
+                            let raw = String::from_utf8_lossy(&body_bytes);
+                            warn!(
+                                "Non-OK ({status_code}) with deserialization error body: {e}; \
+                                 raw={raw}"
+                            );
+                            Err(ClientError::ResponseError(
+                                status_code,
+                                ServerError::RequestDeserializationFailure(format!(
+                                    "Server returned {status_code}, invalid error body: {e}; \
+                                     raw={raw}"
+                                )),
+                            ))
+                        }
+                    }
+                }
+            }
+        };
+        match tokio::time::timeout(timeout_duration, request_future).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                warn!(
+                    "HTTP request to {} timed out after {} ms",
+                    self.uri, self.config.request_timeout_ms
+                );
+                Err(ClientError::CommunicationFailure(REQUEST_TIMEOUT_ERROR_MESSAGE.to_string()))
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<Request, Response> ComponentClient<Request, Response>
+    for RemoteComponentClient<Request, Response>
+where
+    Request: Send + Serialize + DeserializeOwned + Debug + AsRef<str> + LabeledRequest,
+    Response: Send + Serialize + DeserializeOwned + Debug,
+{
+    #[instrument(skip_all, fields(request_id = Empty))]
+    async fn send(&self, component_request: Request) -> ClientResult<Response> {
+        let request_id = RequestId::generate();
+        tracing::Span::current().record("request_id", display(&request_id));
+        let log_message = format!("{} to {}", component_request.as_ref(), self.uri);
+        let request_label = component_request.request_label();
+
+        // Serialize the request.
+        let serialized_request = SerdeWrapper::new(component_request)
+            .wrapper_serialize()
+            .expect("Request serialization should succeed");
+        // Convert the serialized request into `Bytes`, a zero-copy, reference-counted buffer used
+        // by Hyper. Constructing a Hyper request consumes the body, so we need a way to
+        // reuse the request payload across multiple retries without reallocating memory. By
+        // using `Bytes` and cloning it per attempt, we preserve the original data
+        // efficiently and avoid unnecessary memory copies.
+        let serialized_request_bytes: Bytes = serialized_request.into();
+
+        // Construct the request, and send it up to 'max_retries + 1' times. Return if received a
+        // successful response, or the last response if all attempts failed.
+        let max_attempts = self.config.retries + 1;
+        trace!("Starting retry loop: max_attempts = {max_attempts}");
+        let mut retry_interval_ms = self.config.initial_retry_delay_ms;
+        let http_request = self.construct_http_request(serialized_request_bytes, &request_id);
+        for attempt in 1..max_attempts + 1 {
+            trace!("Request {log_message} attempt {attempt} of {max_attempts}");
+            let start = Instant::now();
+            let res = self.try_send(http_request.clone()).await;
+            let elapsed = start.elapsed();
+            if res.is_ok() {
+                trace!("Request {log_message} successful on attempt {attempt}/{max_attempts}");
+                self.metrics.record_attempt(attempt);
+                self.metrics.record_response_time(elapsed.as_secs_f64(), request_label);
+                return res;
+            }
+            self.metrics.record_communication_failure(elapsed.as_secs_f64(), request_label);
+            let attempts_per_log = self.config.attempts_per_log;
+            if attempt % attempts_per_log == attempts_per_log - 1 {
+                warn!("Request {log_message} failed on attempt {attempt}/{max_attempts}: {res:?}");
+            }
+            if attempt == max_attempts {
+                self.metrics.record_attempt(attempt);
+                return res;
+            }
+            tokio::time::sleep(Duration::from_millis(retry_interval_ms)).await;
+            // Exponential backoff, capped by the configured retry interval.
+            retry_interval_ms = (retry_interval_ms * 2).min(self.config.max_retry_interval_ms);
+        }
+        unreachable!("Guaranteed to return a response before reaching this point.");
+    }
+}
+
+async fn get_response_body<Response, B>(
+    response: HyperResponse<B>,
+    max_response_body_bytes: usize,
+) -> Result<Response, ClientError>
+where
+    Response: Serialize + DeserializeOwned + Debug,
+    B: Body,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let body_bytes = Limited::new(response.into_body(), max_response_body_bytes)
+        .collect()
+        .await
+        .map_err(|err| ClientError::ResponseParsingFailure(err.to_string()))?
+        .to_bytes();
+
+    SerdeWrapper::<Response>::wrapper_deserialize(&body_bytes)
+        .map_err(|err| ClientError::ResponseDeserializationFailure(err.to_string()))
+}
+
+// Can't derive because derive forces the generics to also be `Clone`, which we prefer not to do
+// since it'll require the generic Request and Response types to be cloneable.
+impl<Request, Response> Clone for RemoteComponentClient<Request, Response>
+where
+    Request: Serialize,
+    Response: DeserializeOwned,
+{
+    fn clone(&self) -> Self {
+        Self {
+            uri: self.uri.clone(),
+            client: self.client.clone(),
+            config: self.config.clone(),
+            metrics: self.metrics,
+            _req: PhantomData,
+            _res: PhantomData,
+        }
+    }
+}

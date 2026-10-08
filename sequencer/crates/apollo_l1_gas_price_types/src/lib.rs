@@ -1,0 +1,276 @@
+pub mod errors;
+#[cfg(test)]
+mod test;
+
+use std::fmt::{self, Debug, Display};
+use std::iter::Sum;
+use std::sync::Arc;
+
+use apollo_infra::component_definitions::{ComponentClient, PrioritizedRequest};
+use apollo_infra::requests::LABEL_NAME_REQUEST_VARIANT;
+use apollo_infra::{
+    handle_all_response_variants,
+    impl_debug_for_infra_requests_and_responses,
+    impl_labeled_request,
+};
+use apollo_metrics::generate_permutation_labels;
+use async_trait::async_trait;
+use errors::{ExchangeRateOracleClientError, L1GasPriceClientError, L1GasPriceProviderError};
+#[cfg(any(feature = "testing", test))]
+use mockall::automock;
+use papyrus_base_layer::L1BlockNumber;
+use serde::{Deserialize, Serialize};
+use starknet_api::block::{BlockTimestamp, GasPrice};
+use strum::{AsRefStr, EnumDiscriminants, EnumIter, IntoStaticStr, VariantNames};
+use tracing::instrument;
+
+pub const DEFAULT_ETH_TO_FRI_RATE: ExchangeRate = 10_u128.pow(21);
+
+/// A currency conversion rate, as an 18-decimal fixed-point integer.
+pub type ExchangeRate = u128;
+
+/// Fixed-point scale of every `ExchangeRate`, whichever source reported it.
+pub const EXCHANGE_RATE_DECIMALS: u32 = 18;
+pub const EXCHANGE_RATE_SCALE: ExchangeRate = 10u128.pow(EXCHANGE_RATE_DECIMALS);
+
+/// Currency pair a reading or rate belongs to.
+pub const LABEL_NAME_CURRENCY_PAIR: &str = "currency_pair";
+
+/// Variant of `ExchangeRateOracleClientError` a failed query returned.
+pub const LABEL_NAME_ERROR_TYPE: &str = "error_type";
+
+/// The pair a reading or rate quotes.
+#[derive(
+    Clone, Copy, Debug, Deserialize, EnumIter, IntoStaticStr, PartialEq, Eq, Serialize, VariantNames,
+)]
+#[strum(serialize_all = "snake_case")]
+pub enum CurrencyPair {
+    EthUsd,
+    StrkUsd,
+    /// Derived from the two USD pairs: no Chainlink feed on Starknet quotes ETH in STRK.
+    EthStrk,
+}
+
+impl CurrencyPair {
+    pub fn pair_name(self) -> &'static str {
+        match self {
+            CurrencyPair::EthUsd => "ETH/USD",
+            CurrencyPair::StrkUsd => "STRK/USD",
+            CurrencyPair::EthStrk => "ETH/STRK",
+        }
+    }
+
+    pub fn labels(self) -> [(&'static str, &'static str); 1] {
+        [(LABEL_NAME_CURRENCY_PAIR, self.into())]
+    }
+}
+
+/// Renders the operator-facing `pair_name`, not the snake_case label value.
+impl Display for CurrencyPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.pair_name())
+    }
+}
+
+pub type SharedL1GasPriceClient = Arc<dyn L1GasPriceProviderClient>;
+pub type L1GasPriceProviderResult<T> = Result<T, L1GasPriceProviderError>;
+pub type L1GasPriceProviderClientResult<T> = Result<T, L1GasPriceClientError>;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GasPriceData {
+    pub block_number: L1BlockNumber,
+    pub timestamp: BlockTimestamp,
+    pub price_info: PriceInfo,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PriceInfo {
+    pub base_fee_per_gas: GasPrice,
+    pub blob_fee: GasPrice,
+}
+
+impl PriceInfo {
+    pub fn checked_div(&self, divisor: u128) -> Option<PriceInfo> {
+        let base_fee_per_gas = self.base_fee_per_gas.checked_div(divisor)?;
+        let blob_fee = self.blob_fee.checked_div(divisor)?;
+        Some(PriceInfo { base_fee_per_gas, blob_fee })
+    }
+}
+
+impl<'a> Sum<&'a Self> for PriceInfo {
+    fn sum<I>(iter: I) -> Self
+    where
+        I: Iterator<Item = &'a Self>,
+    {
+        iter.fold(Self { base_fee_per_gas: GasPrice(0), blob_fee: GasPrice(0) }, |a, b| Self {
+            base_fee_per_gas: a.base_fee_per_gas.saturating_add(b.base_fee_per_gas),
+            blob_fee: a.blob_fee.saturating_add(b.blob_fee),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, AsRefStr, EnumDiscriminants)]
+#[strum_discriminants(
+    name(L1GasPriceRequestLabelValue),
+    derive(IntoStaticStr, EnumIter, VariantNames),
+    strum(serialize_all = "snake_case")
+)]
+pub enum L1GasPriceRequest {
+    Initialize,
+    GetGasPrice(BlockTimestamp),
+    AddGasPrice(GasPriceData),
+    GetEthToFriRate(u64),
+    GetStrkToUsdRate(u64),
+}
+impl_debug_for_infra_requests_and_responses!(L1GasPriceRequest);
+impl_labeled_request!(L1GasPriceRequest, L1GasPriceRequestLabelValue);
+impl PrioritizedRequest for L1GasPriceRequest {}
+
+#[derive(Clone, Serialize, Deserialize, AsRefStr)]
+pub enum L1GasPriceResponse {
+    Initialize(L1GasPriceProviderResult<()>),
+    GetGasPrice(L1GasPriceProviderResult<PriceInfo>),
+    AddGasPrice(L1GasPriceProviderResult<()>),
+    GetEthToFriRate(L1GasPriceProviderResult<ExchangeRate>),
+    GetStrkToUsdRate(L1GasPriceProviderResult<ExchangeRate>),
+}
+impl_debug_for_infra_requests_and_responses!(L1GasPriceResponse);
+
+/// Serves as the provider's shared interface. Requires `Send + Sync` to allow transferring and
+/// sharing resources (inputs, futures) across threads.
+#[cfg_attr(any(feature = "testing", test), automock)]
+#[async_trait]
+pub trait L1GasPriceProviderClient: Send + Sync {
+    async fn initialize(&self) -> L1GasPriceProviderClientResult<()>;
+
+    async fn add_price_info(&self, new_data: GasPriceData) -> L1GasPriceProviderClientResult<()>;
+
+    async fn get_price_info(
+        &self,
+        timestamp: BlockTimestamp,
+    ) -> L1GasPriceProviderClientResult<PriceInfo>;
+
+    /// ETH/FRI rate, quoted as FRI per ETH (e.g. 5000 STRK per ETH → `5000 * 10^18`).
+    async fn get_rate(&self, timestamp: u64) -> L1GasPriceProviderClientResult<ExchangeRate>;
+
+    /// STRK/USD rate, quoted as USD per STRK (e.g. STRK at $0.50 → `0.5 * 10^18`).
+    async fn get_strk_to_usd_rate(
+        &self,
+        timestamp: u64,
+    ) -> L1GasPriceProviderClientResult<ExchangeRate>;
+}
+
+#[cfg_attr(any(feature = "testing", test), automock)]
+#[async_trait]
+pub trait ExchangeRateOracleClientTrait: Send + Sync + Debug {
+    /// Fetches the rate for the given timestamp. Which pair the rate converts (e.g. ETH/FRI,
+    /// STRK/USD) is fixed per implementation instance by its configuration.
+    async fn fetch_rate(
+        &self,
+        timestamp: u64,
+    ) -> Result<ExchangeRate, ExchangeRateOracleClientError>;
+}
+
+/// The rate an oracle client instance produces.
+pub trait RateKind: Send + Sync + Debug + 'static {
+    const PAIR: CurrencyPair;
+}
+
+/// FRI per ETH, derived from the ETH/USD and STRK/USD pairs.
+#[derive(Clone, Copy, Debug)]
+pub struct EthToFri;
+
+impl RateKind for EthToFri {
+    const PAIR: CurrencyPair = CurrencyPair::EthStrk;
+}
+
+/// USD per STRK.
+#[derive(Clone, Copy, Debug)]
+pub struct StrkToUsd;
+
+impl RateKind for StrkToUsd {
+    const PAIR: CurrencyPair = CurrencyPair::StrkUsd;
+}
+
+#[async_trait]
+impl<ComponentClientType> L1GasPriceProviderClient for ComponentClientType
+where
+    ComponentClientType: Send + Sync + ComponentClient<L1GasPriceRequest, L1GasPriceResponse>,
+{
+    #[instrument(skip(self))]
+    async fn initialize(&self) -> L1GasPriceProviderClientResult<()> {
+        let request = L1GasPriceRequest::Initialize;
+        handle_all_response_variants!(
+            self,
+            request,
+            L1GasPriceResponse,
+            Initialize,
+            L1GasPriceClientError,
+            L1GasPriceProviderError,
+            Direct
+        )
+    }
+    #[instrument(skip(self))]
+    async fn add_price_info(&self, new_data: GasPriceData) -> L1GasPriceProviderClientResult<()> {
+        let request = L1GasPriceRequest::AddGasPrice(new_data);
+        handle_all_response_variants!(
+            self,
+            request,
+            L1GasPriceResponse,
+            AddGasPrice,
+            L1GasPriceClientError,
+            L1GasPriceProviderError,
+            Direct
+        )
+    }
+    #[instrument(skip(self))]
+    async fn get_price_info(
+        &self,
+        timestamp: BlockTimestamp,
+    ) -> L1GasPriceProviderClientResult<PriceInfo> {
+        let request = L1GasPriceRequest::GetGasPrice(timestamp);
+        handle_all_response_variants!(
+            self,
+            request,
+            L1GasPriceResponse,
+            GetGasPrice,
+            L1GasPriceClientError,
+            L1GasPriceProviderError,
+            Direct
+        )
+    }
+    #[instrument(skip(self))]
+    async fn get_rate(&self, timestamp: u64) -> L1GasPriceProviderClientResult<ExchangeRate> {
+        let request = L1GasPriceRequest::GetEthToFriRate(timestamp);
+        handle_all_response_variants!(
+            self,
+            request,
+            L1GasPriceResponse,
+            GetEthToFriRate,
+            L1GasPriceClientError,
+            L1GasPriceProviderError,
+            Direct
+        )
+    }
+    #[instrument(skip(self))]
+    async fn get_strk_to_usd_rate(
+        &self,
+        timestamp: u64,
+    ) -> L1GasPriceProviderClientResult<ExchangeRate> {
+        let request = L1GasPriceRequest::GetStrkToUsdRate(timestamp);
+        handle_all_response_variants!(
+            self,
+            request,
+            L1GasPriceResponse,
+            GetStrkToUsdRate,
+            L1GasPriceClientError,
+            L1GasPriceProviderError,
+            Direct
+        )
+    }
+}
+
+generate_permutation_labels! {
+    L1_GAS_PRICE_REQUEST_LABELS,
+    (LABEL_NAME_REQUEST_VARIANT, L1GasPriceRequestLabelValue),
+}

@@ -1,0 +1,614 @@
+use std::sync::Arc;
+
+use apollo_batcher::batcher::{create_batcher, Batcher};
+use apollo_batcher::pre_confirmed_cende_client::PreconfirmedCendeClient;
+use apollo_class_manager::class_manager::create_class_manager;
+use apollo_class_manager::ClassManager;
+use apollo_committer::committer::ApolloCommitter;
+use apollo_compile_to_casm::{create_sierra_compiler, SierraCompiler};
+use apollo_config_manager::config_manager::ConfigManager;
+use apollo_config_manager::config_manager_runner::ConfigManagerRunner;
+use apollo_consensus_manager::consensus_manager::{
+    create_committee_provider,
+    ConsensusManager,
+    ConsensusManagerArgs,
+};
+use apollo_gateway::gateway::{create_gateway, Gateway};
+use apollo_http_server::http_server::{create_http_server, HttpServer};
+use apollo_l1_events::event_identifiers_to_track;
+use apollo_l1_events::l1_events_provider::L1EventsProvider;
+use apollo_l1_events::l1_scraper::L1EventsScraper;
+use apollo_l1_gas_price::l1_gas_price_provider::L1GasPriceProvider;
+use apollo_l1_gas_price::l1_gas_price_scraper::L1GasPriceScraper;
+use apollo_mempool::communication::{create_mempool, MempoolCommunicationWrapper};
+use apollo_mempool_p2p::create_p2p_propagator_and_runner;
+use apollo_mempool_p2p::propagator::MempoolP2pPropagator;
+use apollo_mempool_p2p::runner::MempoolP2pRunner;
+use apollo_monitoring_endpoint::monitoring_endpoint::{
+    create_monitoring_endpoint,
+    MonitoringEndpoint,
+};
+use apollo_node_config::component_execution_config::{
+    ActiveComponentExecutionMode,
+    ReactiveComponentExecutionMode,
+};
+use apollo_node_config::node_config::{NodeDynamicConfig, SequencerNodeConfig};
+use apollo_node_config::version::VERSION_FULL;
+use apollo_proof_manager::proof_manager::ProofManager;
+use apollo_signature_manager::{create_signature_manager, SignatureManager};
+use apollo_state_sync::runner::StateSyncRunner;
+use apollo_state_sync::{create_state_sync_and_runner, StateSync};
+use metrics_exporter_prometheus::PrometheusHandle;
+use papyrus_base_layer::cyclic_base_layer_wrapper::CyclicBaseLayerWrapper;
+use papyrus_base_layer::ethereum_base_layer_contract::EthereumBaseLayerContract;
+use papyrus_base_layer::metrics::ScraperLabel;
+use tracing::info;
+
+use crate::clients::SequencerNodeClients;
+
+pub struct SequencerNodeComponents {
+    pub batcher: Option<Batcher>,
+    pub class_manager: Option<ClassManager>,
+    pub committer: Option<ApolloCommitter>,
+    pub config_manager: Option<ConfigManager>,
+    pub config_manager_runner: Option<ConfigManagerRunner>,
+    pub consensus_manager: Option<ConsensusManager>,
+    pub gateway: Option<Gateway>,
+    pub http_server: Option<HttpServer>,
+    pub l1_events_scraper:
+        Option<L1EventsScraper<CyclicBaseLayerWrapper<EthereumBaseLayerContract>>>,
+    pub l1_events_provider: Option<L1EventsProvider>,
+    pub l1_gas_price_scraper:
+        Option<L1GasPriceScraper<CyclicBaseLayerWrapper<EthereumBaseLayerContract>>>,
+    pub l1_gas_price_provider: Option<L1GasPriceProvider>,
+    pub mempool: Option<MempoolCommunicationWrapper>,
+    pub monitoring_endpoint: Option<MonitoringEndpoint>,
+    pub mempool_p2p_propagator: Option<MempoolP2pPropagator>,
+    pub mempool_p2p_runner: Option<MempoolP2pRunner>,
+    pub proof_manager: Option<ProofManager>,
+    pub sierra_compiler: Option<SierraCompiler>,
+    pub signature_manager: Option<SignatureManager>,
+    pub state_sync: Option<StateSync>,
+    pub state_sync_runner: Option<StateSyncRunner>,
+}
+
+pub async fn create_node_components(
+    config: &SequencerNodeConfig,
+    clients: &SequencerNodeClients,
+    prometheus_handle: Option<PrometheusHandle>,
+    cli_args: Vec<String>,
+) -> SequencerNodeComponents {
+    info!("Creating node components.");
+    let batcher = match config.components.batcher.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+            let batcher_config =
+                config.batcher_config.as_ref().expect("Batcher config should be set");
+            let committer_client = clients
+                .get_committer_shared_client()
+                .expect("Committer client should be available");
+            let mempool_client = if config.validation_only {
+                None
+            } else {
+                Some(
+                    clients
+                        .get_mempool_shared_client()
+                        .expect("Mempool client should be available in non-validation-only mode."),
+                )
+            };
+            let l1_events_provider_client = clients
+                .get_l1_events_provider_shared_client()
+                .expect("L1 Provider client should be available");
+            let class_manager_client = clients
+                .get_class_manager_shared_client()
+                .expect("Class Manager client should be available");
+            let pre_confirmed_cende_client = Arc::new(PreconfirmedCendeClient::new(
+                batcher_config.static_config.pre_confirmed_cende_config.clone(),
+            ));
+            let proof_manager_client = clients
+                .get_proof_manager_shared_client()
+                .expect("Proof Manager client should be available");
+            let config_manager_client = clients
+                .get_config_manager_shared_client()
+                .expect("Config Manager client should be available");
+            Some(
+                create_batcher(
+                    batcher_config.clone(),
+                    committer_client,
+                    mempool_client,
+                    l1_events_provider_client,
+                    class_manager_client,
+                    pre_confirmed_cende_client,
+                    proof_manager_client,
+                    config_manager_client,
+                )
+                .await,
+            )
+        }
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => None,
+    };
+
+    let class_manager = match config.components.class_manager.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+            let class_manager_config =
+                config.class_manager_config.as_ref().expect("Class Manager config should be set");
+            let compiler_shared_client = clients
+                .get_sierra_compiler_shared_client()
+                .expect("Sierra Compiler client should be available");
+            let config_manager_shared_client = clients
+                .get_config_manager_shared_client()
+                .expect("Config Manager client should be available");
+            Some(create_class_manager(
+                class_manager_config.clone(),
+                compiler_shared_client,
+                config_manager_shared_client,
+            ))
+        }
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => None,
+    };
+
+    let committer = match config.components.committer.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => Some(
+            ApolloCommitter::new(
+                config.committer_config.clone().expect("Committer config should be set"),
+            )
+            .await,
+        ),
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => None,
+    };
+
+    let (config_manager, config_manager_runner) =
+        match config.components.config_manager.execution_mode {
+            ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled => {
+                let node_dynamic_config = NodeDynamicConfig::from(config);
+                let config_manager_config = config
+                    .config_manager_config
+                    .as_ref()
+                    .expect("Config Manager config should be set");
+                let config_manger =
+                    ConfigManager::new(config_manager_config.clone(), node_dynamic_config.clone());
+                let config_manager_client = clients
+                    .get_config_manager_shared_client()
+                    .expect("Config Manager client should be available");
+                let config_manager_runner = ConfigManagerRunner::new(
+                    config_manager_config.clone(),
+                    config_manager_client,
+                    node_dynamic_config,
+                    cli_args,
+                );
+                (Some(config_manger), Some(config_manager_runner))
+            }
+
+            ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled
+            | ReactiveComponentExecutionMode::Remote => {
+                panic!(
+                    "ConfigManager does not support remote mode - it's a local infrastructure \
+                     component"
+                );
+            }
+            ReactiveComponentExecutionMode::Disabled => (None, None),
+        };
+
+    let consensus_manager = match config.components.consensus_manager.execution_mode {
+        ActiveComponentExecutionMode::Enabled => {
+            let consensus_manager_config = config
+                .consensus_manager_config
+                .as_ref()
+                .expect("Consensus Manager config should be set");
+            let batcher_client =
+                clients.get_batcher_shared_client().expect("Batcher client should be available");
+            let state_sync_client = clients
+                .get_state_sync_shared_client()
+                .expect("State Sync client should be available");
+            let class_manager_client = clients
+                .get_class_manager_shared_client()
+                .expect("Class Manager client should be available");
+            let signature_manager_client = clients
+                .get_signature_manager_shared_client()
+                .expect("Signature Manager client should be available");
+            let l1_gas_price_client = clients
+                .get_l1_gas_price_shared_client()
+                .expect("L1 gas price client should be available");
+            let config_manager_client = clients
+                .get_config_manager_shared_client()
+                .expect("Config Manager client should be available");
+            let proof_manager_client = clients
+                .get_proof_manager_shared_client()
+                .expect("Proof Manager client should be available");
+            let committee_provider = create_committee_provider(
+                consensus_manager_config,
+                batcher_client.clone(),
+                state_sync_client.clone(),
+                config_manager_client.clone(),
+            );
+            Some(ConsensusManager::new(ConsensusManagerArgs {
+                config: consensus_manager_config.clone(),
+                batcher_client,
+                state_sync_client,
+                class_manager_client,
+                signature_manager_client,
+                config_manager_client,
+                l1_gas_price_provider: l1_gas_price_client,
+                proof_manager_client,
+                committee_provider,
+            }))
+        }
+        ActiveComponentExecutionMode::Disabled => None,
+    };
+
+    let gateway = match config.components.gateway.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+            let gateway_config =
+                config.gateway_config.as_ref().expect("Gateway config should be set");
+            let mempool_client =
+                clients.get_mempool_shared_client().expect("Mempool client should be available");
+            let state_sync_client = clients
+                .get_state_sync_shared_client()
+                .expect("State Sync client should be available");
+            let class_manager_client = clients
+                .get_class_manager_shared_client()
+                .expect("Class Manager client should be available");
+            let proof_manager_client = clients
+                .get_proof_manager_shared_client()
+                .expect("Proof Manager client should be available");
+            Some(create_gateway(
+                gateway_config.clone(),
+                state_sync_client,
+                mempool_client,
+                class_manager_client,
+                proof_manager_client,
+                tokio::runtime::Handle::current(),
+            ))
+        }
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => None,
+    };
+
+    let http_server = match config.components.http_server.execution_mode {
+        ActiveComponentExecutionMode::Enabled => {
+            let config_manager_client = clients
+                .get_config_manager_shared_client()
+                .expect("Config Manager client should be available");
+            let http_server_config =
+                config.http_server_config.as_ref().expect("HTTP Server config should be set");
+            let gateway_client =
+                clients.get_gateway_shared_client().expect("Gateway client should be available");
+
+            Some(create_http_server(
+                http_server_config.clone(),
+                config_manager_client,
+                gateway_client,
+            ))
+        }
+        ActiveComponentExecutionMode::Disabled => None,
+    };
+
+    let l1_gas_price_provider = match config.components.l1_gas_price_provider.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+            let l1_gas_price_provider_config = config
+                .l1_gas_price_provider_config
+                .as_ref()
+                .expect("L1 Gas Price Provider config should be set");
+            Some(L1GasPriceProvider::new_with_oracle(
+                l1_gas_price_provider_config.clone(),
+                clients
+                    .get_batcher_shared_client()
+                    .expect("L1 gas price provider requires a batcher client"),
+            ))
+        }
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => {
+            assert!(
+                config.l1_gas_price_provider_config.is_none(),
+                "L1 Gas Price Provider config should not be set"
+            );
+            None
+        }
+    };
+
+    let l1_gas_price_scraper = match config.components.l1_gas_price_scraper.execution_mode {
+        ActiveComponentExecutionMode::Enabled => {
+            let base_layer_config =
+                config.base_layer_config.as_ref().expect("Base Layer config should be set");
+            let l1_gas_price_scraper_config = config
+                .l1_gas_price_scraper_config
+                .as_ref()
+                .expect("L1 Gas Price Scraper config should be set");
+            let l1_gas_price_client = clients
+                .get_l1_gas_price_shared_client()
+                .expect("L1 gas price client should be available");
+            let base_layer = EthereumBaseLayerContract::new(base_layer_config.clone());
+            let cyclic_base_layer_wrapper = CyclicBaseLayerWrapper::new(
+                base_layer,
+                base_layer_config.retry_primary_interval_seconds,
+                ScraperLabel::L1GasPrice,
+            );
+
+            Some(L1GasPriceScraper::new(
+                l1_gas_price_scraper_config.clone(),
+                l1_gas_price_client,
+                cyclic_base_layer_wrapper,
+            ))
+        }
+        ActiveComponentExecutionMode::Disabled => {
+            assert!(
+                config.l1_gas_price_scraper_config.is_none(),
+                "L1 Gas Price Scraper config should not be set"
+            );
+            None
+        }
+    };
+
+    let l1_events_provider = match config.components.l1_events_provider.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+            let l1_events_provider_config =
+                config.l1_events_provider_config.expect("L1 Provider config should be set");
+            let mut l1_events_provider = L1EventsProvider::new(
+                l1_events_provider_config,
+                clients.get_l1_events_provider_shared_client().unwrap(),
+                clients.get_state_sync_shared_client().unwrap(),
+                None,
+            );
+            if l1_events_provider_config.dummy_mode {
+                let batcher_height = batcher
+                    .as_ref()
+                    .expect(
+                        "L1 provider's dummy mode initialization requires the batcher to be set \
+                         up in order to align to its height",
+                    )
+                    .get_height()
+                    .await
+                    .unwrap()
+                    .height
+                    .prev()
+                    .unwrap_or_default(); // When batcher height is 0, it's ok to set historic height to 0 and not -1
+                info!(
+                    "L1 provider dummy mode startup height set at batcher height: {batcher_height}"
+                );
+                l1_events_provider
+                    .initialize(batcher_height, vec![])
+                    .await
+                    .expect("Failed to initialize L1 provider in dummy mode");
+                Some(l1_events_provider)
+            } else {
+                Some(l1_events_provider)
+            }
+        }
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => {
+            assert!(
+                config.l1_events_provider_config.is_none(),
+                "L1 Events Provider config should not be set"
+            );
+            None
+        }
+    };
+
+    let l1_events_scraper = match config.components.l1_events_scraper.execution_mode {
+        ActiveComponentExecutionMode::Enabled => {
+            // TODO(guyn): make base layer config a pointer, to be included in the scraper config.
+            let base_layer_config =
+                config.base_layer_config.as_ref().expect("Base Layer config should be set");
+            // TODO(guyn): we are left in a weird situation in which the base layer config has a
+            // list of URLs but the l1 endpoing monitor also has such a list, and we use the latter.
+            // This will all go away in a subsequent PR where we remove the endpoint monitor.
+            let l1_events_scraper_config = config
+                .l1_events_scraper_config
+                .as_ref()
+                .expect("L1 Events Scraper config should be set");
+            let l1_events_provider_client = clients.get_l1_events_provider_shared_client().unwrap();
+            let base_layer = EthereumBaseLayerContract::new(base_layer_config.clone());
+            let cyclic_base_layer_wrapper = CyclicBaseLayerWrapper::new(
+                base_layer,
+                base_layer_config.retry_primary_interval_seconds,
+                ScraperLabel::L1Events,
+            );
+
+            Some(
+                L1EventsScraper::new(
+                    l1_events_scraper_config.clone(),
+                    l1_events_provider_client,
+                    cyclic_base_layer_wrapper,
+                    event_identifiers_to_track(),
+                )
+                .await
+                .unwrap(),
+            )
+        }
+        ActiveComponentExecutionMode::Disabled => {
+            assert!(
+                config.l1_events_scraper_config.is_none(),
+                "L1 Events Scraper config should not be set"
+            );
+            None
+        }
+    };
+
+    let mempool = match config.components.mempool.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+            let mempool_config =
+                config.mempool_config.as_ref().expect("Mempool config should be set");
+            let config_manager_client = clients
+                .get_config_manager_shared_client()
+                .expect("Config Manager client should be available");
+            let mempool_p2p_propagator_client = clients
+                .get_mempool_p2p_propagator_shared_client()
+                .expect("Propagator client should be available");
+            let mempool = create_mempool(
+                mempool_config.clone(),
+                mempool_p2p_propagator_client,
+                config_manager_client,
+            );
+            Some(mempool)
+        }
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => {
+            assert!(config.mempool_config.is_none(), "Mempool config should not be set");
+            None
+        }
+    };
+
+    let (mempool_p2p_propagator, mempool_p2p_runner) =
+        match config.components.mempool_p2p.execution_mode {
+            ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+            | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+                let mempool_p2p_config =
+                    config.mempool_p2p_config.as_ref().expect("Mempool P2P config should be set");
+                let gateway_client = clients
+                    .get_gateway_shared_client()
+                    .expect("Gateway client should be available");
+                let class_manager_client = clients
+                    .get_class_manager_shared_client()
+                    .expect("Class Manager client should be available");
+                let proof_manager_client = clients
+                    .get_proof_manager_shared_client()
+                    .expect("Proof Manager client should be available");
+                let mempool_p2p_propagator_client = clients
+                    .get_mempool_p2p_propagator_shared_client()
+                    .expect("Mempool P2p Propagator client should be available");
+                let (mempool_p2p_propagator, mempool_p2p_runner) = create_p2p_propagator_and_runner(
+                    mempool_p2p_config.clone(),
+                    gateway_client,
+                    class_manager_client,
+                    proof_manager_client,
+                    mempool_p2p_propagator_client,
+                );
+                (Some(mempool_p2p_propagator), Some(mempool_p2p_runner))
+            }
+            ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => {
+                (None, None)
+            }
+        };
+
+    let monitoring_endpoint = match config.components.monitoring_endpoint.execution_mode {
+        ActiveComponentExecutionMode::Enabled => {
+            let monitoring_endpoint_config = config
+                .monitoring_endpoint_config
+                .as_ref()
+                .expect("Monitoring Endpoint config should be set");
+
+            let mempool_client = match config.components.mempool.execution_mode {
+                ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+                | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => Some(
+                    clients
+                        .get_mempool_shared_client()
+                        .expect("Mempool client should be available"),
+                ),
+                ReactiveComponentExecutionMode::Disabled
+                | ReactiveComponentExecutionMode::Remote => None,
+            };
+
+            let l1_events_provider_client =
+                match config.components.l1_events_provider.execution_mode {
+                    ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+                    | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => Some(
+                        clients
+                            .get_l1_events_provider_shared_client()
+                            .expect("L1 Provider client should be available"),
+                    ),
+                    ReactiveComponentExecutionMode::Disabled
+                    | ReactiveComponentExecutionMode::Remote => None,
+                };
+
+            Some(create_monitoring_endpoint(
+                monitoring_endpoint_config.clone(),
+                VERSION_FULL,
+                prometheus_handle,
+                mempool_client,
+                l1_events_provider_client,
+            ))
+        }
+        ActiveComponentExecutionMode::Disabled => None,
+    };
+
+    let proof_manager = match config.components.proof_manager.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+            let proof_manager_config =
+                config.proof_manager_config.as_ref().expect("Proof Manager config should be set");
+            Some(ProofManager::new(proof_manager_config.clone()))
+        }
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => {
+            assert!(
+                config.proof_manager_config.is_none(),
+                "Proof Manager config should not be set"
+            );
+            None
+        }
+    };
+
+    let sierra_compiler = match config.components.sierra_compiler.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+            let sierra_compiler_config = config
+                .sierra_compiler_config
+                .as_ref()
+                .expect("Sierra Compiler config should be set");
+            Some(create_sierra_compiler(sierra_compiler_config.clone()))
+        }
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => {
+            assert!(
+                config.sierra_compiler_config.is_none(),
+                "Sierra Compiler config should not be set"
+            );
+            None
+        }
+    };
+
+    let signature_manager = match config.components.signature_manager.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+            Some(create_signature_manager())
+        }
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => None,
+    };
+
+    let (state_sync, state_sync_runner) = match config.components.state_sync.execution_mode {
+        ReactiveComponentExecutionMode::LocalExecutionWithRemoteDisabled
+        | ReactiveComponentExecutionMode::LocalExecutionWithRemoteEnabled => {
+            let state_sync_config =
+                config.state_sync_config.as_ref().expect("State Sync config should be set");
+            let class_manager_client = clients
+                .get_class_manager_shared_client()
+                .expect("Class Manager client should be available");
+            let config_manager_client = clients
+                .get_config_manager_shared_client()
+                .expect("Config Manager client should be available");
+            let (state_sync, state_sync_runner) = create_state_sync_and_runner(
+                state_sync_config.clone(),
+                class_manager_client,
+                config_manager_client,
+            );
+            (Some(state_sync), Some(state_sync_runner))
+        }
+        ReactiveComponentExecutionMode::Disabled | ReactiveComponentExecutionMode::Remote => {
+            (None, None)
+        }
+    };
+
+    SequencerNodeComponents {
+        batcher,
+        class_manager,
+        committer,
+        config_manager,
+        config_manager_runner,
+        consensus_manager,
+        gateway,
+        http_server,
+        l1_events_scraper,
+        l1_events_provider,
+        l1_gas_price_scraper,
+        l1_gas_price_provider,
+        mempool,
+        monitoring_endpoint,
+        mempool_p2p_propagator,
+        mempool_p2p_runner,
+        proof_manager,
+        sierra_compiler,
+        signature_manager,
+        state_sync,
+        state_sync_runner,
+    }
+}

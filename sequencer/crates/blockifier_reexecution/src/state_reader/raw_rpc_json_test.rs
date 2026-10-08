@@ -1,0 +1,183 @@
+use std::collections::HashMap;
+
+use assert_matches::assert_matches;
+use blockifier::state::cached_state::StateMaps;
+use pretty_assertions::assert_eq;
+use rstest::{fixture, rstest};
+use starknet_api::block::{BlockInfo, BlockNumber};
+use starknet_api::serde_utils::deserialize_transaction_json_to_starknet_api_tx;
+use starknet_api::test_utils::read_json_file;
+use starknet_api::transaction::{
+    DeclareTransaction,
+    DeployAccountTransaction,
+    InvokeTransaction,
+    Transaction,
+};
+use starknet_api::{class_hash, compiled_class_hash, contract_address, felt, nonce, storage_key};
+use starknet_core::types::ContractClass;
+
+use crate::compile::legacy_to_contract_class_v0;
+use crate::state_reader::rpc_objects::BlockHeader;
+
+#[fixture]
+fn block_header() -> BlockHeader {
+    read_json_file("raw_rpc_json_objects/block_header.json")
+}
+
+#[fixture]
+fn deprecated_contract_class() -> ContractClass {
+    read_json_file("raw_rpc_json_objects/deprecated_contract_class.json")
+}
+
+/// Test that deserialize block header from JSON file works(in the fixture).
+#[rstest]
+fn test_deserialize_block_header(block_header: BlockHeader) {
+    assert_eq!(block_header.block_number, BlockNumber(700000));
+}
+
+/// Test that converting a block header to block info works.
+#[rstest]
+fn test_block_header_to_block_info(block_header: BlockHeader) {
+    let block_info: BlockInfo =
+        block_header.try_into().expect("Failed to convert BlockHeader to block info");
+    // Sanity check.
+    assert_eq!(block_info.block_number, BlockNumber(700000));
+}
+
+#[rstest]
+fn test_compile_deprecated_contract_class(deprecated_contract_class: ContractClass) {
+    match deprecated_contract_class {
+        ContractClass::Legacy(legacy) => {
+            // Compile the contract class.
+            assert!(legacy_to_contract_class_v0(legacy).is_ok());
+        }
+        _ => panic!("Expected a legacy contract class"),
+    }
+}
+
+#[test]
+fn deserialize_invoke_txs() {
+    let raw_transactions =
+        read_json_file::<_, serde_json::Value>("raw_rpc_json_objects/transactions.json");
+    let invoke_tx_v1 =
+        deserialize_transaction_json_to_starknet_api_tx(raw_transactions["invoke_v1"].clone())
+            .expect("Failed to deserialize invoke v1 tx");
+
+    assert_matches!(invoke_tx_v1, Transaction::Invoke(InvokeTransaction::V1(..)));
+
+    let invoke_tx_v3 =
+        deserialize_transaction_json_to_starknet_api_tx(raw_transactions["invoke_v3"].clone())
+            .expect("Failed to deserialize invoke v3 tx");
+
+    assert_matches!(invoke_tx_v3, Transaction::Invoke(InvokeTransaction::V3(..)));
+}
+
+/// Verifies that a raw `INVOKE_TXN_V3` RPC response containing the optional `proof_facts`
+/// field (returned only when the request includes `response_flags: ["INCLUDE_PROOF_FACTS"]`,
+/// per Starknet RPC v0.10) round-trips into an `InvokeTransactionV3` with non-empty
+/// `proof_facts`.
+#[test]
+fn deserialize_invoke_v3_with_proof_facts() {
+    let raw_transactions =
+        read_json_file::<_, serde_json::Value>("raw_rpc_json_objects/transactions.json");
+    let raw = raw_transactions["invoke_v3_with_proof_facts"].clone();
+    let expected_proof_facts_len = raw["proof_facts"].as_array().expect("proof_facts array").len();
+
+    let tx = deserialize_transaction_json_to_starknet_api_tx(raw)
+        .expect("Failed to deserialize invoke v3 tx with proof_facts");
+
+    let invoke_v3 = assert_matches!(
+        tx,
+        Transaction::Invoke(InvokeTransaction::V3(invoke_v3)) => invoke_v3
+    );
+    assert_eq!(invoke_v3.proof_facts.0.len(), expected_proof_facts_len);
+}
+
+#[rstest]
+fn deserialize_deploy_account_txs(
+    #[values("deploy_account_v1", "deploy_account_v3")] deploy_account_version: &str,
+) {
+    let deploy_account = deserialize_transaction_json_to_starknet_api_tx(
+        read_json_file::<_, serde_json::Value>("raw_rpc_json_objects/transactions.json")
+            [deploy_account_version]
+            .clone(),
+    )
+    .unwrap_or_else(|_| panic!("Failed to deserialize {deploy_account_version} tx"));
+
+    match deploy_account_version {
+        "deploy_account_v1" => {
+            assert_matches!(
+                deploy_account,
+                Transaction::DeployAccount(DeployAccountTransaction::V1(..))
+            )
+        }
+        "deploy_account_v3" => {
+            assert_matches!(
+                deploy_account,
+                Transaction::DeployAccount(DeployAccountTransaction::V3(..))
+            )
+        }
+        _ => panic!("Unknown scenario '{deploy_account_version}'"),
+    }
+}
+
+#[rstest]
+fn deserialize_declare_txs(
+    #[values("declare_v1", "declare_v2", "declare_v3")] declare_version: &str,
+) {
+    let declare_tx = deserialize_transaction_json_to_starknet_api_tx(
+        read_json_file::<_, serde_json::Value>("raw_rpc_json_objects/transactions.json")
+            [declare_version]
+            .clone(),
+    )
+    .unwrap_or_else(|_| panic!("Failed to deserialize {declare_version} tx"));
+
+    match declare_version {
+        "declare_v1" => {
+            assert_matches!(declare_tx, Transaction::Declare(DeclareTransaction::V1(..)))
+        }
+        "declare_v2" => {
+            assert_matches!(declare_tx, Transaction::Declare(DeclareTransaction::V2(..)))
+        }
+        "declare_v3" => {
+            assert_matches!(declare_tx, Transaction::Declare(DeclareTransaction::V3(..)))
+        }
+        _ => panic!("Unknown scenario '{declare_version}'"),
+    }
+}
+
+#[test]
+fn deserialize_l1_handler_tx() {
+    let l1_handler_tx = deserialize_transaction_json_to_starknet_api_tx(
+        read_json_file::<_, serde_json::Value>("raw_rpc_json_objects/transactions.json")
+            ["l1_handler"]
+            .clone(),
+    )
+    .expect("Failed to deserialize l1 handler tx");
+
+    assert_matches!(l1_handler_tx, Transaction::L1Handler(..));
+}
+
+#[rstest]
+fn serialize_state_maps() {
+    let nonces = HashMap::from([(contract_address!(1_u8), nonce!(1_u8))]);
+    let class_hashes = HashMap::from([(contract_address!(1_u8), class_hash!(27_u8))]);
+    let compiled_class_hashes = HashMap::from([(class_hash!(27_u8), compiled_class_hash!(27_u8))]);
+    let declared_contracts = HashMap::from([(class_hash!(27_u8), true)]);
+    let storage = HashMap::from([
+        ((contract_address!(1_u8), storage_key!(27_u8)), felt!(1_u8)),
+        ((contract_address!(30_u8), storage_key!(27_u8)), felt!(2_u8)),
+        ((contract_address!(30_u8), storage_key!(28_u8)), felt!(3_u8)),
+    ]);
+
+    let original_state_maps =
+        StateMaps { nonces, class_hashes, storage, compiled_class_hashes, declared_contracts };
+
+    let json =
+        serde_json::to_string_pretty(&original_state_maps).expect("Failed to serialize state maps");
+
+    let deserialized_state_maps: StateMaps =
+        serde_json::from_str(&json).expect("Failed to deserialize state maps");
+
+    assert_eq!(original_state_maps, deserialized_state_maps);
+}

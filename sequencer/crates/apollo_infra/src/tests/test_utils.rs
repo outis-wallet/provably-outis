@@ -1,0 +1,448 @@
+use std::net::{IpAddr, SocketAddr};
+use std::os::unix::io::BorrowedFd;
+use std::sync::Arc;
+use std::time::Duration;
+
+use apollo_infra_utils::test_utils::{AvailablePorts, TestIdentifier};
+use apollo_metrics::generate_permutation_labels;
+use apollo_metrics::metrics::{
+    LabeledMetricHistogram,
+    MetricCounter,
+    MetricGauge,
+    MetricHistogram,
+    MetricScope,
+};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use socket2::SockRef;
+use starknet_types_core::felt::Felt;
+use strum::{AsRefStr, EnumDiscriminants, EnumIter, IntoStaticStr, VariantNames};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
+
+use crate::component_client::{ClientResult, RemoteClientConfig, RemoteComponentClient};
+use crate::component_definitions::{ComponentRequestHandler, ComponentStarter, PrioritizedRequest};
+use crate::component_server::RemoteServerConfig;
+use crate::metrics::{
+    LocalClientMetrics,
+    LocalServerMetrics,
+    RemoteClientMetrics,
+    RemoteServerMetrics,
+};
+use crate::requests::LABEL_NAME_REQUEST_VARIANT;
+use crate::{impl_debug_for_infra_requests_and_responses, impl_labeled_request};
+
+pub(crate) type ValueA = Felt;
+pub(crate) type ValueB = Felt;
+pub(crate) type ResultA = ClientResult<ValueA>;
+pub(crate) type ResultB = ClientResult<ValueB>;
+pub(crate) type ComponentAClient = RemoteComponentClient<ComponentARequest, ComponentAResponse>;
+pub(crate) type ComponentBClient = RemoteComponentClient<ComponentBRequest, ComponentBResponse>;
+
+pub(crate) const VALID_VALUE_A: ValueA = Felt::ONE;
+pub(crate) const MAX_CONCURRENCY: usize = 10;
+
+pub(crate) const FAST_FAILING_CLIENT_CONFIG: RemoteClientConfig = RemoteClientConfig {
+    retries: 0,
+    idle_connections: 0,
+    keepalive_timeout_ms: 0,
+    max_retry_interval_ms: 0,
+    initial_retry_delay_ms: 0,
+    attempts_per_log: 1,
+    connection_timeout_ms: 500,
+    request_timeout_ms: 1000,
+    set_tcp_nodelay: true,
+    max_response_body_bytes: usize::MAX,
+};
+
+#[derive(Serialize, Deserialize, Clone, AsRefStr, EnumDiscriminants)]
+#[strum_discriminants(
+    name(ComponentARequestLabelValue),
+    derive(IntoStaticStr, EnumIter, VariantNames),
+    strum(serialize_all = "snake_case")
+)]
+pub enum ComponentARequest {
+    AGetValue,
+}
+
+generate_permutation_labels! {
+    COMPONENT_A_REQUEST_LABELS,
+    (LABEL_NAME_REQUEST_VARIANT, ComponentARequestLabelValue),
+}
+
+impl_debug_for_infra_requests_and_responses!(ComponentARequest);
+impl_labeled_request!(ComponentARequest, ComponentARequestLabelValue);
+impl PrioritizedRequest for ComponentARequest {}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ComponentAResponse {
+    AGetValue(ValueA),
+}
+
+#[derive(Serialize, Deserialize, Clone, AsRefStr, EnumDiscriminants)]
+#[strum_discriminants(
+    name(ComponentBRequestLabelValue),
+    derive(IntoStaticStr, EnumIter, VariantNames),
+    strum(serialize_all = "snake_case")
+)]
+pub enum ComponentBRequest {
+    BGetValue,
+    BSetValue(ValueB),
+}
+
+generate_permutation_labels! {
+    COMPONENT_B_REQUEST_LABELS,
+    (LABEL_NAME_REQUEST_VARIANT, ComponentBRequestLabelValue),
+}
+
+impl_debug_for_infra_requests_and_responses!(ComponentBRequest);
+impl_labeled_request!(ComponentBRequest, ComponentBRequestLabelValue);
+impl PrioritizedRequest for ComponentBRequest {}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ComponentBResponse {
+    BGetValue(ValueB),
+    BSetValue,
+}
+
+#[async_trait]
+pub(crate) trait ComponentAClientTrait: Send + Sync {
+    async fn a_get_value(&self) -> ResultA;
+}
+
+#[async_trait]
+pub(crate) trait ComponentBClientTrait: Send + Sync {
+    async fn b_get_value(&self) -> ResultB;
+    async fn b_set_value(&self, value: ValueB) -> ClientResult<()>;
+}
+
+pub(crate) struct ComponentA {
+    b: Box<dyn ComponentBClientTrait>,
+    sem: Option<Arc<Semaphore>>,
+}
+
+impl ComponentA {
+    pub fn new(b: Box<dyn ComponentBClientTrait>) -> Self {
+        Self { b, sem: None }
+    }
+
+    pub async fn a_get_value(&self) -> ValueA {
+        self.b.b_get_value().await.unwrap()
+    }
+
+    pub fn with_semaphore(b: Box<dyn ComponentBClientTrait>, sem: Arc<Semaphore>) -> Self {
+        Self { b, sem: Some(sem) }
+    }
+}
+
+impl ComponentStarter for ComponentA {}
+
+pub(crate) struct ComponentB {
+    value: ValueB,
+    _a: Box<dyn ComponentAClientTrait>,
+}
+
+impl ComponentB {
+    pub fn new(value: ValueB, a: Box<dyn ComponentAClientTrait>) -> Self {
+        Self { value, _a: a }
+    }
+
+    pub fn b_get_value(&self) -> ValueB {
+        self.value
+    }
+
+    pub fn b_set_value(&mut self, value: ValueB) {
+        self.value = value;
+    }
+}
+
+impl ComponentStarter for ComponentB {}
+
+pub(crate) async fn test_a_b_functionality(
+    a_client: impl ComponentAClientTrait,
+    b_client: impl ComponentBClientTrait,
+    expected_value: ValueA,
+) {
+    // Check the setup value in component B through client A.
+    assert_eq!(a_client.a_get_value().await.unwrap(), expected_value);
+
+    let new_expected_value: ValueA = expected_value + 1;
+    // Check that setting a new value to component B succeeds.
+    assert!(b_client.b_set_value(new_expected_value).await.is_ok());
+    // Check the new value in component B through client A.
+    assert_eq!(a_client.a_get_value().await.unwrap(), new_expected_value);
+}
+
+#[async_trait]
+impl ComponentRequestHandler<ComponentARequest, ComponentAResponse> for ComponentA {
+    async fn handle_request(&mut self, request: ComponentARequest) -> ComponentAResponse {
+        match request {
+            ComponentARequest::AGetValue => {
+                if let Some(sem) = &self.sem {
+                    let _permit = sem.clone().acquire_owned().await.unwrap();
+                    let v = self.a_get_value().await;
+                    ComponentAResponse::AGetValue(v)
+                } else {
+                    ComponentAResponse::AGetValue(self.a_get_value().await)
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ComponentRequestHandler<ComponentBRequest, ComponentBResponse> for ComponentB {
+    async fn handle_request(&mut self, request: ComponentBRequest) -> ComponentBResponse {
+        match request {
+            ComponentBRequest::BGetValue => ComponentBResponse::BGetValue(self.b_get_value()),
+            ComponentBRequest::BSetValue(value) => {
+                self.b_set_value(value);
+                ComponentBResponse::BSetValue
+            }
+        }
+    }
+}
+
+// Define mock local server metrics.
+const TEST_MSGS_RECEIVED: MetricCounter = MetricCounter::new(
+    MetricScope::Infra,
+    "test_msgs_received",
+    "Test messages received counter",
+    0,
+);
+
+const TEST_MSGS_PROCESSED: MetricCounter = MetricCounter::new(
+    MetricScope::Infra,
+    "test_msgs_processed",
+    "Test messages processed counter",
+    0,
+);
+
+const TEST_HIGH_PRIORITY_QUEUE_DEPTH: MetricGauge = MetricGauge::new(
+    MetricScope::Infra,
+    "high_priority_queue_depth",
+    "Test high priority queue depth gauge",
+);
+
+const TEST_NORMAL_PRIORITY_QUEUE_DEPTH: MetricGauge = MetricGauge::new(
+    MetricScope::Infra,
+    "normal_priority_queue_depth",
+    "Test normal priority queue depth gauge",
+);
+
+const _TEST_PROCESSING_TIMES_SECS: MetricHistogram =
+    MetricHistogram::new(MetricScope::Infra, "processing_times", "Test processing time histogram");
+
+const TEST_PROCESSING_TIMES_SECS_LABELLED_A: LabeledMetricHistogram = LabeledMetricHistogram::new(
+    MetricScope::Infra,
+    "labeled_processing_times_a",
+    "Test processing time histogram for component A",
+    COMPONENT_A_REQUEST_LABELS,
+);
+
+const _TEST_PROCESSING_TIMES_SECS_LABELLED_B: LabeledMetricHistogram = LabeledMetricHistogram::new(
+    MetricScope::Infra,
+    "labeled_processing_times_b",
+    "Test processing time histogram for component B",
+    COMPONENT_B_REQUEST_LABELS,
+);
+
+const _TEST_QUEUEING_TIMES_SECS: MetricHistogram =
+    MetricHistogram::new(MetricScope::Infra, "queueing_times", "Test queueing time histogram");
+
+const TEST_QUEUEING_TIMES_SECS_LABELLED_A: LabeledMetricHistogram = LabeledMetricHistogram::new(
+    MetricScope::Infra,
+    "labeled_queueing_times_a",
+    "Test queueing time histogram for component A",
+    COMPONENT_A_REQUEST_LABELS,
+);
+
+const _TEST_QUEUEING_TIMES_SECS_LABELLED_B: LabeledMetricHistogram = LabeledMetricHistogram::new(
+    MetricScope::Infra,
+    "labeled_queueing_times_b",
+    "Test queueing time histogram for component B",
+    COMPONENT_B_REQUEST_LABELS,
+);
+
+// TODO(alonl): Fix only using component A metrics.
+pub(crate) const TEST_LOCAL_SERVER_METRICS: LocalServerMetrics = LocalServerMetrics::new(
+    &TEST_MSGS_RECEIVED,
+    &TEST_MSGS_PROCESSED,
+    &TEST_HIGH_PRIORITY_QUEUE_DEPTH,
+    &TEST_NORMAL_PRIORITY_QUEUE_DEPTH,
+    &TEST_PROCESSING_TIMES_SECS_LABELLED_A,
+    &TEST_QUEUEING_TIMES_SECS_LABELLED_A,
+);
+
+const REMOTE_TEST_MSGS_RECEIVED: MetricCounter = MetricCounter::new(
+    MetricScope::Infra,
+    "remote_test_msgs_received",
+    "Remote test messages received counter",
+    0,
+);
+
+const REMOTE_VALID_TEST_MSGS_RECEIVED: MetricCounter = MetricCounter::new(
+    MetricScope::Infra,
+    "remote_valid_test_msgs_received",
+    "Valid remote test messages received counter",
+    0,
+);
+
+const REMOTE_TEST_MSGS_PROCESSED: MetricCounter = MetricCounter::new(
+    MetricScope::Infra,
+    "remote_test_msgs_processed",
+    "Remote test messages processed counter",
+    0,
+);
+
+const REMOTE_NUMBER_OF_CONNECTIONS: MetricGauge = MetricGauge::new(
+    MetricScope::Infra,
+    "remote_number_of_connections",
+    "Remote number of connections gauge",
+);
+
+const EXAMPLE_HISTOGRAM_METRIC: MetricHistogram = MetricHistogram::new(
+    MetricScope::Infra,
+    "example_histogram_metric",
+    "Example histogram metrics",
+);
+
+pub(crate) const TEST_REMOTE_SERVER_METRICS: RemoteServerMetrics = RemoteServerMetrics::new(
+    &REMOTE_TEST_MSGS_RECEIVED,
+    &REMOTE_VALID_TEST_MSGS_RECEIVED,
+    &REMOTE_TEST_MSGS_PROCESSED,
+    &REMOTE_NUMBER_OF_CONNECTIONS,
+);
+
+pub(crate) const TEST_REMOTE_CLIENT_RESPONSE_TIMES: LabeledMetricHistogram =
+    LabeledMetricHistogram::new(
+        MetricScope::Infra,
+        "test_remote_client_response_times",
+        "Test remote client response times histogram",
+        COMPONENT_A_REQUEST_LABELS,
+    );
+
+pub(crate) const TEST_REMOTE_CLIENT_COMMUNICATION_FAILURE_TIMES: LabeledMetricHistogram =
+    LabeledMetricHistogram::new(
+        MetricScope::Infra,
+        "test_remote_client_communication_failure_times",
+        "Test remote client communication failure times histogram",
+        COMPONENT_A_REQUEST_LABELS,
+    );
+
+pub(crate) const TEST_REMOTE_CLIENT_METRICS: RemoteClientMetrics = RemoteClientMetrics::new(
+    &EXAMPLE_HISTOGRAM_METRIC,
+    &TEST_REMOTE_CLIENT_RESPONSE_TIMES,
+    &TEST_REMOTE_CLIENT_COMMUNICATION_FAILURE_TIMES,
+);
+
+// Define mock local client metrics.
+const TEST_LOCAL_CLIENT_RESPONSE_TIMES: LabeledMetricHistogram = LabeledMetricHistogram::new(
+    MetricScope::Infra,
+    "test_local_client_response_times",
+    "Test local client response times histogram",
+    COMPONENT_A_REQUEST_LABELS,
+);
+
+pub(crate) const TEST_LOCAL_CLIENT_METRICS: LocalClientMetrics =
+    LocalClientMetrics::new(&TEST_LOCAL_CLIENT_RESPONSE_TIMES);
+
+// Creates an `AvailablePorts` instance with a unique `instance_index`.
+// Each test that binds ports should use a different instance_index to get disjoint port ranges.
+// This is necessary to allow running tests concurrently in different processes, which do not have a
+// shared memory.
+pub(crate) fn available_ports_factory(instance_index: u16) -> AvailablePorts {
+    AvailablePorts::new(TestIdentifier::InfraUnitTests.into(), instance_index)
+}
+
+pub(crate) fn dummy_remote_server_config(ip: IpAddr, max_concurrency: usize) -> RemoteServerConfig {
+    RemoteServerConfig { bind_ip: ip, max_concurrency, ..Default::default() }
+}
+
+/// Returns the `TCP_KEEPIDLE` duration of the outbound socket in this process that is connected
+/// to `server_addr`, or `None` if no such socket is found or `SO_KEEPALIVE` is not enabled.
+pub(crate) fn client_socket_keepalive_time(server_addr: SocketAddr) -> Option<Duration> {
+    for fd in 0_i32..4096 {
+        // SAFETY: We only borrow the fd transiently to read socket options; `SockRef` does
+        // not take ownership of or close the fd. Invalid fds produce errors from `peer_addr`
+        // and `keepalive`, which we handle gracefully via `.ok()` / `.unwrap_or`.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+        let sock = SockRef::from(&borrowed);
+        if sock
+            .peer_addr()
+            .ok()
+            .and_then(|a: socket2::SockAddr| a.as_socket())
+            .is_some_and(|a| a == server_addr)
+        {
+            return sock.keepalive().unwrap_or(false).then(|| sock.keepalive_time().ok()).flatten();
+        }
+    }
+    None
+}
+
+/// Connects a raw TCP stream to `addr`, performs the HTTP/2 connection preface and SETTINGS
+/// exchange, then returns the stream without ever responding to PING frames — simulating a
+/// zombie connection.
+pub(crate) async fn connect_zombie(addr: SocketAddr) -> TcpStream {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    // HTTP/2 client connection preface.
+    stream.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").await.unwrap();
+    // Empty SETTINGS frame: length=0, type=0x4 (SETTINGS), flags=0x0, stream_id=0.
+    stream.write_all(&[0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]).await.unwrap();
+
+    // Read server frames, accumulating bytes to handle fragmentation. Once we see the
+    // server's SETTINGS frame, respond with SETTINGS_ACK and stop — becoming a zombie that
+    // ignores all subsequent frames (including PING).
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    'done: loop {
+        let n = stream.read(&mut tmp).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+
+        let mut pos = 0;
+        while pos + 9 <= buf.len() {
+            let length = (usize::from(buf[pos]) << 16)
+                | (usize::from(buf[pos + 1]) << 8)
+                | usize::from(buf[pos + 2]);
+            if pos + 9 + length > buf.len() {
+                break; // incomplete frame, read more
+            }
+            let frame_type = buf[pos + 3];
+            let flags = buf[pos + 4];
+            if frame_type == 0x04 /* SETTINGS */ && flags & 0x01 == 0
+            // not ACK
+            {
+                // Send SETTINGS_ACK and stop responding to anything.
+                stream
+                    .write_all(&[0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00])
+                    .await
+                    .unwrap();
+                break 'done;
+            }
+            pos += 9 + length;
+        }
+    }
+    stream
+}
+
+/// Returns `true` if `data` contains at least one HTTP/2 GOAWAY frame (type `0x07`).
+pub(crate) fn contains_goaway_frame(data: &[u8]) -> bool {
+    const GOAWAY_FRAME_TYPE: u8 = 0x07;
+    const H2_FRAME_HEADER_LEN: usize = 9;
+    let mut pos = 0;
+    while pos + H2_FRAME_HEADER_LEN <= data.len() {
+        let payload_len = (usize::from(data[pos]) << 16)
+            | (usize::from(data[pos + 1]) << 8)
+            | usize::from(data[pos + 2]);
+        if data[pos + 3] == GOAWAY_FRAME_TYPE {
+            return true;
+        }
+        pos += H2_FRAME_HEADER_LEN + payload_len;
+    }
+    false
+}

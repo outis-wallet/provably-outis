@@ -1,0 +1,266 @@
+use rstest::rstest;
+use starknet_types_core::felt::Felt;
+
+use super::{
+    concat_counts,
+    extract_event_count_from_concatenated_counts,
+    extract_l1_da_mode_from_concatenated_counts,
+};
+use crate::block::{BlockHash, BlockNumber, BlockTimestamp, GasPricePerToken, StarknetVersion};
+use crate::block_hash::block_hash_calculator::{
+    calculate_block_commitments,
+    calculate_block_hash,
+    BlockHashVersion,
+    BlockHeaderCommitments,
+    PartialBlockHashComponents,
+    TransactionHashingData,
+};
+use crate::block_hash::test_utils::{get_state_diff, get_transaction_output};
+use crate::core::{
+    ContractAddress,
+    EventCommitment,
+    GlobalRoot,
+    PatriciaKey,
+    ReceiptCommitment,
+    SequencerContractAddress,
+    StateDiffCommitment,
+    TransactionCommitment,
+};
+use crate::data_availability::L1DataAvailabilityMode;
+use crate::hash::PoseidonHash;
+use crate::transaction::fields::TransactionSignature;
+use crate::{felt, tx_hash};
+
+/// Macro to test if changing any field in the partial block hash components, state root or parent
+/// hash results a change in the block hash.
+/// The macro clones the original partial block hash components, modifies each specified field,
+/// and asserts that the block hash changes as a result.
+macro_rules! test_hash_changes {
+    (
+        PartialBlockHashComponents { $($partial_block_hash_components_field:ident: $partial_block_hash_components_value:expr),* $(,)? },
+        state_root: $state_root:expr,
+        previous_block_hash: $previous_block_hash:expr
+    ) => {
+        {
+            let partial_block_hash_components = PartialBlockHashComponents {
+                starknet_version: BlockHashVersion::V0_13_4.into(),
+                $(
+                    $partial_block_hash_components_field: $partial_block_hash_components_value,
+                )*
+            };
+            let state_root = $state_root;
+            let previous_block_hash = $previous_block_hash;
+            let original_hash = calculate_block_hash(&partial_block_hash_components, state_root, previous_block_hash).unwrap();
+            $(
+                let mut modified_partial_block_hash_components = partial_block_hash_components.clone();
+                modified_partial_block_hash_components.$partial_block_hash_components_field = Default::default();
+                let new_hash = calculate_block_hash(&modified_partial_block_hash_components, state_root, previous_block_hash).unwrap();
+                assert_ne!(original_hash, new_hash, concat!("Hash should change when ", stringify!($partial_block_hash_components_field), " is modified"));
+            )*
+            let modified_state_root = GlobalRoot::default();
+            let new_hash = calculate_block_hash(&partial_block_hash_components, modified_state_root, previous_block_hash).unwrap();
+            // Hash should change.
+            assert_ne!(original_hash, new_hash, "Hash should change when state_root is modified");
+            let modified_previous_block_hash = BlockHash::default();
+            let new_hash = calculate_block_hash(&partial_block_hash_components, state_root, modified_previous_block_hash).unwrap();
+            // Hash should change.
+            assert_ne!(original_hash, new_hash, "Hash should change when previous_block_hash is modified");
+        }
+    };
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_block_hash_regression(
+    #[values(BlockHashVersion::V0_13_2, BlockHashVersion::V0_13_4)]
+    block_hash_version: BlockHashVersion,
+) {
+    let state_root = GlobalRoot(Felt::from(2_u8));
+    let l1_da_mode = L1DataAvailabilityMode::Blob;
+    let transactions_data = vec![TransactionHashingData {
+        transaction_signature: TransactionSignature(vec![Felt::TWO, Felt::THREE].into()),
+        transaction_output: get_transaction_output(),
+        transaction_hash: tx_hash!(1),
+    }];
+
+    let state_diff = get_state_diff();
+    let (block_commitments, _) = calculate_block_commitments(
+        &transactions_data,
+        state_diff,
+        l1_da_mode,
+        &block_hash_version.to_owned().into(),
+    )
+    .await;
+    let previous_block_hash = BlockHash(Felt::from(11_u8));
+
+    let partial_block_hash_components = PartialBlockHashComponents {
+        block_number: BlockNumber(1_u64),
+        sequencer: SequencerContractAddress(ContractAddress(PatriciaKey::from(3_u8))),
+        timestamp: BlockTimestamp(4),
+        l1_gas_price: GasPricePerToken { price_in_fri: 6_u8.into(), price_in_wei: 7_u8.into() },
+        l1_data_gas_price: GasPricePerToken {
+            price_in_fri: 10_u8.into(),
+            price_in_wei: 9_u8.into(),
+        },
+        l2_gas_price: GasPricePerToken { price_in_fri: 11_u8.into(), price_in_wei: 12_u8.into() },
+        starknet_version: block_hash_version.clone().into(),
+        header_commitments: block_commitments,
+    };
+
+    let expected_hash = match block_hash_version {
+        BlockHashVersion::V0_13_2 => {
+            felt!("0xe248d6ce583f8fa48d1d401d4beb9ceced3733e38d8eacb0d8d3669a7d901c")
+        }
+        BlockHashVersion::V0_13_4 => {
+            felt!("0x3d6174623c812f5dc03fa3faa07c42c06fd90ad425629ee5f39e149df65c3ca")
+        }
+    };
+
+    assert_eq!(
+        BlockHash(expected_hash),
+        calculate_block_hash(&partial_block_hash_components, state_root, previous_block_hash)
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_tx_commitment_with_an_empty_signature() {
+    let transactions_data = vec![TransactionHashingData {
+        transaction_signature: TransactionSignature::default(),
+        transaction_output: get_transaction_output(),
+        transaction_hash: tx_hash!(1),
+    }];
+    let (block_commitments, _) = calculate_block_commitments(
+        &transactions_data,
+        get_state_diff(),
+        L1DataAvailabilityMode::Blob,
+        &StarknetVersion::V0_13_2,
+    )
+    .await;
+    let actual_tx_commitment = block_commitments.transaction_commitment;
+    let expected_tx_commitment_hash_when_signature_vec_of_zero =
+        felt!("0x30259cdf52543aa0866b46a839c5e089184408a97945b4ffa8dcae78177dfde");
+    assert_eq!(
+        TransactionCommitment(expected_tx_commitment_hash_when_signature_vec_of_zero),
+        actual_tx_commitment
+    );
+}
+
+#[test]
+fn l2_gas_price_pre_v0_13_4() {
+    let partial_hash_components = {
+        |l2_gas_price: u8| PartialBlockHashComponents {
+            l2_gas_price: GasPricePerToken {
+                price_in_fri: l2_gas_price.into(),
+                price_in_wei: l2_gas_price.into(),
+            },
+            starknet_version: BlockHashVersion::V0_13_2.into(),
+            ..Default::default()
+        }
+    };
+    assert_eq!(
+        calculate_block_hash(
+            &partial_hash_components(1),
+            GlobalRoot::default(),
+            BlockHash::default()
+        ),
+        calculate_block_hash(
+            &partial_hash_components(2),
+            GlobalRoot::default(),
+            BlockHash::default()
+        )
+    );
+}
+
+#[tokio::test]
+async fn block_commitment_timings_are_non_negative() {
+    let transactions_data = vec![TransactionHashingData {
+        transaction_signature: TransactionSignature(vec![Felt::TWO, Felt::THREE].into()),
+        transaction_output: get_transaction_output(),
+        transaction_hash: tx_hash!(1),
+    }];
+    let (_commitments, timings) = calculate_block_commitments(
+        &transactions_data,
+        get_state_diff(),
+        L1DataAvailabilityMode::Blob,
+        &StarknetVersion::V0_13_4,
+    )
+    .await;
+    assert!(
+        timings.transaction_commitment_duration.as_secs_f64() >= 0.0,
+        "transaction_commitment_duration should be non-negative"
+    );
+    assert!(
+        timings.event_commitment_duration.as_secs_f64() >= 0.0,
+        "event_commitment_duration should be non-negative"
+    );
+    assert!(
+        timings.receipt_commitment_duration.as_secs_f64() >= 0.0,
+        "receipt_commitment_duration should be non-negative"
+    );
+    assert!(
+        timings.state_diff_commitment_duration.as_secs_f64() >= 0.0,
+        "state_diff_commitment_duration should be non-negative"
+    );
+}
+
+#[test]
+fn concat_counts_test() {
+    let concated = concat_counts(4, 3, 2, L1DataAvailabilityMode::Blob);
+    let expected_felt = felt!("0x0000000000000004000000000000000300000000000000028000000000000000");
+    assert_eq!(concated, expected_felt)
+}
+
+#[rstest]
+#[case(0, 0, 0)]
+#[case(4, 3, 2)]
+#[case(0, usize::MAX, 0)]
+fn extract_event_count_from_concatenated_counts_test(
+    #[case] tx_count: usize,
+    #[case] event_count: usize,
+    #[case] state_diff_len: usize,
+) {
+    let concatenated =
+        concat_counts(tx_count, event_count, state_diff_len, L1DataAvailabilityMode::Blob);
+    assert_eq!(extract_event_count_from_concatenated_counts(&concatenated), event_count);
+}
+
+#[rstest]
+#[case(L1DataAvailabilityMode::Calldata)]
+#[case(L1DataAvailabilityMode::Blob)]
+fn extract_l1_da_mode_from_concatenated_counts_test(#[case] l1_da_mode: L1DataAvailabilityMode) {
+    // state_diff_length occupies the bytes just before the mode, so max it out to catch a
+    // bit-offset error. The transaction count stays zero to keep the felt below the prime.
+    let concatenated = concat_counts(0, usize::MAX, usize::MAX, l1_da_mode);
+    assert_eq!(extract_l1_da_mode_from_concatenated_counts(&concatenated), l1_da_mode);
+}
+
+/// Test that if one of the input to block hash changes, the hash changes.
+#[test]
+fn change_field_of_hash_input() {
+    // Set non-default values for the header and the commitments fields. Test that changing any of
+    // these fields changes the hash.
+    test_hash_changes!(
+        PartialBlockHashComponents {
+            header_commitments: BlockHeaderCommitments {
+                transaction_commitment: TransactionCommitment(Felt::ONE),
+                event_commitment: EventCommitment(Felt::ONE),
+                receipt_commitment: ReceiptCommitment(Felt::ONE),
+                state_diff_commitment: StateDiffCommitment(PoseidonHash(Felt::ONE)),
+                concatenated_counts: Felt::ONE
+            },
+            block_number: BlockNumber(1),
+            l1_gas_price: GasPricePerToken { price_in_fri: 1_u8.into(), price_in_wei: 1_u8.into() },
+            l1_data_gas_price: GasPricePerToken {
+                price_in_fri: 1_u8.into(),
+                price_in_wei: 1_u8.into(),
+            },
+            l2_gas_price: GasPricePerToken { price_in_fri: 1_u8.into(), price_in_wei: 1_u8.into() },
+            sequencer: SequencerContractAddress(ContractAddress::from(1_u128)),
+            timestamp: BlockTimestamp(1)
+        },
+        state_root: GlobalRoot(Felt::ONE),
+        previous_block_hash: BlockHash(Felt::ONE)
+    )
+    // TODO(Aviv, 10/06/2024): add tests that changes the first hash input, and the const zero.
+}

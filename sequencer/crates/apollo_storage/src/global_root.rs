@@ -1,0 +1,61 @@
+//! Interface for handling global root.
+//! Import [`GlobalRootStorageReader`] and [`GlobalRootStorageWriter`] to read and write
+//! data related to global root using a `StorageTxn`.
+
+use starknet_api::block::BlockNumber;
+use starknet_api::core::GlobalRoot;
+
+use crate::db::table_types::Table;
+use crate::db::RW;
+use crate::{MarkerKind, StorageResult, StorageTransaction};
+
+/// Interface for reading global root.
+pub trait GlobalRootStorageReader {
+    /// Returns the global root corresponding to the block number.
+    /// Returns `None` if the block number is not found.
+    fn get_global_root(&self, block_number: &BlockNumber) -> StorageResult<Option<GlobalRoot>>;
+}
+
+/// Interface for writing global root.
+pub trait GlobalRootStorageWriter
+where
+    Self: Sized,
+{
+    /// Inserts the global root corresponding to the given block number.
+    /// An error is returned if there is already a global root for given block number.
+    fn set_global_root(
+        self,
+        block_number: &BlockNumber,
+        global_root: GlobalRoot,
+    ) -> StorageResult<Self>;
+
+    /// Revert the global root corresponding to the given block number.
+    fn revert_global_root(self, block_number: &BlockNumber) -> StorageResult<Self>;
+}
+
+impl<T: StorageTransaction> GlobalRootStorageReader for T {
+    fn get_global_root(&self, block_number: &BlockNumber) -> StorageResult<Option<GlobalRoot>> {
+        let table = self.open_table(&self.tables().global_root)?;
+        Ok(table.get(self.txn(), block_number)?)
+    }
+}
+
+impl<T: StorageTransaction<Mode = RW>> GlobalRootStorageWriter for T {
+    fn set_global_root(
+        self,
+        block_number: &BlockNumber,
+        global_root: GlobalRoot,
+    ) -> StorageResult<Self> {
+        let table = self.open_table(&self.tables().global_root)?;
+        table.upsert(self.txn(), block_number, &global_root)?;
+        Ok(self)
+    }
+
+    fn revert_global_root(self, target_block_number: &BlockNumber) -> StorageResult<Self> {
+        let global_roots_table = self.open_table(&self.tables().global_root)?;
+        global_roots_table.delete(self.txn(), target_block_number)?;
+        let markers_table = self.open_table(&self.tables().markers)?;
+        markers_table.upsert(self.txn(), &MarkerKind::GlobalRoot, target_block_number)?;
+        Ok(self)
+    }
+}

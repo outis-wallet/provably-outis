@@ -1,0 +1,539 @@
+#[cfg(test)]
+mod test;
+
+use std::sync::Arc;
+
+use apollo_central_sync::sources::central::{CentralError, CentralSource};
+use apollo_central_sync::sources::pending::PendingSource;
+use apollo_central_sync::{StateSync as CentralStateSync, StateSyncError as CentralStateSyncError};
+use apollo_class_manager_types::SharedClassManagerClient;
+use apollo_config_manager_types::communication::SharedConfigManagerClient;
+use apollo_infra::component_definitions::ComponentStarter;
+use apollo_infra::component_server::WrapperServer;
+use apollo_network::metrics::{NetworkMetrics, SqmrNetworkMetrics};
+use apollo_network::network_manager::{NetworkError, NetworkManager};
+use apollo_p2p_sync::client::{P2pSyncClient, P2pSyncClientChannels, P2pSyncClientError};
+use apollo_p2p_sync::server::{P2pSyncServer, P2pSyncServerChannels};
+use apollo_p2p_sync::{Protocol, BUFFER_SIZE};
+use apollo_p2p_sync_config::config::P2pSyncClientConfig;
+use apollo_reverts::{revert_block, revert_blocks_and_eternal_pending, RevertComponentData};
+use apollo_rpc::{run_server, RpcConfig};
+use apollo_starknet_client::reader::objects::pending_data::{
+    PendingBlock,
+    PendingBlockOrDeprecated,
+};
+use apollo_starknet_client::reader::PendingData;
+use apollo_state_sync_config::config::{
+    CentralSyncClientConfig,
+    StateSyncConfig,
+    StateSyncStaticConfig,
+};
+use apollo_state_sync_metrics::metrics::{
+    register_metrics,
+    update_marker_metrics,
+    P2P_SYNC_NUM_ACTIVE_INBOUND_SESSIONS,
+    P2P_SYNC_NUM_ACTIVE_OUTBOUND_SESSIONS,
+    P2P_SYNC_NUM_BLACKLISTED_PEERS,
+    P2P_SYNC_NUM_CONNECTED_PEERS,
+    STATE_SYNC_REVERTED_TRANSACTIONS,
+    STATE_SYNC_REVERTED_UP_TO_AND_INCLUDING,
+};
+use apollo_state_sync_types::state_sync_types::SyncBlock;
+use apollo_storage::body::BodyStorageReader;
+use apollo_storage::header::HeaderStorageReader;
+use apollo_storage::metrics::SYNC_STORAGE_OPEN_READ_TRANSACTIONS;
+use apollo_storage::storage_reader_server::{
+    DynamicConfigError,
+    DynamicConfigProvider,
+    ServerConfig,
+    SharedDynamicConfigProvider,
+    StorageReaderServerDynamicConfig,
+};
+use apollo_storage::storage_reader_types::{
+    GenericStorageReaderServerHandler,
+    StorageReaderRequest,
+    StorageReaderResponse,
+};
+use apollo_storage::{
+    open_storage_with_metric_and_server,
+    StorageConfig,
+    StorageReader,
+    StorageWriter,
+};
+use async_trait::async_trait;
+use futures::channel::mpsc::Receiver;
+use futures::future::{self, pending, BoxFuture};
+use futures::never::Never;
+use futures::{FutureExt, StreamExt};
+use papyrus_common::pending_classes::PendingClasses;
+use starknet_api::block::{BlockHash, BlockHashAndNumber};
+use tokio::sync::RwLock;
+use tokio::task::AbortHandle;
+use tracing::instrument::Instrument;
+use tracing::{debug, info_span};
+
+struct StateSyncDynamicConfigProvider {
+    config_manager_client: SharedConfigManagerClient,
+}
+
+#[async_trait]
+impl DynamicConfigProvider for StateSyncDynamicConfigProvider {
+    async fn get_storage_reader_dynamic_config(
+        &self,
+    ) -> Result<StorageReaderServerDynamicConfig, DynamicConfigError> {
+        let config = self
+            .config_manager_client
+            .get_state_sync_dynamic_config()
+            .await
+            .map_err(|e| DynamicConfigError(e.to_string()))?;
+        Ok(config.storage_reader_server_dynamic_config)
+    }
+}
+
+pub struct StateSyncRunner {
+    network_future: BoxFuture<'static, Result<(), NetworkError>>,
+    // TODO(Matan): change client and server to requester and responder respectively
+    p2p_sync_client_future: BoxFuture<'static, Result<Never, P2pSyncClientError>>,
+    p2p_sync_server_future: BoxFuture<'static, Never>,
+    central_sync_client_future: BoxFuture<'static, Result<(), CentralStateSyncError>>,
+    new_block_dev_null_future: BoxFuture<'static, Never>,
+    rpc_server_future: BoxFuture<'static, ()>,
+    register_metrics_future: BoxFuture<'static, ()>,
+    /// Keep alive to maintain the storage reader server running.
+    #[allow(dead_code)]
+    storage_reader_server_handle: AbortHandle,
+}
+
+#[async_trait]
+impl ComponentStarter for StateSyncRunner {
+    async fn start(&mut self) {
+        (&mut self.register_metrics_future).await;
+        tokio::select! {
+            _ = &mut self.network_future => {
+                panic!("StateSyncRunner failed - network stopped unexpectedly");
+            }
+            _ = &mut self.p2p_sync_client_future => {
+                panic!("StateSyncRunner failed - p2p sync client stopped unexpectedly");
+            }
+            _never = &mut self.p2p_sync_server_future => {
+                unreachable!("Return type Never should never be constructed")
+            }
+            _ = &mut self.central_sync_client_future => {
+                panic!("StateSyncRunner failed - central sync client stopped unexpectedly");
+            }
+            _never = &mut self.new_block_dev_null_future => {
+                unreachable!("Return type Never should never be constructed")
+            }
+            _ = &mut self.rpc_server_future => {
+                panic!("JSON_RPC server stopped unexpectedly");
+            }
+        }
+    }
+}
+
+pub struct StateSyncResources {
+    pub storage_reader: StorageReader,
+    pub storage_writer: StorageWriter,
+    pub shared_highest_block: Arc<RwLock<Option<BlockHashAndNumber>>>,
+    pub pending_data: Arc<RwLock<PendingData>>,
+    pub pending_classes: Arc<RwLock<PendingClasses>>,
+    pub storage_reader_server_handle: AbortHandle,
+}
+
+impl StateSyncResources {
+    pub fn new(
+        storage_config: &StorageConfig,
+        storage_reader_server_config: ServerConfig,
+        dynamic_config_provider: SharedDynamicConfigProvider,
+    ) -> Self {
+        let (storage_reader, storage_writer, storage_reader_server) =
+            open_storage_with_metric_and_server::<
+                GenericStorageReaderServerHandler,
+                StorageReaderRequest,
+                StorageReaderResponse,
+            >(
+                storage_config.clone(),
+                &SYNC_STORAGE_OPEN_READ_TRANSACTIONS,
+                storage_reader_server_config,
+                dynamic_config_provider,
+            )
+            .expect("StateSyncRunner failed opening storage");
+        let storage_reader_server_handle = storage_reader_server.spawn();
+        let shared_highest_block = Arc::new(RwLock::new(None));
+        let pending_data = Arc::new(RwLock::new(PendingData {
+            // The pending data might change later to DeprecatedPendingBlock, depending on the
+            // response from the feeder gateway.
+            block: PendingBlockOrDeprecated::Current(PendingBlock {
+                parent_block_hash: BlockHash::GENESIS_PARENT_HASH,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+        let pending_classes = Arc::new(RwLock::new(PendingClasses::default()));
+        Self {
+            storage_reader,
+            storage_writer,
+            shared_highest_block,
+            pending_data,
+            pending_classes,
+            storage_reader_server_handle,
+        }
+    }
+}
+
+impl StateSyncRunner {
+    pub fn new(
+        config: StateSyncConfig,
+        new_block_receiver: Receiver<SyncBlock>,
+        class_manager_client: SharedClassManagerClient,
+        config_manager_client: SharedConfigManagerClient,
+    ) -> (Self, StorageReader, Arc<RwLock<Option<BlockHashAndNumber>>>) {
+        let StateSyncConfig { static_config, dynamic_config } = config;
+
+        let storage_reader_server_config = ServerConfig {
+            static_config: static_config.storage_reader_server_static_config.clone(),
+            dynamic_config: dynamic_config.storage_reader_server_dynamic_config.clone(),
+        };
+        let dynamic_config_provider: SharedDynamicConfigProvider =
+            Arc::new(StateSyncDynamicConfigProvider {
+                config_manager_client: config_manager_client.clone(),
+            });
+        let StateSyncResources {
+            storage_reader,
+            mut storage_writer,
+            shared_highest_block,
+            pending_data,
+            pending_classes,
+            storage_reader_server_handle,
+        } = StateSyncResources::new(
+            &static_config.storage_config,
+            storage_reader_server_config,
+            dynamic_config_provider,
+        );
+
+        let StateSyncStaticConfig {
+            storage_config: _,
+            p2p_sync_client_config,
+            central_sync_client_config,
+            network_config,
+            revert_config,
+            rpc_config,
+            ..
+        } = static_config;
+
+        let register_metrics_future = register_metrics(storage_reader.clone()).boxed();
+
+        // Creating the JSON-RPC server future
+        // Located above the revert if block since we would like to be able to query the RPC server
+        // regardless of state sync activation.
+        let rpc_server_future = spawn_rpc_server(
+            &rpc_config,
+            shared_highest_block.clone(),
+            pending_data.clone(),
+            pending_classes.clone(),
+            storage_reader.clone(),
+            Some(class_manager_client.clone()),
+        );
+
+        if revert_config.should_revert {
+            debug!("State sync runner should revert; creating revert futures.");
+            let revert_up_to_and_including = revert_config.revert_up_to_and_including;
+            // We assume that sync always writes the headers before any other block data.
+            let current_header_marker = storage_reader
+                .begin_ro_txn()
+                .expect("Should be able to begin read only transaction")
+                .get_header_marker()
+                .expect("Should have a header marker");
+
+            let revert_block_fn = move |current_block_number| {
+                let n_reverted_txs = storage_writer
+                    .begin_rw_txn()
+                    .unwrap()
+                    .get_block_transactions_count(current_block_number)
+                    .unwrap()
+                    .unwrap_or(0)
+                    .try_into()
+                    .expect("Failed to convert usize to u64");
+                revert_block(&mut storage_writer, current_block_number);
+                update_marker_metrics(&storage_writer.begin_rw_txn().unwrap());
+                STATE_SYNC_REVERTED_TRANSACTIONS.increment(n_reverted_txs);
+                async {}
+            };
+
+            const STATE_SYNC_REVERT_COMPONENT_DATA: RevertComponentData = RevertComponentData {
+                name: "State Sync",
+                revert_metric: STATE_SYNC_REVERTED_UP_TO_AND_INCLUDING,
+            };
+            return (
+                Self {
+                    network_future: pending().boxed(),
+                    p2p_sync_client_future: revert_blocks_and_eternal_pending(
+                        current_header_marker,
+                        revert_up_to_and_including,
+                        revert_block_fn,
+                        &STATE_SYNC_REVERT_COMPONENT_DATA,
+                    )
+                    .map(|_never| unreachable!("Never should never be constructed"))
+                    .boxed(),
+                    p2p_sync_server_future: pending().boxed(),
+                    central_sync_client_future: pending().boxed(),
+                    new_block_dev_null_future: pending().boxed(),
+                    rpc_server_future,
+                    register_metrics_future,
+                    storage_reader_server_handle,
+                },
+                storage_reader,
+                shared_highest_block,
+            );
+        }
+
+        let mut maybe_network_manager = network_config.map(|network_config| {
+            let network_manager_metrics = Some(NetworkMetrics {
+                num_connected_peers: P2P_SYNC_NUM_CONNECTED_PEERS,
+                num_blacklisted_peers: P2P_SYNC_NUM_BLACKLISTED_PEERS,
+                broadcast_metrics_by_topic: None,
+                sqmr_metrics: Some(SqmrNetworkMetrics {
+                    num_active_inbound_sessions: P2P_SYNC_NUM_ACTIVE_INBOUND_SESSIONS,
+                    num_active_outbound_sessions: P2P_SYNC_NUM_ACTIVE_OUTBOUND_SESSIONS,
+                }),
+                event_metrics: None,
+                latency_metrics: None,
+            });
+            NetworkManager::new(
+                network_config.clone(),
+                Some(VERSION_FULL.to_string()),
+                network_manager_metrics,
+            )
+        });
+
+        // Creating the sync clients futures
+        // Exactly one of the sync clients must be turned on.
+        let (p2p_sync_client_future, central_sync_client_future, new_block_dev_null_future) =
+            match (p2p_sync_client_config, central_sync_client_config) {
+                (Some(p2p_sync_client_config), None) => {
+                    debug!("State sync runner creating peer-to-peer sync client.");
+                    // TODO(noamsp): Add this check to the config validation.
+                    let network_manager = maybe_network_manager
+                        .as_mut()
+                        .expect("Network manager should be present if p2p sync client is present");
+
+                    let p2p_sync_client = Self::new_p2p_state_sync_client(
+                        storage_reader.clone(),
+                        storage_writer,
+                        p2p_sync_client_config,
+                        network_manager,
+                        new_block_receiver,
+                        class_manager_client.clone(),
+                    );
+
+                    let p2p_sync_client_future = p2p_sync_client.run().boxed();
+                    let central_sync_client_future = future::pending().boxed();
+                    let new_block_dev_null_future = future::pending().boxed();
+                    (p2p_sync_client_future, central_sync_client_future, new_block_dev_null_future)
+                }
+                (None, Some(central_sync_client_config)) => {
+                    debug!("State sync runner creating central sync client.");
+                    let central_sync_client = Self::new_central_state_sync_client(
+                        storage_reader.clone(),
+                        storage_writer,
+                        shared_highest_block.clone(),
+                        pending_data.clone(),
+                        pending_classes.clone(),
+                        central_sync_client_config,
+                        class_manager_client.clone(),
+                    );
+
+                    let p2p_sync_client_future = future::pending().boxed();
+                    let central_sync_client_future = central_sync_client.run().boxed();
+                    let new_block_dev_null_future =
+                        create_new_block_receiver_future_dev_null(new_block_receiver);
+
+                    (p2p_sync_client_future, central_sync_client_future, new_block_dev_null_future)
+                }
+                _ => {
+                    panic!(
+                        "It is validated that exactly one of --sync.#is_none or \
+                         --p2p_sync.#is_none must be turned on"
+                    )
+                }
+            };
+
+        // Creating the sync server future and the network future
+        // If the network manager is not present, we create a pending future for the server
+        // and the network future.
+        let (p2p_sync_server_future, network_future) = match maybe_network_manager {
+            Some(mut network_manager) => {
+                let p2p_sync_server = Self::new_p2p_state_sync_server(
+                    storage_reader.clone(),
+                    &mut network_manager,
+                    class_manager_client.clone(),
+                );
+
+                let p2p_sync_server_future = p2p_sync_server.run().boxed();
+                let network_future =
+                    network_manager.run().instrument(info_span!("[Sync network]")).boxed();
+
+                (p2p_sync_server_future, network_future)
+            }
+            None => {
+                let p2p_sync_server_future = future::pending().boxed();
+                let network_future = future::pending().boxed();
+
+                (p2p_sync_server_future, network_future)
+            }
+        };
+
+        (
+            Self {
+                network_future,
+                p2p_sync_client_future,
+                p2p_sync_server_future,
+                central_sync_client_future,
+                new_block_dev_null_future,
+                rpc_server_future,
+                register_metrics_future,
+                storage_reader_server_handle,
+            },
+            storage_reader,
+            shared_highest_block,
+        )
+    }
+
+    fn new_p2p_state_sync_client(
+        storage_reader: StorageReader,
+        storage_writer: StorageWriter,
+        p2p_sync_client_config: P2pSyncClientConfig,
+        network_manager: &mut NetworkManager,
+        new_block_receiver: Receiver<SyncBlock>,
+        class_manager_client: SharedClassManagerClient,
+    ) -> P2pSyncClient {
+        let header_client_sender = network_manager
+            .register_sqmr_protocol_client(Protocol::SignedBlockHeader.into(), BUFFER_SIZE);
+        let state_diff_client_sender =
+            network_manager.register_sqmr_protocol_client(Protocol::StateDiff.into(), BUFFER_SIZE);
+        let transaction_client_sender = network_manager
+            .register_sqmr_protocol_client(Protocol::Transaction.into(), BUFFER_SIZE);
+        let class_client_sender =
+            network_manager.register_sqmr_protocol_client(Protocol::Class.into(), BUFFER_SIZE);
+        let p2p_sync_client_channels = P2pSyncClientChannels::new(
+            header_client_sender,
+            state_diff_client_sender,
+            transaction_client_sender,
+            class_client_sender,
+        );
+        P2pSyncClient::new(
+            p2p_sync_client_config,
+            storage_reader,
+            storage_writer,
+            p2p_sync_client_channels,
+            new_block_receiver.boxed(),
+            class_manager_client.clone(),
+        )
+    }
+
+    fn new_p2p_state_sync_server(
+        storage_reader: StorageReader,
+        network_manager: &mut NetworkManager,
+        class_manager_client: SharedClassManagerClient,
+    ) -> P2pSyncServer {
+        let header_server_receiver = network_manager
+            .register_sqmr_protocol_server(Protocol::SignedBlockHeader.into(), BUFFER_SIZE);
+        let state_diff_server_receiver =
+            network_manager.register_sqmr_protocol_server(Protocol::StateDiff.into(), BUFFER_SIZE);
+        let transaction_server_receiver = network_manager
+            .register_sqmr_protocol_server(Protocol::Transaction.into(), BUFFER_SIZE);
+        let class_server_receiver =
+            network_manager.register_sqmr_protocol_server(Protocol::Class.into(), BUFFER_SIZE);
+        let event_server_receiver =
+            network_manager.register_sqmr_protocol_server(Protocol::Event.into(), BUFFER_SIZE);
+        let p2p_sync_server_channels = P2pSyncServerChannels::new(
+            header_server_receiver,
+            state_diff_server_receiver,
+            transaction_server_receiver,
+            class_server_receiver,
+            event_server_receiver,
+        );
+        P2pSyncServer::new(storage_reader, p2p_sync_server_channels, class_manager_client)
+    }
+
+    fn new_central_state_sync_client(
+        storage_reader: StorageReader,
+        storage_writer: StorageWriter,
+        shared_highest_block: Arc<RwLock<Option<BlockHashAndNumber>>>,
+        pending_data: Arc<RwLock<PendingData>>,
+        pending_classes: Arc<RwLock<PendingClasses>>,
+        central_sync_client_config: CentralSyncClientConfig,
+        class_manager_client: SharedClassManagerClient,
+    ) -> CentralStateSync {
+        let CentralSyncClientConfig { sync_config, central_source_config } =
+            central_sync_client_config;
+        let central_source =
+            CentralSource::new(central_source_config.clone(), VERSION_FULL, storage_reader.clone())
+                .map_err(CentralError::ClientCreation)
+                .expect("CentralSource creation failed in central sync");
+        let pending_source = PendingSource::new(central_source_config, VERSION_FULL)
+            .map_err(CentralError::ClientCreation)
+            .expect("PendingSource creation failed in central sync");
+        let base_layer_source = None;
+        CentralStateSync::new(
+            sync_config,
+            shared_highest_block,
+            pending_data,
+            pending_classes,
+            central_source,
+            pending_source,
+            base_layer_source,
+            storage_reader.clone(),
+            storage_writer,
+            Some(class_manager_client),
+        )
+    }
+}
+
+/// A future that consumes the new block receiver and does nothing with the received blocks, to
+/// prevent the buffer from filling up.
+fn create_new_block_receiver_future_dev_null(
+    mut new_block_receiver: Receiver<SyncBlock>,
+) -> BoxFuture<'static, Never> {
+    async move {
+        while new_block_receiver.next().await.is_some() {}
+        pending().await
+    }
+    .boxed()
+}
+
+// Create JSON-RPC server
+fn spawn_rpc_server(
+    rpc_config: &RpcConfig,
+    shared_highest_block: Arc<RwLock<Option<BlockHashAndNumber>>>,
+    pending_data: Arc<RwLock<PendingData>>,
+    pending_classes: Arc<RwLock<PendingClasses>>,
+    storage_reader: StorageReader,
+    class_manager_client: Option<SharedClassManagerClient>,
+) -> BoxFuture<'static, ()> {
+    let rpc_config = rpc_config.clone();
+    async move {
+        debug!("Starting state sync runner spawn_rpc_server future");
+        let (_, server_handle) = run_server(
+            &rpc_config,
+            shared_highest_block,
+            pending_data,
+            pending_classes,
+            storage_reader,
+            VERSION_FULL,
+            class_manager_client,
+        )
+        .await
+        .expect("Failed running JSON-RPC server");
+        tokio::spawn(async move {
+            server_handle.stopped().await;
+        })
+        .await
+        .expect("Failed spawning JSON-RPC server");
+    }
+    .boxed()
+}
+
+pub type StateSyncRunnerServer = WrapperServer<StateSyncRunner>;
+// TODO(shahak): fill with a proper version, or allow not specifying the node version.
+const VERSION_FULL: &str = "";

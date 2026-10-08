@@ -1,0 +1,288 @@
+use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use apollo_config::secrets::Sensitive;
+use apollo_l1_gas_price_config::config::ExchangeRateOracleConfig;
+use apollo_l1_gas_price_types::errors::{
+    ExchangeRateOracleClientError,
+    ExchangeRateOracleErrorType,
+};
+use apollo_l1_gas_price_types::{ExchangeRate, ExchangeRateOracleClientTrait};
+use async_trait::async_trait;
+use futures::FutureExt;
+use lru::LruCache;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde_json;
+use tokio_util::task::AbortOnDropHandle;
+use tracing::{debug, info, instrument, warn};
+use url::Url;
+
+use crate::metrics::ExchangeRateOracleMetrics;
+
+#[cfg(test)]
+#[path = "exchange_rate_oracle_test.rs"]
+pub mod exchange_rate_oracle_test;
+
+pub use apollo_l1_gas_price_types::EXCHANGE_RATE_DECIMALS;
+
+fn btreemap_to_headermap(hash_map: BTreeMap<String, String>) -> HeaderMap {
+    let mut header_map = HeaderMap::new();
+    for (key, value) in hash_map {
+        header_map.insert(
+            HeaderName::from_bytes(key.as_bytes()).expect("Failed to parse header name"),
+            HeaderValue::from_str(&value).expect("Failed to parse header value"),
+        );
+    }
+    header_map
+}
+
+/// A struct containing a URL and its associated headers.
+#[derive(Clone, Debug)]
+pub struct UrlAndHeaderMap {
+    /// The base URL.
+    pub url: Url,
+    /// A map of header keyword-value pairs in a format suitable for HTTP requests.
+    pub headers: Sensitive<HeaderMap>,
+}
+
+type PriceQuery = AbortOnDropHandle<Result<ExchangeRate, ExchangeRateOracleClientError>>;
+
+/// Client for interacting with an exchange-rate oracle API.
+/// Concrete pair (ETH→STRK, STRK→USD, ...) is determined by `config.url_header_list`
+/// and the `metrics` set passed at construction.
+#[derive(Clone, Debug)]
+pub struct ExchangeRateOracleClient {
+    config: ExchangeRateOracleConfig,
+    /// The index of the current URL in the `url_header_list`.
+    /// If one URL fails, index is incremented to try the next URL.
+    index: Arc<AtomicUsize>,
+    url_header_list: Arc<Vec<UrlAndHeaderMap>>,
+    client: reqwest::Client,
+    cached_prices: Arc<Mutex<LruCache<u64, ExchangeRate>>>,
+    queries: Arc<Mutex<LruCache<u64, PriceQuery>>>,
+    metrics: ExchangeRateOracleMetrics,
+}
+
+impl ExchangeRateOracleClient {
+    pub fn new(config: ExchangeRateOracleConfig, metrics: ExchangeRateOracleMetrics) -> Self {
+        info!(
+            "Creating ExchangeRateOracleClient with: urls={:?} lag_interval_seconds={}",
+            config.url_header_list, config.lag_interval_seconds
+        );
+        metrics.register();
+        let url_header_list = config
+            .url_header_list
+            .as_ref()
+            .expect("url_header_list should be set in the config")
+            .iter()
+            .map(|uh| UrlAndHeaderMap {
+                url: uh.peek_secret().url.clone(),
+                headers: btreemap_to_headermap(uh.peek_secret().headers.clone()).into(),
+            })
+            .collect::<Vec<_>>();
+        Self {
+            config: config.clone(),
+            index: Arc::new(AtomicUsize::new(0)),
+            url_header_list: Arc::new(url_header_list),
+            client: reqwest::Client::new(),
+            cached_prices: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(config.max_cache_size).expect("Invalid cache size"),
+            ))),
+            queries: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(config.max_cache_size).expect("Invalid cache size"),
+            ))),
+            metrics,
+        }
+    }
+
+    fn spawn_query(
+        &self,
+        quantized_timestamp: u64,
+    ) -> AbortOnDropHandle<Result<ExchangeRate, ExchangeRateOracleClientError>> {
+        assert!(
+            self.config.lag_interval_seconds > 0,
+            "lag_interval_seconds should be greater than 0"
+        );
+        let adjusted_timestamp = quantized_timestamp * self.config.lag_interval_seconds;
+        let query_timeout_sec = self.config.query_timeout_sec;
+        let client = self.client.clone();
+        let index_clone = self.index.clone();
+        let url_header_list = self.url_header_list.clone();
+        let list_len = url_header_list.len();
+        let metrics = self.metrics;
+        let future = async move {
+            let initial_index = index_clone.load(Ordering::SeqCst);
+            for (i, url_and_headers) in
+                url_header_list.iter().cycle().skip(initial_index).take(list_len).enumerate()
+            {
+                let UrlAndHeaderMap { mut url, headers } = url_and_headers.clone();
+                url.query_pairs_mut().append_pair("timestamp", &adjusted_timestamp.to_string());
+                let result = tokio::time::timeout(Duration::from_secs(query_timeout_sec), async {
+                    let response = client
+                        .get(url.clone())
+                        .headers(headers.peek_secret().clone())
+                        .send()
+                        .await?;
+                    if !response.status().is_success() {
+                        return Err(ExchangeRateOracleClientError::RequestError(format!(
+                            "Request failed with status {}: {}",
+                            response.status(),
+                            response.text().await?
+                        )));
+                    }
+                    let body = response.text().await?;
+                    let rate = resolve_query(body, &metrics)?;
+                    Ok::<_, ExchangeRateOracleClientError>(rate)
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(rate)) => {
+                        let idx = (i + initial_index) % list_len;
+                        index_clone.store(idx, Ordering::SeqCst);
+                        debug!("Resolved query to {url} with rate {rate}");
+                        return Ok(rate);
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Failed to resolve query to {url}: {e:?}");
+                        metrics.record_error((&e).into());
+                    }
+                    Err(_) => {
+                        warn!("Timeout when resolving query to {url}");
+                        // The enum has no timeout variant: a request that ran out of time is
+                        // counted as a failed request.
+                        metrics.record_error(ExchangeRateOracleErrorType::RequestError);
+                    }
+                };
+            }
+            warn!("All {list_len} URLs in the list failed for timestamp {adjusted_timestamp}");
+            Err(ExchangeRateOracleClientError::AllUrlsFailedError(
+                adjusted_timestamp,
+                initial_index,
+            ))
+        };
+        AbortOnDropHandle::new(tokio::spawn(future))
+    }
+}
+
+fn resolve_query(
+    body: String,
+    metrics: &ExchangeRateOracleMetrics,
+) -> Result<ExchangeRate, ExchangeRateOracleClientError> {
+    let Ok(json): Result<serde_json::Value, _> = serde_json::from_str(&body) else {
+        return Err(ExchangeRateOracleClientError::ParseError(format!(
+            "Failed to parse JSON: {body}"
+        )));
+    };
+    // Extract price from API response. Also returns MissingFieldError if value is not a string.
+    let price = match json.get("price").and_then(|v| v.as_str()) {
+        Some(price) => price,
+        None => {
+            return Err(ExchangeRateOracleClientError::MissingFieldError(
+                "price".to_string(),
+                body,
+            ));
+        }
+    };
+    let rate = u128::from_str_radix(price.trim_start_matches("0x"), 16).map_err(|e| {
+        ExchangeRateOracleClientError::ParseError(format!("Failed to parse price {price}: {e}"))
+    })?;
+    if rate == 0 {
+        return Err(ExchangeRateOracleClientError::InvalidRateError(
+            "rate must be non-zero".to_string(),
+        ));
+    }
+    let decimals = match json
+        .get("decimals")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
+    {
+        Some(decimals) => decimals,
+        None => {
+            return Err(ExchangeRateOracleClientError::MissingFieldError(
+                "decimals".to_string(),
+                body,
+            ));
+        }
+    };
+    if decimals != EXCHANGE_RATE_DECIMALS {
+        return Err(ExchangeRateOracleClientError::InvalidDecimalsError(
+            EXCHANGE_RATE_DECIMALS,
+            decimals,
+        ));
+    }
+    metrics.record_success(rate);
+    Ok(rate)
+}
+
+#[async_trait]
+impl ExchangeRateOracleClientTrait for ExchangeRateOracleClient {
+    /// The HTTP response must include the following fields:
+    /// - `price`: a hexadecimal string representing the price.
+    /// - `decimals`: a number equal to `EXCHANGE_RATE_DECIMALS`.
+    #[instrument(skip(self))]
+    async fn fetch_rate(
+        &self,
+        timestamp: u64,
+    ) -> Result<ExchangeRate, ExchangeRateOracleClientError> {
+        const NUMBER_OF_TIMESTAMPS_BACK: u64 = 1;
+        let quantized_timestamp = (timestamp - self.config.lag_interval_seconds)
+            .checked_div(self.config.lag_interval_seconds)
+            .expect("lag_interval_seconds should be non-zero");
+
+        let mut cache = self.cached_prices.lock().unwrap();
+
+        if let Some(rate) = cache.get(&quantized_timestamp) {
+            debug!("Cached conversion rate for timestamp {timestamp} is {rate}");
+            return Ok(*rate);
+        }
+
+        // Check if there is a query already sent out for this timestamp, if not, start one.
+        let mut queries = self.queries.lock().unwrap();
+        let handle = queries
+            .get_or_insert_mut(quantized_timestamp, || self.spawn_query(quantized_timestamp));
+        // If the query is not finished, return an error.
+        if !handle.is_finished() {
+            debug!("Query not yet resolved: timestamp={timestamp}");
+            // If the previous quantized timestamp is in the cache, use it.
+            if let Some(rate) = cache.get(&(quantized_timestamp - NUMBER_OF_TIMESTAMPS_BACK)) {
+                debug!(
+                    "Query not yet resolved: timestamp={timestamp}, using previous rate {rate} \
+                     from quantized timestamp={}",
+                    (quantized_timestamp - NUMBER_OF_TIMESTAMPS_BACK)
+                        * self.config.lag_interval_seconds
+                );
+                return Ok(*rate);
+            }
+            // If not, return a query not ready error.
+            return Err(ExchangeRateOracleClientError::QueryNotReadyError(timestamp));
+        }
+        let result = handle.now_or_never().expect("Handle must be finished if we got here");
+        let rate = match result {
+            Ok(Ok(rate)) => rate,
+            Ok(Err(e)) => {
+                warn!("Query returned an error for timestamp {timestamp}: {e:?}");
+                // Must remove failed query from the cache, to avoid re-polling it.
+                queries.pop(&quantized_timestamp);
+                return Err(e);
+            }
+            Err(e) => {
+                warn!("Query failed to join handle for timestamp {timestamp}: {e:?}");
+                self.metrics.record_error(ExchangeRateOracleErrorType::JoinError);
+                // Must remove failed query from the cache, to avoid re-polling it.
+                queries.pop(&quantized_timestamp);
+                return Err(ExchangeRateOracleClientError::JoinError(e.to_string()));
+            }
+        };
+
+        // Make sure to cache the result.
+        cache.put(quantized_timestamp, rate);
+        // We don't need to come back to this query since we have the result in cache.
+        queries.pop(&quantized_timestamp);
+        debug!("Caching conversion rate for timestamp {timestamp}, with rate {rate}");
+        Ok(rate)
+    }
+}

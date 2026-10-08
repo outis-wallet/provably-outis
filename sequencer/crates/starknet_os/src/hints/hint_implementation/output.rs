@@ -1,0 +1,206 @@
+use std::cmp::min;
+
+use cairo_vm::hint_processor::hint_processor_utils::felt_to_usize;
+use cairo_vm::types::relocatable::MaybeRelocatable;
+use rand::rngs::SysRng;
+use rand::TryRng;
+use sha2::{Digest, Sha256};
+use starknet_types_core::felt::Felt;
+
+use crate::hint_processor::common_hint_processor::CommonHintProcessor;
+use crate::hints::error::{OsHintError, OsHintResult};
+use crate::hints::types::HintContext;
+use crate::hints::vars::{Const, Ids, Scope};
+
+pub(crate) const MAX_PAGE_SIZE: usize = 3800;
+pub(crate) const OUTPUT_ATTRIBUTE_FACT_TOPOLOGY: &str = "gps_fact_topology";
+
+fn felt_to_bool(felt: Felt, id: Ids) -> Result<bool, OsHintError> {
+    match felt {
+        x if x == Felt::ONE => Ok(true),
+        x if x == Felt::ZERO => Ok(false),
+        _ => Err(OsHintError::BooleanIdExpected { id, felt }),
+    }
+}
+
+pub(crate) fn get_public_keys<CHP: CommonHintProcessor>(
+    hint_processor: &CHP,
+    mut ctx: HintContext<'_>,
+) -> OsHintResult {
+    let public_keys: Vec<MaybeRelocatable> =
+        hint_processor.get_public_keys().unwrap_or_default().iter().map(Into::into).collect();
+
+    let public_keys_segment = ctx.vm.gen_arg(&public_keys)?;
+
+    ctx.insert_value(Ids::PublicKeys, public_keys_segment)?;
+    ctx.insert_value(Ids::NPublicKeys, public_keys.len())?;
+
+    Ok(())
+}
+
+pub(crate) fn set_proof_fact_topology<CHP: CommonHintProcessor>(
+    hint_processor: &mut CHP,
+    ctx: HintContext<'_>,
+) -> OsHintResult {
+    if !hint_processor.get_serialize_data_availability_create_pages() {
+        return Ok(());
+    }
+    let onchain_data_start = ctx.get_ptr(Ids::DaStart)?;
+    let output_ptr = ctx.get_ptr(Ids::OutputPtr)?;
+    let onchain_data_size = (output_ptr - onchain_data_start)?;
+    let output_builtin = ctx.vm.get_output_builtin_mut()?;
+
+    let n_pages = onchain_data_size.div_ceil(MAX_PAGE_SIZE);
+    for i in 0..n_pages {
+        let start_offset = i * MAX_PAGE_SIZE;
+        let page_id = i + 1;
+        let page_start = (onchain_data_start + start_offset)?;
+        let page_size = min(onchain_data_size - start_offset, MAX_PAGE_SIZE);
+        output_builtin.add_page(page_id, page_start, page_size)?;
+    }
+    output_builtin.add_attribute(
+        OUTPUT_ATTRIBUTE_FACT_TOPOLOGY.to_string(),
+        vec![
+            // Push 1 + n_pages pages (all of the pages).
+            1 + n_pages,
+            // Create a parent node for the last n_pages.
+            n_pages,
+            // Don't push additional pages.
+            0,
+            // Take the first page (the main part) and the node that was created (onchain data)
+            // and use them to construct the root of the fact tree.
+            2,
+        ],
+    );
+
+    Ok(())
+}
+
+pub(crate) fn set_state_updates_start(mut ctx: HintContext<'_>) -> OsHintResult {
+    let use_kzg_da_felt = ctx.get_integer(Ids::UseKzgDa)?;
+
+    // Set `use_kzg_da` in globals since it will be used in `process_data_availability`
+    ctx.insert_into_scope(Scope::UseKzgDa, use_kzg_da_felt);
+
+    let compress_state_updates = ctx.get_integer(Ids::CompressStateUpdates)?;
+
+    let use_kzg_da = felt_to_bool(use_kzg_da_felt, Ids::UseKzgDa)?;
+
+    let use_compress_state_updates =
+        felt_to_bool(compress_state_updates, Ids::CompressStateUpdates)?;
+
+    let segment = if use_kzg_da || use_compress_state_updates {
+        ctx.vm.add_memory_segment()
+    } else {
+        // Assign a temporary segment, to be relocated into the output segment.
+        ctx.vm.add_temporary_segment()
+    };
+
+    ctx.insert_value(Ids::StateUpdatesStart, segment)?;
+
+    Ok(())
+}
+
+pub(crate) fn set_compressed_start(mut ctx: HintContext<'_>) -> OsHintResult {
+    let n_keys = ctx.get_integer(Ids::NKeys)?;
+    let use_kzg_da_felt: Felt = ctx.get_from_scope(Scope::UseKzgDa)?;
+
+    let use_kzg_da = felt_to_bool(use_kzg_da_felt, Ids::UseKzgDa)?;
+
+    let segment = if use_kzg_da || n_keys > Felt::ZERO {
+        ctx.vm.add_memory_segment()
+    } else {
+        // Assign a temporary segment, to be relocated into the output segment.
+        ctx.vm.add_temporary_segment()
+    };
+
+    ctx.insert_value(Ids::CompressedStart, segment)?;
+
+    Ok(())
+}
+
+pub(crate) fn set_encrypted_start(mut ctx: HintContext<'_>) -> OsHintResult {
+    let use_kzg_da_felt: Felt = ctx.get_from_scope(Scope::UseKzgDa)?;
+
+    let use_kzg_da = felt_to_bool(use_kzg_da_felt, Ids::UseKzgDa)?;
+
+    let segment = if use_kzg_da {
+        ctx.vm.add_memory_segment()
+    } else {
+        // Assign a temporary segment, to be relocated into the output segment.
+        ctx.vm.add_temporary_segment()
+    };
+
+    ctx.insert_value(Ids::EncryptedStart, segment)?;
+
+    Ok(())
+}
+
+pub(crate) fn set_n_updates_small(mut ctx: HintContext<'_>) -> OsHintResult {
+    let n_updates = ctx.get_integer(Ids::NUpdates)?;
+    let n_updates_small_packing_bounds = ctx.fetch_const(Const::NUpdatesSmallPackingBound)?;
+    ctx.insert_value(
+        Ids::IsNUpdatesSmall,
+        Felt::from(&n_updates < n_updates_small_packing_bounds),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn calculate_keys_using_sha256_hash(mut ctx: HintContext<'_>) -> OsHintResult {
+    // Generate a cryptographically secure random seed.
+    let mut random_bytes = [0u8; 32];
+    SysRng.try_fill_bytes(&mut random_bytes).expect("OS RNG should not fail");
+
+    let mut hasher = Sha256::new();
+    hasher.update(random_bytes);
+
+    // In addition, hash the compressed state diff for extra defense against potential attacks on
+    // randomness source.
+    let compressed_start = ctx.get_ptr(Ids::CompressedStart)?;
+    let compressed_end = ctx.get_ptr(Ids::CompressedEnd)?;
+    let array_size = (compressed_end - compressed_start)?;
+    for i in 0..array_size {
+        let felt = ctx.vm.get_integer((compressed_start + i)?)?;
+        hasher.update(felt.to_bytes_be());
+    }
+    let random_key_seed = hasher.finalize().to_vec();
+
+    const SYM_LABEL: &[u8] = b"SYM"; // domain separation: symmetric key
+    const PRIV_LABEL: &[u8] = b"PRIV"; // domain separation: private keys
+
+    // Derive the symmetric key (full 32 bytes):
+    let symmetric_key = {
+        let hash = Sha256::new().chain_update(&random_key_seed).chain_update(SYM_LABEL).finalize();
+        Felt::from_bytes_be(&hash.into())
+    };
+    ctx.insert_value(Ids::SymmetricKey, symmetric_key)?;
+
+    // Private keys: derive with a counter and truncate to 31 bytes (248 bits)
+    // to ensure result is < 2^248 < EC group order < PRIME. This is required for
+    // the Diffie-Hellman elliptic curve.
+
+    let mut priv_counter: u8 = 0;
+    let mut next_private_key = || -> MaybeRelocatable {
+        let hash = Sha256::new()
+            .chain_update(&random_key_seed)
+            .chain_update(PRIV_LABEL)
+            .chain_update([priv_counter])
+            .finalize();
+        priv_counter += 1;
+
+        // Use only first 31 bytes to ensure < 2^248.
+        let mut key_bytes = [0u8; 32];
+        key_bytes[1..].copy_from_slice(&hash[..31]);
+        MaybeRelocatable::from(Felt::from_bytes_be(&key_bytes))
+    };
+
+    let n_keys = ctx.get_integer(Ids::NKeys)?;
+    let num_private_keys = felt_to_usize(&n_keys)?;
+    let private_keys: Vec<MaybeRelocatable> =
+        (0..num_private_keys).map(|_| next_private_key()).collect();
+    let private_keys_start = ctx.vm.gen_arg(&private_keys)?;
+
+    ctx.insert_value(Ids::SnPrivateKeys, private_keys_start)?;
+
+    Ok(())
+}

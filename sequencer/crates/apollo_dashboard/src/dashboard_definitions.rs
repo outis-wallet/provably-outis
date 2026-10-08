@@ -1,0 +1,135 @@
+use apollo_batcher::metrics::BATCHER_INFRA_METRICS;
+use apollo_class_manager::metrics::CLASS_MANAGER_INFRA_METRICS;
+use apollo_committer::metrics::COMMITTER_INFRA_METRICS;
+use apollo_compile_to_casm::metrics::SIERRA_COMPILER_INFRA_METRICS;
+use apollo_config_manager::metrics::CONFIG_MANAGER_INFRA_METRICS;
+use apollo_gateway::metrics::GATEWAY_INFRA_METRICS;
+use apollo_l1_events::metrics::L1_EVENTS_INFRA_METRICS;
+use apollo_l1_gas_price::metrics::L1_GAS_PRICE_INFRA_METRICS;
+use apollo_mempool::metrics::MEMPOOL_INFRA_METRICS;
+use apollo_mempool_p2p::metrics::MEMPOOL_P2P_INFRA_METRICS;
+use apollo_proof_manager::metrics::PROOF_MANAGER_INFRA_METRICS;
+use apollo_state_sync_metrics::metrics::STATE_SYNC_INFRA_METRICS;
+
+use crate::dashboard::{Dashboard, Row};
+use crate::infra_panels::get_component_infra_row;
+use crate::panels::batcher::{
+    get_batcher_row,
+    get_panel_batched_transactions_rate,
+    get_panel_consensus_block_time_avg,
+};
+use crate::panels::blockifier::get_blockifier_row;
+use crate::panels::committer::get_committer_row;
+use crate::panels::consensus::{
+    get_cende_row,
+    get_consensus_p2p_row,
+    get_consensus_row,
+    get_consensus_streams_row,
+    get_panel_consensus_block_number,
+    get_panel_consensus_block_number_diff_from_sync,
+    get_panel_consensus_decisions_reached_as_proposer_counter,
+    get_panel_consensus_round,
+    get_snip35_row,
+};
+use crate::panels::gateway::{get_gateway_row, get_panel_gateway_add_tx_failure_by_reason};
+use crate::panels::http_server::{
+    get_http_server_row,
+    get_panel_http_server_added_transactions_success_rate,
+    get_panel_http_server_seconds_since_last_transaction,
+    get_panel_http_server_transactions_received_rate,
+};
+use crate::panels::l1_events::get_l1_events_row;
+use crate::panels::l1_gas_price::get_l1_gas_price_row;
+use crate::panels::mempool::get_mempool_row;
+use crate::panels::mempool_p2p::get_mempool_p2p_row;
+use crate::panels::pod_metrics::get_pod_metrics_row;
+use crate::panels::reverts::get_reverts_row;
+use crate::panels::sierra_compiler::get_compile_to_casm_row;
+use crate::panels::staking::get_staking_row;
+use crate::panels::state_sync::get_state_sync_row;
+use crate::panels::storage::get_storage_row;
+use crate::panels::tokio::get_tokio_row;
+
+#[cfg(test)]
+#[path = "dashboard_definitions_test.rs"]
+mod dashboard_definitions_test;
+
+pub const DEV_JSON_PATH: &str = "crates/apollo_dashboard/resources/dev_grafana.json";
+
+fn get_overview_row() -> Row {
+    Row::new(
+        "Overview",
+        vec![
+            get_panel_consensus_block_time_avg(),
+            get_panel_consensus_round(),
+            get_panel_http_server_added_transactions_success_rate(),
+            get_panel_batched_transactions_rate(),
+            get_panel_consensus_block_number_diff_from_sync(),
+            get_panel_gateway_add_tx_failure_by_reason(),
+        ],
+    )
+    .expand()
+}
+
+fn get_upgrade_row() -> Row {
+    Row::new(
+        "For Upgrade",
+        vec![
+            get_panel_consensus_block_number(),
+            get_panel_consensus_decisions_reached_as_proposer_counter(),
+            get_panel_http_server_transactions_received_rate(),
+            get_panel_http_server_seconds_since_last_transaction(),
+        ],
+    )
+}
+
+pub fn get_apollo_dashboard() -> Dashboard {
+    Dashboard::new(
+        "Sequencer Node Dashboard",
+        vec![
+            // ─── Top-level summary ───
+            get_overview_row(),
+            // ─── Block production (consensus side) ───
+            get_consensus_row(),
+            get_cende_row(),
+            get_snip35_row(),
+            get_staking_row(),
+            // ─── Transaction lifecycle (ingestion → mempool) ───
+            get_http_server_row(),
+            get_gateway_row(),
+            get_mempool_row(),
+            // ─── Execution & block finalization ───
+            get_batcher_row(),
+            get_blockifier_row(),
+            get_committer_row(),
+            // ─── Sync & external sources ───
+            get_state_sync_row(),
+            get_l1_events_row(),
+            get_l1_gas_price_row(),
+            // ─── Operational ───
+            get_upgrade_row(),
+            get_reverts_row(),
+            get_storage_row(),
+            get_compile_to_casm_row(),
+            // ─── Networking (P2P) ───
+            get_consensus_streams_row(),
+            get_consensus_p2p_row(),
+            get_mempool_p2p_row(),
+            // ─── Infrastructure / per-component plumbing ───
+            get_component_infra_row("Batcher", &BATCHER_INFRA_METRICS),
+            get_component_infra_row("Class Manager", &CLASS_MANAGER_INFRA_METRICS),
+            get_component_infra_row("Committer", &COMMITTER_INFRA_METRICS),
+            get_component_infra_row("Config Manager", &CONFIG_MANAGER_INFRA_METRICS),
+            get_component_infra_row("Gateway", &GATEWAY_INFRA_METRICS),
+            get_component_infra_row("L1 Gas Price", &L1_GAS_PRICE_INFRA_METRICS),
+            get_component_infra_row("L1 Events", &L1_EVENTS_INFRA_METRICS),
+            get_component_infra_row("Mempool", &MEMPOOL_INFRA_METRICS),
+            get_component_infra_row("Mempool P2P", &MEMPOOL_P2P_INFRA_METRICS),
+            get_component_infra_row("Proof Manager", &PROOF_MANAGER_INFRA_METRICS),
+            get_component_infra_row("Sierra Compiler", &SIERRA_COMPILER_INFRA_METRICS),
+            get_component_infra_row("State Sync", &STATE_SYNC_INFRA_METRICS),
+            get_tokio_row(),
+            get_pod_metrics_row(),
+        ],
+    )
+}

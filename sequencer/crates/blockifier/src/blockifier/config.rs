@@ -1,0 +1,336 @@
+use std::collections::BTreeMap;
+
+use apollo_compile_to_native_types::SierraCompilationConfig;
+use apollo_config::dumping::{prepend_sub_config_name, ser_param, SerializeConfig};
+use apollo_config::{ParamPath, ParamPrivacyInput, SerializedParam};
+use serde::de::{self, Deserializer};
+use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
+use starknet_api::core::ClassHash;
+use validator::Validate;
+
+use crate::blockifier::transaction_executor::DEFAULT_STACK_SIZE;
+use crate::state::contract_class_manager::DEFAULT_COMPILATION_REQUEST_CHANNEL_SIZE;
+use crate::state::global_cache::GLOBAL_CONTRACT_CACHE_SIZE_FOR_TEST;
+
+#[cfg(test)]
+#[path = "config_test.rs"]
+pub mod config_test;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TransactionExecutorConfig {
+    pub concurrency_config: ConcurrencyConfig,
+    pub stack_size: usize,
+}
+impl TransactionExecutorConfig {
+    #[cfg(any(test, feature = "testing", feature = "native_blockifier"))]
+    pub fn create_for_testing(concurrency_enabled: bool) -> Self {
+        Self {
+            concurrency_config: ConcurrencyConfig::create_for_testing(concurrency_enabled),
+            stack_size: DEFAULT_STACK_SIZE,
+        }
+    }
+
+    pub fn get_worker_pool_config(&self) -> WorkerPoolConfig {
+        WorkerPoolConfig {
+            n_workers: self.concurrency_config.n_workers,
+            stack_size: self.stack_size,
+        }
+    }
+}
+
+impl Default for TransactionExecutorConfig {
+    fn default() -> Self {
+        Self { concurrency_config: ConcurrencyConfig::default(), stack_size: DEFAULT_STACK_SIZE }
+    }
+}
+
+impl SerializeConfig for TransactionExecutorConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        let mut dump =
+            prepend_sub_config_name(self.concurrency_config.dump(), "concurrency_config");
+        dump.append(&mut BTreeMap::from([ser_param(
+            "stack_size",
+            &self.stack_size,
+            "The thread stack size (proportional to the maximal gas of a transaction).",
+            ParamPrivacyInput::Public,
+        )]));
+        dump
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ConcurrencyConfig {
+    pub enabled: bool,
+    pub n_workers: usize,
+    pub chunk_size: usize,
+}
+
+impl ConcurrencyConfig {
+    pub fn create_for_testing(concurrency_enabled: bool) -> Self {
+        if concurrency_enabled {
+            return Self { enabled: true, n_workers: 4, chunk_size: 64 };
+        }
+        Self { enabled: false, n_workers: 0, chunk_size: 0 }
+    }
+}
+
+impl SerializeConfig for ConcurrencyConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        BTreeMap::from_iter([
+            ser_param(
+                "enabled",
+                &self.enabled,
+                "Enables concurrency of transaction execution.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "n_workers",
+                &self.n_workers,
+                "Number of parallel transaction execution workers.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "chunk_size",
+                &self.chunk_size,
+                "The size of the transaction chunk executed in parallel.",
+                ParamPrivacyInput::Public,
+            ),
+        ])
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct WorkerPoolConfig {
+    pub n_workers: usize,
+    pub stack_size: usize,
+}
+impl WorkerPoolConfig {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn create_for_testing() -> Self {
+        Self { n_workers: 4, stack_size: DEFAULT_STACK_SIZE }
+    }
+}
+
+impl Default for WorkerPoolConfig {
+    fn default() -> Self {
+        Self { n_workers: 1, stack_size: DEFAULT_STACK_SIZE }
+    }
+}
+
+impl SerializeConfig for WorkerPoolConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        BTreeMap::from_iter([
+            ser_param(
+                "n_workers",
+                &self.n_workers,
+                "Number of parallel transaction execution workers.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "stack_size",
+                &self.stack_size,
+                "The thread stack size (proportional to the maximal gas of a transaction).",
+                ParamPrivacyInput::Public,
+            ),
+        ])
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, Validate)]
+pub struct ContractClassManagerConfig {
+    pub cairo_native_run_config: CairoNativeRunConfig,
+    pub contract_cache_size: usize,
+    #[validate(nested)]
+    pub native_compiler_config: SierraCompilationConfig,
+}
+
+impl Default for ContractClassManagerConfig {
+    fn default() -> Self {
+        Self {
+            cairo_native_run_config: CairoNativeRunConfig::default(),
+            contract_cache_size: GLOBAL_CONTRACT_CACHE_SIZE_FOR_TEST,
+            native_compiler_config: SierraCompilationConfig::default(),
+        }
+    }
+}
+
+impl ContractClassManagerConfig {
+    #[cfg(any(test, feature = "testing", feature = "native_blockifier"))]
+    pub fn create_for_testing(cairo_native_mode: CairoNativeMode) -> Self {
+        let cairo_native_run_config =
+            CairoNativeRunConfig { cairo_native_mode, ..Default::default() };
+        let native_compiler_config = SierraCompilationConfig::create_for_testing();
+        Self { cairo_native_run_config, native_compiler_config, ..Default::default() }
+    }
+}
+
+impl SerializeConfig for ContractClassManagerConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        let mut dump = BTreeMap::from_iter([ser_param(
+            "contract_cache_size",
+            &self.contract_cache_size,
+            "The size of the global contract cache.",
+            ParamPrivacyInput::Public,
+        )]);
+        dump.append(&mut prepend_sub_config_name(
+            self.cairo_native_run_config.dump(),
+            "cairo_native_run_config",
+        ));
+        dump.append(&mut prepend_sub_config_name(
+            self.native_compiler_config.dump(),
+            "native_compiler_config",
+        ));
+        dump
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NativeClassesWhitelist {
+    All,
+    Limited(Vec<ClassHash>),
+}
+
+impl NativeClassesWhitelist {
+    pub const SER_PARAM_DESCRIPTION: &str = "Specifies whether to execute all class hashes or \
+                                             only specific ones using Cairo native. If limited, a \
+                                             specific list of class hashes is provided.";
+
+    pub fn ser_param(&self) -> (String, SerializedParam) {
+        ser_param(
+            "native_classes_whitelist",
+            &self,
+            Self::SER_PARAM_DESCRIPTION,
+            ParamPrivacyInput::Public,
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for NativeClassesWhitelist {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw: String = <String as serde::Deserialize>::deserialize(deserializer)?;
+
+        if raw == "All" {
+            return Ok(NativeClassesWhitelist::All);
+        }
+        // Support stringified JSON array: "[\"0x..\", \"0x..\"]"
+        match serde_json::from_str::<Vec<ClassHash>>(&raw) {
+            Ok(vec) => Ok(NativeClassesWhitelist::Limited(vec)),
+            Err(_) => Err(de::Error::custom(format!(
+                "invalid native_classes_whitelist string: expected \"All\" or stringified JSON \
+                 array, (i.e., \"[\\\"0x..\\\", \\\"0x..\\\"]\") got: {}",
+                raw
+            ))),
+        }
+    }
+}
+
+impl Serialize for NativeClassesWhitelist {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            NativeClassesWhitelist::All => serializer.serialize_str("All"),
+            NativeClassesWhitelist::Limited(vec) => {
+                let json = serde_json::to_string(vec)
+                    .expect("Failed to stringify whitelist to JSON array");
+                serializer.serialize_str(&json)
+            }
+        }
+    }
+}
+
+impl NativeClassesWhitelist {
+    pub fn contains(&self, class_hash: &ClassHash) -> bool {
+        match self {
+            NativeClassesWhitelist::All => true,
+            NativeClassesWhitelist::Limited(contracts) => contracts.contains(class_hash),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CairoNativeRunConfig {
+    pub cairo_native_mode: CairoNativeMode,
+    pub channel_size: usize,
+    pub panic_on_compilation_failure: bool,
+}
+
+impl Default for CairoNativeRunConfig {
+    fn default() -> Self {
+        Self {
+            cairo_native_mode: CairoNativeMode::default(),
+            channel_size: DEFAULT_COMPILATION_REQUEST_CHANNEL_SIZE,
+            panic_on_compilation_failure: false,
+        }
+    }
+}
+
+impl CairoNativeRunConfig {
+    /// Returns a config that waits for compilation to complete and panics on any compilation
+    /// failure. Use this for reexecution contexts where silent compilation failures would mask
+    /// correctness issues.
+    #[cfg(any(test, feature = "testing", feature = "reexecution"))]
+    pub fn wait_on_compilation_for_testing() -> Self {
+        Self {
+            cairo_native_mode: CairoNativeMode::WaitOnCompilation,
+            panic_on_compilation_failure: true,
+            ..Default::default()
+        }
+    }
+}
+
+impl SerializeConfig for CairoNativeRunConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        BTreeMap::from_iter([
+            ser_param(
+                "cairo_native_mode",
+                &self.cairo_native_mode,
+                "Cairo native execution mode. 'off' disables native execution, \
+                 'wait_on_compilation' compiles synchronously, and 'lazy_compilation' compiles \
+                 asynchronously.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "channel_size",
+                &self.channel_size,
+                "The size of the compilation request channel.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "panic_on_compilation_failure",
+                &self.panic_on_compilation_failure,
+                "Whether to panic on compilation failure.",
+                ParamPrivacyInput::Public,
+            ),
+        ])
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CairoNativeMode {
+    Off,
+    WaitOnCompilation,
+    LazyCompilation,
+}
+
+impl Default for CairoNativeMode {
+    fn default() -> Self {
+        #[cfg(feature = "cairo_native")]
+        return Self::LazyCompilation;
+        #[cfg(not(feature = "cairo_native"))]
+        return Self::Off;
+    }
+}
+
+impl From<String> for CairoNativeMode {
+    fn from(cairo_native_mode: String) -> Self {
+        serde_json::from_value(serde_json::Value::String(cairo_native_mode))
+            .unwrap_or_else(|e| panic!("Invalid cairo native mode: {e}"))
+    }
+}

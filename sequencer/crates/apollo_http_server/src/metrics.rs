@@ -1,0 +1,30 @@
+use apollo_metrics::define_metrics;
+use tracing::info;
+
+#[cfg(test)]
+#[path = "metrics_test.rs"]
+pub mod metrics_test;
+
+// TODO(Yael): consider adding labels for different endpoints.
+define_metrics!(
+    HttpServer => {
+        MetricCounter { ADDED_TRANSACTIONS_TOTAL, "http_server_added_transactions_total", "Total number of transactions added", init = 0 },
+        MetricCounter { ADDED_TRANSACTIONS_SUCCESS, "http_server_added_transactions_success", "Number of successfully added transactions", init = 0 },
+        MetricCounter { ADDED_TRANSACTIONS_FAILURE, "http_server_added_transactions_failure", "Number of transactions that failed to be added", init = 0 },
+        MetricCounter { ADDED_TRANSACTIONS_INTERNAL_ERROR, "http_server_added_transactions_internal_error", "Number of transactions that failed to be added due to an internal error", init = 0 },
+        MetricCounter { ADDED_TRANSACTIONS_DEPRECATED_ERROR, "http_server_added_transactions_deprecated_error", "Number of transactions that failed to be added due to a deprecated error", init = 0 },
+        MetricGauge { LAST_RECEIVED_TRANSACTION_TIMESTAMP_SECONDS, "http_server_last_received_transaction_timestamp_seconds", "Unix timestamp (seconds) of the last transaction received by the HTTP server" },
+        MetricHistogram { HTTP_SERVER_ADD_TX_LATENCY, "http_server_add_tx_latency", "Latency of HTTP add_tx endpoint in secs" },
+    },
+);
+
+pub(crate) fn init_metrics() {
+    info!("Initializing HTTP Server metrics");
+    ADDED_TRANSACTIONS_TOTAL.register();
+    ADDED_TRANSACTIONS_SUCCESS.register();
+    ADDED_TRANSACTIONS_FAILURE.register();
+    ADDED_TRANSACTIONS_INTERNAL_ERROR.register();
+    ADDED_TRANSACTIONS_DEPRECATED_ERROR.register();
+    LAST_RECEIVED_TRANSACTION_TIMESTAMP_SECONDS.register();
+    HTTP_SERVER_ADD_TX_LATENCY.register();
+}

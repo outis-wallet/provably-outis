@@ -1,0 +1,633 @@
+use std::collections::{BTreeMap, HashSet};
+use std::iter::Sum;
+use std::ops::{Add, AddAssign, Mul, MulAssign};
+
+use cairo_vm::types::builtin_name::BuiltinName;
+use cairo_vm::vm::runners::cairo_runner::ExecutionResources;
+use itertools::Itertools;
+use serde::Serialize;
+use starknet_api::block::{BlockHash, BlockNumber};
+use starknet_api::core::{ClassHash, ContractAddress, L1Address};
+use starknet_api::execution_resources::{GasAmount, GasVector};
+use starknet_api::state::StorageKey;
+use starknet_api::transaction::fields::GasVectorComputationMode;
+use starknet_api::transaction::{
+    Event,
+    EventContent,
+    L2ToL1Payload,
+    MessageToL1 as StarknetAPIMessageToL1,
+};
+use starknet_types_core::felt::Felt;
+
+use crate::blockifier_versioned_constants::VersionedConstants;
+use crate::execution::contract_class::TrackedResource;
+use crate::execution::entry_point::CallEntryPoint;
+use crate::execution::syscalls::vm_syscall_utils::SyscallUsageMap;
+use crate::state::cached_state::StorageEntry;
+use crate::transaction::objects::ExecutionResourcesTraits;
+use crate::utils::u64_from_usize;
+
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct Retdata(pub Vec<Felt>);
+
+#[macro_export]
+macro_rules! retdata {
+    ( $( $x:expr ),* ) => {
+        $crate::execution::call_info::Retdata(vec![$($x),*])
+    };
+}
+
+pub(crate) trait OrderedItem: Sized {
+    type UnorderedItem;
+
+    /// converts to a tuple of (order, non-ordered struct).
+    fn to_ordered_tuple(&self, from_address: ContractAddress) -> (usize, Self::UnorderedItem);
+
+    fn get_items_from_call_execution(execution: &CallExecution) -> &[Self];
+
+    fn sorted_items(call_info: &CallInfo) -> Vec<Self::UnorderedItem> {
+        call_info
+            .iter()
+            .flat_map(|call_info| {
+                Self::get_items_from_call_execution(&call_info.execution)
+                    .iter()
+                    .map(|item| item.to_ordered_tuple(call_info.call.storage_address))
+            })
+            .sorted_by_key(|(order, _)| *order)
+            .map(|(_, unordered_struct)| unordered_struct)
+            .collect()
+    }
+}
+
+// TODO(Arni): Consider rename `OrderedEvent` to `OrderableEvent`.
+#[cfg_attr(any(test, feature = "testing"), derive(Clone))]
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[derive(Debug, Default, Eq, PartialEq, Serialize)]
+pub struct OrderedEvent {
+    pub order: usize,
+    pub event: EventContent,
+}
+
+impl OrderedItem for OrderedEvent {
+    type UnorderedItem = Event;
+
+    fn to_ordered_tuple(&self, from_address: ContractAddress) -> (usize, Self::UnorderedItem) {
+        (self.order, Event { from_address, content: self.event.clone() })
+    }
+
+    fn get_items_from_call_execution(execution: &CallExecution) -> &[Self] {
+        &execution.events
+    }
+}
+
+#[cfg_attr(any(test, feature = "testing"), derive(Clone))]
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[derive(Debug, Default, Eq, PartialEq, Serialize)]
+pub struct MessageToL1 {
+    pub to_address: L1Address,
+    pub payload: L2ToL1Payload,
+}
+
+#[cfg_attr(any(test, feature = "testing"), derive(Clone))]
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[derive(Debug, Default, Eq, PartialEq, Serialize)]
+pub struct OrderedL2ToL1Message {
+    pub order: usize,
+    pub message: MessageToL1,
+}
+
+impl OrderedItem for OrderedL2ToL1Message {
+    type UnorderedItem = StarknetAPIMessageToL1;
+
+    fn to_ordered_tuple(&self, from_address: ContractAddress) -> (usize, Self::UnorderedItem) {
+        (
+            self.order,
+            StarknetAPIMessageToL1 {
+                from_address,
+                to_address: self
+                    .message
+                    .to_address
+                    .try_into()
+                    .expect("Failed to convert L1Address to EthAddress"),
+                payload: self.message.payload.clone(),
+            },
+        )
+    }
+
+    fn get_items_from_call_execution(execution: &CallExecution) -> &[Self] {
+        &execution.l2_to_l1_messages
+    }
+}
+
+/// Represents the effects of executing a single entry point.
+#[cfg_attr(any(test, feature = "testing"), derive(Clone))]
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[derive(Debug, Default, Eq, PartialEq, Serialize)]
+pub struct CallExecution {
+    pub retdata: Retdata,
+    pub events: Vec<OrderedEvent>,
+    pub l2_to_l1_messages: Vec<OrderedL2ToL1Message>,
+    pub cairo_native: bool,
+    pub failed: bool,
+    pub gas_consumed: u64,
+}
+
+#[cfg_attr(feature = "transaction_serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, Default, derive_more::AddAssign, PartialEq)]
+pub struct EventSummary {
+    pub n_events: usize,
+    pub total_event_keys: u64,
+    pub total_event_data_size: u64,
+}
+
+impl EventSummary {
+    pub fn to_gas_vector(
+        &self,
+        versioned_constants: &VersionedConstants,
+        mode: &GasVectorComputationMode,
+    ) -> GasVector {
+        let archival_gas_costs = versioned_constants.get_archival_data_gas_costs(mode);
+        let gas_amount: GasAmount = (archival_gas_costs.gas_per_data_felt
+            * (archival_gas_costs.event_key_factor * self.total_event_keys
+                + self.total_event_data_size))
+            .to_integer()
+            .into();
+        match mode {
+            GasVectorComputationMode::All => GasVector::from_l2_gas(gas_amount),
+            GasVectorComputationMode::NoL2Gas => GasVector::from_l1_gas(gas_amount),
+        }
+    }
+}
+
+#[cfg_attr(feature = "transaction_serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Copy, Debug, Default, derive_more::AddAssign, PartialEq)]
+pub struct CallSummary {
+    pub n_calls: u64,
+    pub n_calls_running_native: u64,
+}
+
+#[cfg_attr(feature = "transaction_serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExecutionSummary {
+    pub charged_resources: ChargedResources,
+    pub executed_class_hashes: HashSet<ClassHash>,
+    pub visited_storage_entries: HashSet<StorageEntry>,
+    pub l2_to_l1_payload_lengths: Vec<usize>,
+    pub event_summary: EventSummary,
+    pub call_summary: CallSummary,
+}
+
+impl Add for ExecutionSummary {
+    type Output = Self;
+
+    fn add(mut self, other: Self) -> Self {
+        self.charged_resources += &other.charged_resources;
+        self.executed_class_hashes.extend(other.executed_class_hashes);
+        self.visited_storage_entries.extend(other.visited_storage_entries);
+        self.l2_to_l1_payload_lengths.extend(other.l2_to_l1_payload_lengths);
+        self.event_summary += other.event_summary;
+        self.call_summary += other.call_summary;
+        self
+    }
+}
+
+impl Sum for ExecutionSummary {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(ExecutionSummary::default(), |acc, x| acc + x)
+    }
+}
+
+impl ExecutionSummary {
+    /// Returns a gas cost _estimation_ for the execution summary.
+    ///
+    /// In particular, this calculation ignores state changes, cost of declared classes, L1 handler
+    /// payload length, plus Starknet OS overhead. These costs are only accounted for on a
+    /// transaction level and cannot be computed based on a single execution summary.
+    #[cfg(feature = "node_api")]
+    pub fn to_partial_gas_vector(
+        self,
+        versioned_constants: &VersionedConstants,
+        mode: &GasVectorComputationMode,
+    ) -> GasVector {
+        use crate::fee::resources::{ComputationResources, MessageResources};
+
+        let computation_resources = ComputationResources {
+            tx_extended_vm_resources: self.charged_resources.extended_vm_resources,
+            os_vm_resources: ExecutionResources::default(),
+            n_reverted_steps: 0,
+            sierra_gas: self.charged_resources.gas_consumed,
+            reverted_sierra_gas: 0u64.into(),
+        };
+
+        [
+            computation_resources.to_gas_vector(versioned_constants, mode),
+            self.event_summary.to_gas_vector(versioned_constants, mode),
+            MessageResources::new(self.l2_to_l1_payload_lengths, None).to_gas_vector(),
+        ]
+        .iter()
+        .fold(GasVector::ZERO, |accumulator, cost| {
+            accumulator.checked_add(*cost).unwrap_or_else(|| {
+                panic!(
+                    "Execution summary to gas vector overflowed: tried to add {cost:?} to \
+                     {accumulator:?}"
+                );
+            })
+        })
+    }
+}
+
+/// L2 resources counted for fee charge.
+/// When all execution will be using gas (no VM mode), this should be removed, and the gas_consumed
+/// field should be used for fee collection.
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[derive(Clone, Debug, Default, Serialize, Eq, PartialEq)]
+pub struct ChargedResources {
+    pub extended_vm_resources: ExtendedExecutionResources, // Counted in CairoSteps mode calls.
+    pub gas_consumed: GasAmount,                           // Counted in SierraGas mode calls.
+}
+
+impl Add<&ChargedResources> for &ChargedResources {
+    type Output = ChargedResources;
+
+    fn add(self, rhs: &ChargedResources) -> ChargedResources {
+        let mut new = self.clone();
+        new.add_assign(rhs);
+        new
+    }
+}
+
+impl AddAssign<&ChargedResources> for ChargedResources {
+    fn add_assign(&mut self, other: &Self) {
+        self.extended_vm_resources += &other.extended_vm_resources;
+        self.gas_consumed =
+            self.gas_consumed.checked_add(other.gas_consumed).expect("Gas for fee overflowed.");
+    }
+}
+
+/// Extended execution resources that include both VM execution resources and opcode counter which
+/// are retrieved separately from the Cairo runner.
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ExtendedExecutionResources {
+    #[serde(flatten)]
+    pub vm_resources: ExecutionResources,
+    #[serde(default, skip_serializing_if = "OpcodeCounterMap::is_empty")]
+    pub opcode_instance_counter: OpcodeCounterMap,
+}
+
+impl AddAssign<&ExtendedExecutionResources> for ExtendedExecutionResources {
+    fn add_assign(&mut self, other: &ExtendedExecutionResources) {
+        self.vm_resources += &other.vm_resources;
+        for (opcode, count) in other.opcode_instance_counter.iter() {
+            *self.opcode_instance_counter.entry(*opcode).or_insert(0) += count;
+        }
+    }
+}
+
+impl AddAssign<&ExecutionResources> for ExtendedExecutionResources {
+    fn add_assign(&mut self, other: &ExecutionResources) {
+        self.vm_resources += other;
+    }
+}
+
+impl Add<&ExtendedExecutionResources> for &ExtendedExecutionResources {
+    type Output = ExtendedExecutionResources;
+
+    fn add(self, other: &ExtendedExecutionResources) -> ExtendedExecutionResources {
+        let mut new = self.clone();
+        new.add_assign(other);
+
+        new
+    }
+}
+
+impl Add<&ExecutionResources> for &ExtendedExecutionResources {
+    type Output = ExtendedExecutionResources;
+
+    fn add(self, other: &ExecutionResources) -> ExtendedExecutionResources {
+        let mut result = self.clone();
+        result += other;
+        result
+    }
+}
+
+impl Mul<usize> for &ExtendedExecutionResources {
+    type Output = ExtendedExecutionResources;
+
+    fn mul(self, rhs: usize) -> ExtendedExecutionResources {
+        let mut result = self.clone();
+        result *= rhs;
+        result
+    }
+}
+
+impl MulAssign<usize> for ExtendedExecutionResources {
+    fn mul_assign(&mut self, rhs: usize) {
+        self.vm_resources *= rhs;
+        for count in self.opcode_instance_counter.values_mut() {
+            *count *= rhs;
+        }
+    }
+}
+
+impl ExtendedExecutionResources {
+    pub fn prover_cairo_primitives(&self) -> CairoPrimitiveCounterMap {
+        let mut cairo_primitives = cairo_primitive_counter_map(self.vm_resources.prover_builtins());
+        cairo_primitives.extend(
+            self.opcode_instance_counter
+                .iter()
+                .map(|(opcode, count)| (CairoPrimitiveName::Opcode(*opcode), *count)),
+        );
+
+        cairo_primitives
+    }
+
+    pub fn filter_unused_cairo_primitives(&self) -> ExtendedExecutionResources {
+        ExtendedExecutionResources {
+            vm_resources: self.vm_resources.filter_unused_builtins(),
+            opcode_instance_counter: self
+                .opcode_instance_counter
+                .clone()
+                .into_iter()
+                .filter(|(_, count)| *count > 0)
+                .collect(),
+        }
+    }
+}
+
+const BLAKE_OPCODE_NAME_WITH_SUFFIX: &str = "blake_opcode";
+
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, Serialize, Ord, PartialOrd)]
+#[allow(non_camel_case_types)]
+pub enum OpcodeName {
+    // Allows deserialization from the suffixed form used in [`CairoPrimitiveName`].
+    #[serde(alias = "blake_opcode")]
+    blake,
+}
+
+impl OpcodeName {
+    /// Returns the opcode name with an "_opcode" suffix (e.g. `"blake_opcode"`).
+    /// Mirrors [`BuiltinName::to_str_with_suffix`] for consistent resource naming.
+    pub fn to_str_with_suffix(self) -> &'static str {
+        match self {
+            OpcodeName::blake => BLAKE_OPCODE_NAME_WITH_SUFFIX,
+        }
+    }
+}
+
+/// Wraps both [`BuiltinName`] and [`OpcodeName`] so they can share a single counter map.
+///
+/// Serialization is untagged for backward compatibility (prior to v0.14.2, only builtins existed).
+/// Opcodes are serialized with an "_opcode" suffix (via [`OpcodeName::to_str_with_suffix`]) so they
+/// are distinguishable from builtins in `builtin_counters`.
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[cfg_attr(feature = "transaction_serde", serde(untagged))]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub enum CairoPrimitiveName {
+    Builtin(BuiltinName),
+    Opcode(OpcodeName),
+}
+
+impl Serialize for CairoPrimitiveName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            CairoPrimitiveName::Builtin(builtin) => builtin.serialize(serializer),
+            CairoPrimitiveName::Opcode(opcode) => {
+                serializer.serialize_str(opcode.to_str_with_suffix())
+            }
+        }
+    }
+}
+
+impl From<BuiltinName> for CairoPrimitiveName {
+    fn from(builtin_name: BuiltinName) -> Self {
+        CairoPrimitiveName::Builtin(builtin_name)
+    }
+}
+
+impl From<OpcodeName> for CairoPrimitiveName {
+    fn from(opcode_name: OpcodeName) -> Self {
+        CairoPrimitiveName::Opcode(opcode_name)
+    }
+}
+
+pub type CairoPrimitiveCounterMap = BTreeMap<CairoPrimitiveName, usize>;
+
+pub type OpcodeCounterMap = BTreeMap<OpcodeName, usize>;
+
+pub type BuiltinCounterMap = BTreeMap<BuiltinName, usize>;
+
+pub fn cairo_primitive_counter_map<T: Into<CairoPrimitiveName>>(
+    cairo_primitives: impl IntoIterator<Item = (T, usize)>,
+) -> CairoPrimitiveCounterMap {
+    cairo_primitives.into_iter().map(|(name, count)| (name.into(), count)).collect()
+}
+
+#[cfg_attr(any(test, feature = "testing"), derive(Clone))]
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[derive(Debug, Default, Eq, PartialEq, Serialize)]
+pub struct StorageAccessTracker {
+    // TODO(Aner): refactor all to use a single enum with accessed_keys and ordered_values.
+    pub storage_read_values: Vec<Felt>,
+    pub accessed_storage_keys: HashSet<StorageKey>,
+    pub read_class_hash_values: Vec<ClassHash>,
+    pub accessed_contract_addresses: HashSet<ContractAddress>,
+    // TODO(Aner): add tests for storage tracking of contract 0x1
+    pub read_block_hash_values: Vec<BlockHash>,
+    pub accessed_blocks: HashSet<BlockNumber>,
+}
+
+/// Represents the full effects of executing an entry point, including the inner calls it invoked.
+#[cfg_attr(any(test, feature = "testing"), derive(Clone))]
+#[cfg_attr(feature = "transaction_serde", derive(serde::Deserialize))]
+#[derive(Debug, Default, Eq, PartialEq, Serialize)]
+pub struct CallInfo {
+    pub call: CallEntryPoint,
+    pub execution: CallExecution,
+    pub inner_calls: Vec<CallInfo>,
+    pub resources: ExtendedExecutionResources,
+    pub tracked_resource: TrackedResource,
+
+    // Additional information gathered during execution.
+    #[cfg(feature = "benchmarking")]
+    pub time: std::time::Duration,
+    pub storage_access_tracker: StorageAccessTracker,
+    // Tracks how many times each cairo primitive (builtin or opcode) was called during execution
+    // (excluding inner calls). Used by the bouncer to decide when to close a block.
+    pub builtin_counters: CairoPrimitiveCounterMap,
+    // Tracks how many times each syscall was called during execution (excluding inner calls).
+    pub syscalls_usage: SyscallUsageMap,
+}
+
+impl CallInfo {
+    /// Utility method to create an instance with a default Self::time field, if it exists.
+    #[expect(clippy::too_many_arguments)]
+    pub fn new(
+        call: CallEntryPoint,
+        execution: CallExecution,
+        inner_calls: Vec<CallInfo>,
+        resources: ExtendedExecutionResources,
+        tracked_resource: TrackedResource,
+        storage_access_tracker: StorageAccessTracker,
+        builtin_counters: CairoPrimitiveCounterMap,
+        syscalls_usage: SyscallUsageMap,
+    ) -> Self {
+        Self {
+            call,
+            execution,
+            inner_calls,
+            resources,
+            tracked_resource,
+            storage_access_tracker,
+            builtin_counters,
+            syscalls_usage,
+            #[cfg(feature = "benchmarking")]
+            time: Default::default(),
+        }
+    }
+
+    pub fn iter(&self) -> CallInfoIter<'_> {
+        let call_infos = vec![self];
+        CallInfoIter { call_infos }
+    }
+
+    fn specific_event_summary(&self) -> EventSummary {
+        let mut event_summary =
+            EventSummary { n_events: self.execution.events.len(), ..Default::default() };
+        for OrderedEvent { event, .. } in self.execution.events.iter() {
+            event_summary.total_event_data_size += u64_from_usize(event.data.0.len());
+            event_summary.total_event_keys += u64_from_usize(event.keys.len());
+        }
+        event_summary
+    }
+
+    pub fn summarize(&self, versioned_constants: &VersionedConstants) -> ExecutionSummary {
+        let mut executed_class_hashes: HashSet<ClassHash> = HashSet::new();
+        let mut visited_storage_entries: HashSet<StorageEntry> = HashSet::new();
+        let mut event_summary = EventSummary::default();
+        let mut l2_to_l1_payload_lengths = Vec::new();
+        let mut call_summary = CallSummary::default();
+
+        for call_info in self.iter() {
+            // Class hashes.
+            let class_hash =
+                call_info.call.class_hash.expect("Class hash must be set after execution.");
+            executed_class_hashes.insert(class_hash);
+
+            // Storage entries.
+            visited_storage_entries.extend(call_info.get_visited_storage_entries());
+
+            // Messages.
+            l2_to_l1_payload_lengths.extend(
+                call_info
+                    .execution
+                    .l2_to_l1_messages
+                    .iter()
+                    .map(|message| message.message.payload.0.len()),
+            );
+
+            // Events: all event resources in the execution tree, unless executing a 0.13.1 block.
+            if !versioned_constants.ignore_inner_event_resources {
+                event_summary += call_info.specific_event_summary();
+            }
+            call_summary.n_calls += 1;
+            if call_info.execution.cairo_native {
+                call_summary.n_calls_running_native += 1;
+            }
+        }
+
+        if versioned_constants.ignore_inner_event_resources {
+            // For reexecution of 0.13.1 blocks, we ignore inner events resources - only outermost
+            // event data will be processed.
+            event_summary = self.specific_event_summary();
+        }
+
+        ExecutionSummary {
+            // Note: the vm_resources and gas_consumed of a call contains the inner call resources,
+            // unlike other fields such as events and messages.
+            charged_resources: ChargedResources {
+                extended_vm_resources: self.resources.clone(),
+                gas_consumed: GasAmount(self.execution.gas_consumed),
+            },
+            executed_class_hashes,
+            visited_storage_entries,
+            l2_to_l1_payload_lengths,
+            event_summary,
+            call_summary,
+        }
+    }
+
+    pub fn summarize_many<'a>(
+        call_infos: impl Iterator<Item = &'a CallInfo>,
+        versioned_constants: &VersionedConstants,
+    ) -> ExecutionSummary {
+        call_infos.map(|call_info| call_info.summarize(versioned_constants)).sum()
+    }
+
+    pub fn summarize_vm_resources<'a>(
+        call_infos: impl Iterator<Item = &'a CallInfo>,
+    ) -> ExtendedExecutionResources {
+        // Note: the vm resources (and entire charged resources) of a call contains the inner call
+        // resources, unlike other fields such as events and messages.
+        call_infos.fold(ExtendedExecutionResources::default(), |mut acc, inner_call| {
+            acc += &inner_call.resources;
+            acc
+        })
+    }
+
+    pub fn get_visited_storage_entries(&self) -> impl Iterator<Item = StorageEntry> + '_ {
+        let storage_address = self.call.storage_address;
+        self.storage_access_tracker
+            .accessed_storage_keys
+            .iter()
+            .map(move |key| (storage_address, *key))
+    }
+
+    /// Contract addresses whose contracts-trie leaf the OS needs to replay this call: the call's
+    /// own `storage_address` (always read at dispatch), the `code_address` of delegate-style calls
+    /// when set (covers the deprecated `delegate_call` target), and any address queried via
+    /// `get_class_hash_at` (mirrored by `storage_access_tracker.accessed_contract_addresses`).
+    /// Inner calls are not traversed — use `CallInfo::iter` to walk the tree.
+    pub fn get_visited_contract_addresses(&self) -> impl Iterator<Item = ContractAddress> + '_ {
+        std::iter::once(self.call.storage_address)
+            .chain(self.call.code_address)
+            .chain(self.storage_access_tracker.accessed_contract_addresses.iter().copied())
+    }
+
+    /// Returns a vector of Starknet Event objects collected during the execution, sorted by the
+    /// order in which they were emitted.
+    pub fn get_sorted_events(&self) -> Vec<Event> {
+        OrderedEvent::sorted_items(self)
+    }
+
+    /// Returns a vector of Starknet MessageToL1 objects collected during the execution,
+    /// sorted by the order in which they were sent.
+    pub fn get_sorted_l2_to_l1_messages(&self) -> Vec<StarknetAPIMessageToL1> {
+        OrderedL2ToL1Message::sorted_items(self)
+    }
+}
+
+pub struct CallInfoIter<'a> {
+    call_infos: Vec<&'a CallInfo>,
+}
+
+impl<'a> Iterator for CallInfoIter<'a> {
+    type Item = &'a CallInfo;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let call_info = self.call_infos.pop()?;
+
+        // Push order is right to left.
+        self.call_infos.extend(call_info.inner_calls.iter().rev());
+        Some(call_info)
+    }
+}
+
+impl CallInfoIter<'_> {
+    pub fn new(call_infos: Vec<&CallInfo>) -> CallInfoIter<'_> {
+        // Push order is right to left.
+        CallInfoIter { call_infos: call_infos.into_iter().rev().collect() }
+    }
+}

@@ -1,0 +1,57 @@
+use crate::errors::{DeserializationError, SerializationResult};
+use crate::storage_trait::{create_db_key, DbKey, DbKeyPrefix, DbValue};
+
+pub struct EmptyKeyContext;
+
+pub trait HasDynamicPrefix {
+    /// Extra data needed to construct a leaf for node db key prefix. For example, in index layout,
+    /// we need to know the trie type of inner nodes.
+    type KeyContext;
+
+    /// Returns the storage key prefix of the DB object.
+    fn get_prefix(&self, key_context: &Self::KeyContext) -> DbKeyPrefix;
+}
+
+pub trait HasStaticPrefix {
+    /// Extra data needed to construct a leaf for node db key prefix. For example, in index layout,
+    /// we need to know the trie type of inner nodes.
+    type KeyContext;
+
+    /// Returns the storage key prefix of the DB object.
+    fn get_static_prefix(key_context: &Self::KeyContext) -> DbKeyPrefix;
+}
+
+impl<T: HasStaticPrefix> HasDynamicPrefix for T {
+    /// Inherit the KeyContext from the HasStaticPrefix trait.
+    type KeyContext = T::KeyContext;
+
+    fn get_prefix(&self, key_context: &Self::KeyContext) -> DbKeyPrefix {
+        T::get_static_prefix(key_context)
+    }
+}
+
+pub struct EmptyDeserializationContext;
+
+pub trait DBObject: Sized + HasDynamicPrefix {
+    /// The separator between the prefix and the suffix in the db key.
+    const DB_KEY_SEPARATOR: &[u8];
+
+    /// Extra data needed to deserialize the object. For example, facts layout nodes need the node
+    /// hash and an indication of whether or not it's a leaf node (index layout nodes only need the
+    /// latter).
+    type DeserializeContext;
+
+    /// Serializes the given value.
+    fn serialize(&self) -> SerializationResult<DbValue>;
+
+    /// Deserializes the given value using the provided context.
+    fn deserialize(
+        value: &DbValue,
+        deserialize_context: &Self::DeserializeContext,
+    ) -> Result<Self, DeserializationError>;
+
+    /// Returns a [DbKey] from a prefix and a suffix.
+    fn get_db_key(&self, key_context: &Self::KeyContext, suffix: &[u8]) -> DbKey {
+        create_db_key(self.get_prefix(key_context), Self::DB_KEY_SEPARATOR, suffix)
+    }
+}

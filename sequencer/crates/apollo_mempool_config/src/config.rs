@@ -1,0 +1,158 @@
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use apollo_config::behavior_mode::BehaviorMode;
+use apollo_config::converters::deserialize_seconds_to_duration;
+use apollo_config::dumping::{prepend_sub_config_name, ser_param, SerializeConfig};
+use apollo_config::{ParamPath, ParamPrivacyInput, SerializedParam};
+use serde::{Deserialize, Serialize};
+use url::Url;
+use validator::Validate;
+
+#[cfg(test)]
+#[path = "config_test.rs"]
+mod config_test;
+
+/// Configuration for consensus containing both static and dynamic configs.
+#[derive(Debug, Deserialize, Default, Serialize, Clone, PartialEq, Validate)]
+pub struct MempoolConfig {
+    #[validate(nested)]
+    pub dynamic_config: MempoolDynamicConfig,
+    #[validate(nested)]
+    pub static_config: MempoolStaticConfig,
+}
+
+impl SerializeConfig for MempoolConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        let mut config = BTreeMap::new();
+        config.extend(prepend_sub_config_name(self.dynamic_config.dump(), "dynamic_config"));
+        config.extend(prepend_sub_config_name(self.static_config.dump(), "static_config"));
+        config
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Validate)]
+pub struct MempoolDynamicConfig {
+    // Time-to-live for transactions in the mempool, in seconds.
+    // Transactions older than this value will be lazily removed.
+    #[serde(deserialize_with = "deserialize_seconds_to_duration")]
+    pub transaction_ttl: Duration,
+}
+
+impl Default for MempoolDynamicConfig {
+    fn default() -> Self {
+        Self {
+            transaction_ttl: Duration::from_secs(60), // 1 minute.
+        }
+    }
+}
+
+impl SerializeConfig for MempoolDynamicConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        BTreeMap::from_iter([ser_param(
+            "transaction_ttl",
+            &self.transaction_ttl.as_secs(),
+            "Time-to-live for transactions in the mempool, in seconds.",
+            ParamPrivacyInput::Public,
+        )])
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Validate)]
+pub struct MempoolStaticConfig {
+    pub enable_fee_escalation: bool,
+    // Percentage increase for tip and max gas price to enable transaction replacement.
+    #[validate(range(min = 1, max = 100))]
+    pub fee_escalation_percentage: u8, // E.g., 10 for a 10% increase.
+    // If true, only transactions with max L2 gas price per unit bound that are above the threshold
+    // are inserted into the priority queue. If false, all transactions are inserted into the
+    // priority queue.
+    pub validate_resource_bounds: bool,
+    // Time to wait before allowing a Declare transaction to be returned in `get_txs`.
+    // Declare transactions are delayed to allow other nodes sufficient time to compile them.
+    #[serde(deserialize_with = "deserialize_seconds_to_duration")]
+    pub declare_delay: Duration,
+    // Number of latest committed blocks for which committed account nonces are preserved.
+    pub committed_nonce_retention_block_count: usize,
+    // The maximum size of the mempool, in bytes.
+    pub capacity_in_bytes: u64,
+    // Determines queue type and other behavior.
+    pub behavior_mode: BehaviorMode,
+    // The URL of the recorder service (used for FIFO queue timestamp fetching).
+    pub recorder_url: Url,
+}
+
+impl Default for MempoolStaticConfig {
+    fn default() -> Self {
+        Self {
+            enable_fee_escalation: true,
+            validate_resource_bounds: true,
+            fee_escalation_percentage: 10,
+            declare_delay: Duration::from_secs(1),
+            committed_nonce_retention_block_count: 100,
+            capacity_in_bytes: 1 << 30, // 1GB.
+            behavior_mode: BehaviorMode::Starknet,
+            recorder_url: "https://recorder_url"
+                .parse::<Url>()
+                .expect("recorder_url must be a valid Recorder URL"),
+        }
+    }
+}
+
+impl SerializeConfig for MempoolStaticConfig {
+    fn dump(&self) -> BTreeMap<ParamPath, SerializedParam> {
+        BTreeMap::from_iter([
+            ser_param(
+                "enable_fee_escalation",
+                &self.enable_fee_escalation,
+                "If true, transactions can be replaced with higher fee transactions.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "validate_resource_bounds",
+                &self.validate_resource_bounds,
+                "If true, only transactions with max L2 gas price per unit bound that are above \
+                 the threshold are inserted into the priority queue. If false, all transactions \
+                 are inserted into the priority queue.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "fee_escalation_percentage",
+                &self.fee_escalation_percentage,
+                "Percentage increase for tip and max gas price to enable transaction replacement.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "declare_delay",
+                &self.declare_delay.as_secs(),
+                "Time to wait before allowing a Declare transaction to be returned, in seconds.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "committed_nonce_retention_block_count",
+                &self.committed_nonce_retention_block_count,
+                "Number of latest committed blocks for which committed account nonces are \
+                 retained.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "capacity_in_bytes",
+                &self.capacity_in_bytes,
+                "Maximum size of the mempool, in bytes.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "behavior_mode",
+                &self.behavior_mode,
+                "Behavior mode: 'starknet' for production, 'echonet' for test/replay mode.",
+                ParamPrivacyInput::Public,
+            ),
+            ser_param(
+                "recorder_url",
+                &self.recorder_url,
+                "The URL of the recorder service (used for FIFO queue timestamp fetching).",
+                ParamPrivacyInput::Public,
+            ),
+        ])
+    }
+}

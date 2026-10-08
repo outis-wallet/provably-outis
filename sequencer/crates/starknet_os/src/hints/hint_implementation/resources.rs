@@ -1,0 +1,50 @@
+use blockifier::execution::contract_class::TrackedResource;
+use blockifier::state::state_api::StateReader;
+use starknet_types_core::felt::Felt;
+
+use crate::hint_processor::snos_hint_processor::SnosHintProcessor;
+use crate::hints::error::{OsHintError, OsHintResult};
+use crate::hints::types::HintContext;
+use crate::hints::vars::Ids;
+
+pub(crate) fn remaining_gas_gt_max(mut ctx: HintContext<'_>) -> OsHintResult {
+    let remaining_gas = ctx.get_integer(Ids::RemainingGas)?;
+    let max_gas = ctx.get_integer(Ids::MaxGas)?;
+    let remaining_gas_gt_max: Felt = (remaining_gas > max_gas).into();
+    Ok(ctx.insert_value(Ids::RemainingGasGtMax, remaining_gas_gt_max)?)
+}
+
+pub(crate) fn debug_expected_initial_gas<S: StateReader>(
+    hint_processor: &mut SnosHintProcessor<'_, S>,
+    ctx: HintContext<'_>,
+) -> OsHintResult {
+    let current_execution_helper =
+        hint_processor.execution_helpers_manager.get_current_execution_helper()?;
+    if current_execution_helper.os_logger.debug {
+        let call_info = current_execution_helper
+            .tx_execution_iter
+            .get_tx_execution_info_ref()?
+            .get_call_info_tracker()?
+            .call_info;
+        let expected_initial_gas = Felt::from(call_info.call.initial_gas);
+        let call_initial_gas = ctx.get_integer(Ids::InnerRemainingGas)?;
+        if expected_initial_gas != call_initial_gas {
+            return Err(OsHintError::AssertionFailed {
+                message: format!(
+                    "Expected remaining_gas {expected_initial_gas}. Got: {call_initial_gas}. call \
+                     info: {call_info:?}.",
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn is_sierra_gas_mode<S: StateReader>(
+    hint_processor: &mut SnosHintProcessor<'_, S>,
+    mut ctx: HintContext<'_>,
+) -> OsHintResult {
+    let gas_mode = hint_processor.get_current_call_info_tracker()?.call_info.tracked_resource;
+
+    Ok(ctx.insert_value(Ids::IsSierraGasMode, Felt::from(gas_mode == TrackedResource::SierraGas))?)
+}
