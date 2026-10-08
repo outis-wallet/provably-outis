@@ -1,0 +1,7 @@
+block 16274091, tx 0x4129c5b2d99825b27347a2293857bb75289a4589d48abec97006762d6522784
+round 1 missed 1 storage
+round 2 missed 1 storage
+round 3 missed 1 storage
+n_steps=381442 n_memory_holes=106267 memory=2af0b597543e3d7c metadata=052b0338ad9d2c91 additional_data=519695c6563fa008 resources=34ed8dcb678d90cc
+proving
+input 0.18 s (4 rounds), OS 0.31 s, prove 10.0 s (36 threads), verify 0.10 s Ok; proof IDENTICAL to the native prover's; peak RSS 2754 MiB

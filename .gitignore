@@ -11,3 +11,6 @@ web/certs/
 .DS_Store
 # Xcode per-user state.
 xcuserdata/
+captures/**/replay-out/
+captures/**/native-result.json
+captures/**/current-virtual-os-input.json

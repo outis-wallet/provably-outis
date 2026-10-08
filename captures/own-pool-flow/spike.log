@@ -1,0 +1,24 @@
+13:30:45 own-pool/bob-registers: starting
+13:31:27 bob registers: proven in 42 s by http://127.0.0.1:3001, PROOF1, 220 KiB
+13:31:28 bob registers: proof made against block 16274105; waited 1 s for it to be 10 blocks old
+13:31:42 bob registers: accepted in 0x0751a70198ca083ef89325d57bd9b4eefec1cac2786a5f1f3c5c6160c53e4a2e, block 16274126, sent by bob for 1.1907 STRK
+13:31:47 own-pool/bob-registers: done
+13:31:47 own-pool/alice-deposits: starting
+13:32:48 alice deposits: proven in 61 s by http://127.0.0.1:3001, PROOF1, 223 KiB
+13:32:49 alice deposits: proof made against block 16274151; waited 1 s for it to be 10 blocks old
+13:32:57 alice deposits: accepted in 0x05999d95a6c4ceefed416b168c8d65b9fb3e157b7d49ac3a38fc4d68cebad09e, block 16274170, sent by alice for 1.2955 STRK
+13:33:02 own-pool/alice-deposits: done
+13:33:08 alice holds 5 STRK privately; the pool holds 6 STRK
+13:33:08 own-pool/alice-pays-bob: starting
+13:34:04 alice pays bob: proven in 55 s by http://127.0.0.1:3001, PROOF1, 232 KiB
+13:34:04 alice pays bob: proof made against block 16274196; waited 1 s for it to be 10 blocks old
+13:34:21 alice pays bob: accepted in 0x02637c6866a53b25312ad94a391191d08aa942e71ffdb693cbf7499c0cebf37b, block 16274218, sent by alice for 1.252 STRK
+13:34:24 own-pool/alice-pays-bob: done
+13:34:34 alice holds 2 STRK privately, bob 3 STRK
+13:34:34 own-pool/bob-withdraws: starting
+13:35:08 bob withdraws: proven in 34 s by http://127.0.0.1:3001, PROOF1, 230 KiB
+13:35:14 bob withdraws: proof made against block 16274238; waited 5 s for it to be 10 blocks old
+13:35:27 bob withdraws: accepted in 0x012ce812352c9aab920730cc1bf02eedf749543ef901270ec410f28a7f4b7174, block 16274256, sent by alice for 1.2508 STRK
+13:35:28 own-pool/bob-withdraws: done
+13:35:34 bob holds 1 STRK privately
+13:35:35 the withdrawal address 0x051243573b724dbfc55c53fd5e9fbff6653dbf409982f86200f4cdb2ccd9bb23 holds 6 STRK; the pool holds 4 STRK

@@ -214,3 +214,40 @@ physical footprint (task_info, what jetsam counts) / peak RSS; browser = wasm me
   (aarch64 tx prover binary on the phone, or memory64 later) has no cap.
 - Native Android alternative (user asked 2026-10-08): cross-compile starknet_transaction_prover for
   aarch64 and run it on the phone on 127.0.0.1:3000; the phone browser's SDK calls it unchanged.
+
+## Other actions: deposit, transfer, withdrawal (2026-10-08)
+
+So far only "bob registers" had been proven. To measure the other actions, the chain needs real
+notes. Sepolia rejects PROOF2, so each step was proven twice. `tools/capture-router.py` (port 3001)
+sends every starknet_proveTransaction first to OUR 0.14.4 prover. That pass is the measured PROOF2
+capture: its node traffic goes through rpc-record-proxy.py and its OS input is dumped. The router
+then sends the request to the 0.14.3 docker prover (`murk-tx-prover:0.14.3-rc.2`, PROVER_PORT
+3002). That PROOF1 answer goes back to the spike, which submits it so the next step has its
+notes.
+
+Run: `OUTIS_PROVER_URL=http://127.0.0.1:3001 pnpm -s spike private` (own pool), with the spike's
+cached proofs moved to `.state/proof-cache-20261008/`. Captures are in `captures/own-pool-flow/NN/`
+(label file, request, our response, rpc-log, OS input, CASM). From step 02 on, our prover had
+both classes cached, so their getClass records and CASM were copied from 01
+(`classes-from-01.txt`). Batch replay: `tools/replay-all.sh captures/own-pool-flow [native|node]`.
+
+On-chain, Sepolia (all PROOF1, about 1.2-1.3 STRK fee each):
+- bob registers: 0x0751a701...4a2e
+- alice deposits 5 STRK: 0x05999d95...d09e
+- alice pays bob 3: 0x02637c68...f37b
+- bob withdraws 2: 0x012ce812...7174
+
+After the run: alice holds 2 STRK privately, bob 1.
+
+| Action | OS steps | Native prove, x86 36 threads | Native peak RSS | Wasm (Node, 1 thread) prove | Wasm memory (peak live) |
+|---|---|---|---|---|---|
+| bob registers | 381,442 | 10.0 s | 2754 MiB | 157.2 s | 2368 MiB (2292) |
+| alice deposits | 450,235 | 10.7 s | 2764 MiB | 169.4 s | 2414 MiB (2353) |
+| alice pays bob | 459,169 | 10.1 s | 2888 MiB | 149.2 s | 2451 MiB (2390) |
+| bob withdraws | 461,365 | 9.9 s | 2875 MiB | 149.6 s | 2451 MiB (2390) |
+
+Every proof is IDENTICAL to our native prover's and verifies Ok, native and wasm. Deposit,
+transfer and withdrawal run 18-21% more OS steps than register. None crosses a power-of-two
+trace size, so prove time is the same within noise and memory is +2-4% (wasm +83 MiB at most).
+Expect the phone numbers above to hold for all four actions. Not measured yet: a transfer that
+spends several notes, and the public pool.

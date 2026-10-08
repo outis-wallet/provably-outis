@@ -1,0 +1,14 @@
+block 16274129, tx 0x1679124d4214f4a18a0a5842efaf1b828c39897fdb0b77608db5652f9d5fa50
+prefetched 17 storage, 1 nonces, 2 class hashes
+round 1 missed 1 storage, 0 nonces, 0 class hashes, 0 classes
+round 2 missed 1 storage, 0 nonces, 0 class hashes, 0 classes
+round 3 missed 1 storage, 0 nonces, 0 class hashes, 0 classes
+executed in round 4; 1 storage proof request(s)
+storage proof params match the recording
+building the virtual OS input from the storage proofs
+MEM input built: wasm 84 live 13 peak 19
+input built in 0.43 s from 10 calls: starknet_getBlockWithTxHashes, starknet_simulateTransactions, starknet_getCompiledCasm, starknet_getClass, starknet_getStorageAt, starknet_getStorageProof
+n_steps=450235 n_memory_holes=103702 memory=d3332942694cd31d metadata=77ebed305e360404 additional_data=1814999bc9764fcc resources=af307176bfc18d3d in 1.30 s
+MEM virtual OS done: wasm 238 live 61 peak 137
+MEM proved: wasm 2414 live 337 peak 2353
+proved in 169.4 s: proof 312812 chars, IDENTICAL to the native proof; proof_facts match; l2_to_l1_messages match; wasm memory 2.66 GiB rss

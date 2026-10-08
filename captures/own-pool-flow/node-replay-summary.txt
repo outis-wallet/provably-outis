@@ -1,0 +1,4 @@
+bob-registers node: proved in 157.2 s: proof 313040 chars, IDENTICAL to the native proof; proof_facts match; l2_to_l1_messages match; wasm memory 2.61 GiB rss
+alice-deposits node: proved in 169.4 s: proof 312812 chars, IDENTICAL to the native proof; proof_facts match; l2_to_l1_messages match; wasm memory 2.66 GiB rss
+alice-pays-bob node: proved in 149.2 s: proof 310388 chars, IDENTICAL to the native proof; proof_facts match; l2_to_l1_messages match; wasm memory 2.70 GiB rss
+bob-withdraws node: proved in 149.6 s: proof 291736 chars, IDENTICAL to the native proof; proof_facts match; l2_to_l1_messages match; wasm memory 2.73 GiB rss
