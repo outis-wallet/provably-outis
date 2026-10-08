@@ -6,6 +6,8 @@ mod committer_utils;
 mod errors;
 mod executor;
 mod memory;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod replay;
 mod state_reader;
 mod storage_proofs;
 

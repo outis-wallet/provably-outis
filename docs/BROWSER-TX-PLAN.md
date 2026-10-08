@@ -158,8 +158,55 @@ response-172915.json (proof), virtual-os-input.json (2.7 MB; 1 tx, 2 compiled cl
   S25+ Chrome right after (warmer), 8 threads, live: input 12.1 s, OS 1.1 s, prove 30.9 s, total
   44.2 s, wasm 2.36 GiB, VERIFIED. Native/browser prove ratio: S25+ 1.19x, S9+ 1.86x.
 
+## Mac and iPad (2026-10-08, MAC-IOS-PLAN.md)
+All replays of capture2: proof IDENTICAL to the native 0.14.4 prover's (proof, proof_facts,
+messages), verifier Ok; PIE memory cbc687804a267515 everywhere. Peak memory: native = peak
+physical footprint (task_info, what jetsam counts) / peak RSS; browser = wasm memory.
+
+| Device | Mode | Threads | OS | Prove | Total | Peak memory |
+|---|---|---|---|---|---|---|
+| MacBook Pro M5 Pro (18 cores, 64 GB), macOS 26.5.2 | native | 18 | 0.17 s | 4.8 s | 5.1 s | 2.39 / 2.67 GiB |
+| same | native | 8 | 0.15 s | 7.9 s | 8.2 s | 2.34 / 2.64 GiB |
+| same | native | 1 | 0.16 s | 47.7 s | 48.0 s | 2.28 / 2.56 GiB |
+| same | headless Chrome 154 | 8 | 0.5 s | 16.1 s | 16.9 s | 2.37 GiB wasm |
+| same | headless Chrome 154 | 16 | 0.5 s | 19.2 s | 20.0 s | 2.40 GiB wasm |
+| same | Safari 26.5.2 | 8 | 0.3 s | 21.9 s | 22.8 s | 2.35 GiB wasm |
+| iPad Air 5th gen (M1, 8 cores, 8 GB), iPadOS 26.6.2 | native app | 8 | 0.31 s | 14.9 s | 15.4 s | 2.34 / 2.61 GiB |
+| same | Safari (HTTPS, mkcert) | 8 | 0.4 s | 41.8 s | 47.2 s | 2.36 GiB wasm |
+| iPhone 17 Pro (A19 Pro, 2P+4E cores, 12 GB), iOS 26.5.2 | native app | 6 | 0.25 s | 22.2 s | 22.7 s | 2.33 / 2.51 GiB |
+
+- Thermal: nominal before and after on the iPad and the iPhone (ProcessInfo.thermalState); Mac
+  on mains. iPhone: native only (no Safari run, by choice).
+- Native/browser prove ratio: Mac Chrome 2.0x, Mac Safari 2.8x, iPad Safari 2.8x.
+  JavaScriptCore's wasm is the slow part, not the device. Chrome gets slower past 8 threads.
+- Safari (macOS and iPadOS) needs nothing special: it grows shared wasm memory to 2.4 GiB and
+  runs wasm-bindgen-rayon's nested module workers. No tab kill on the 8 GB iPad.
+- iPad and iPhone native: no jetsam kill without `increased-memory-limit` (footprint 2.34 GiB
+  of 8 GB, 2.33 GiB of 12 GB). The iPhone 17 Pro (2 performance cores) is slower than the M1
+  iPad (4) and a little faster than the Galaxy S25+ native (26.0 s, 8 threads).
+- Page replay mode: `web/tx/?replay` serves the RPC from `web/tx/capture` (a link to
+  captures/capture2) with the same lookup as replay.mjs (now `replayRpc` in tx-driver.mjs) and
+  compares with the native response (`compareWithNative`). `input_s` includes wasm load and
+  the capture fetch (iPad Safari: 4.3 s of its 4.9 s was the wasm load).
+- iPadOS Safari sends a Macintosh user agent (desktop mode); results.log records it as such.
+- Native on Apple: `os_native_probe replay` now reads peak memory with task_info(TASK_VM_INFO),
+  the struct through rev 3 (the kernel fills whole revisions only: a struct ending at
+  ledger_phys_footprint_peak returns 0). macOS build: 3 min cold.
+- iOS: the replay driver moved from main.rs into `os_wasm_probe::replay` with a C entry point
+  `tx_prove_replay(capture_dir, threads)` (rayon pool with 16 MiB stacks: install() runs the
+  whole pipeline on a pool thread). `ios/build-rust.sh` builds the staticlib (`cargo rustc
+  --crate-type staticlib`, 480 MB unstripped) for aarch64-apple-ios and -ios-sim; the app
+  (ios/TxProver.xcodeproj, SwiftUI) links it and bundles capture2. tikv-jemalloc-sys does not
+  configure for aarch64-apple-ios-sim, so apollo_infra_utils leaves jemalloc out on iOS (only
+  the sequencer binaries' set_global_allocator! uses it).
+- Simulator (iPhone 17 Pro, on the M5 Pro): prove 9.8 s on 18 threads, IDENTICAL.
+
 ## Next
 - DONE: prove in the same wasm (identical to native), browser live, threads, S9+.
+- DONE: Mac (native, Chrome, Safari), iPad (native app, Safari), iPhone 17 Pro (native app);
+  see above.
+- Open: the M1 iPad Air proves faster than the iPhone 17 Pro (14.9 s vs 22.2 s). The causes
+  and the experiment are in MAC-IOS-PLAN.md ("Open: why the iPad Air beats the iPhone 17 Pro").
 - S25+ run when it is attached.
 - Hook into Outis: the SDK calls starknet_proveTransaction on PROVER_URL; an in-page prover
   could answer it (worker) instead of HTTP. Discuss with the user before building.

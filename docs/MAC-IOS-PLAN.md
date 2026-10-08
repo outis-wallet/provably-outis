@@ -5,6 +5,86 @@ real Outis privacy-pool transaction client-side. The work runs the transaction, 
 OS and the privacy prover. It was written on 2026-10-08 on the Linux box (broody@ desktop). Read it
 on the Mac without any other context.
 
+## Status (2026-10-08, on the Mac)
+
+Done on a MacBook Pro M5 Pro, an iPad Air 5th gen (M1) and an iPhone 17 Pro (native only). All
+are replays and all are IDENTICAL. Results are in `BROWSER-TX-PLAN.md` ("Mac and iPad").
+
+- Step 0b: done. Use `web/tx/?replay`. `web/tx/capture` is a symlink to `captures/capture2`
+  (not a copy).
+- Step 1: done in both browsers. Chrome ran headless with its own profile:
+  `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new
+  --user-data-dir=<tmp> "http://localhost:8765/tx/?replay&threads=8&auto"`. Safari: run
+  `open -a Safari <same URL>`.
+- Step 2: done. `replay` now prints peak RSS and peak footprint on macOS too.
+- Step 3: done on the iPad (not the iPhone) with mkcert, without `mkcert -install` (the iPad only needs the
+  public `rootCA.pem`).
+  - Generate the cert:
+    `mkdir -p web/certs && cd web/certs && mkcert -cert-file lan.pem -key-file lan-key.pem
+    <host>.local <LAN IP> localhost`. `web/certs` is gitignored.
+  - Serve:
+    `cd web && CERT=certs/lan.pem KEY=certs/lan-key.pem HOST=0.0.0.0 python3 server.py 8443`.
+  - AirDrop `$(mkcert -CAROOT)/rootCA.pem` (never `rootCA-key.pem`) to the device. Install it
+    under Settings > General > VPN & Device Management, then turn on trust under About >
+    Certificate Trust Settings.
+  - To open the page from the Mac: `xcrun devicectl device process launch --device <udid>
+    --payload-url "https://<host>.local:8443/tx/?replay&threads=8&auto" com.apple.mobilesafari`.
+- Step 4: done on the iPad and the iPhone. A new device first needs pairing
+  (`xcrun devicectl manage pair --device <id>`, then Trust on the device) and Developer Mode
+  (Settings > Privacy & Security, restart). The app is `ios/TxProver.xcodeproj`. It is SwiftUI, links the static lib, and
+  bundles capture2 through a build phase. Recipe:
+  - `ios/build-rust.sh` builds the static lib for the device and the simulator. It needs the
+    venv and `rustup +nightly-2026-01-15 target add aarch64-apple-ios aarch64-apple-ios-sim`.
+  - Build and sign:
+    `cd ios && xcodebuild -project TxProver.xcodeproj -scheme TxProver -configuration Release
+    -destination 'id=<udid>' -allowProvisioningUpdates DEVELOPMENT_TEAM=<team> build`.
+    The first time, this created an Apple Development certificate. The developer account must
+    have the latest Program License Agreement accepted.
+  - Install: `xcrun devicectl device install app --device <udid> <DerivedData>/Build/Products/Release-iphoneos/TxProver.app`.
+  - Run: `xcrun devicectl device process launch --console --terminate-existing --device <udid>
+    dev.provingly.TxProver --prove --threads 8`. The report is printed after
+    `TX_PROVER_RESULT`.
+  - The increased-memory-limit capability was not needed on the 8 GB iPad or the 12 GB iPhone.
+
+## Open: why the iPad Air (M1) beats the iPhone 17 Pro
+
+The iPad Air 5th gen (M1, 2022) proved in 14.9 s on 8 threads. The iPhone 17 Pro (A19 Pro)
+took 22.2 s on 6 threads, about 1.5x slower. Each A19 Pro core is about 1.7x an M1 core, so
+this is unexpected. The candidate causes, none of them measured yet:
+
+1. Core mix. M1 is 4 performance + 4 efficiency cores; A19 Pro is 2 performance + 4 efficiency.
+   The prover is a long all-core job. If its parallel parts split the work evenly, the slow
+   efficiency cores set the pace, and the iPhone has 4 of 6 against the iPad's 4 of 8.
+2. Sustained power. The iPhone is small, passively cooled and was charging on the cable. It
+   may drop its clocks over a 22 s all-core run. ProcessInfo.thermalState stayed "nominal" on
+   both devices, but that reading is coarse and does not show mild throttling.
+3. Memory bandwidth per core. The prover moves about 2.3 GiB of working set. The M1 has a
+   128-bit memory bus; the phone chip has less bandwidth to share.
+4. Thread QoS. The rayon pool is built from a `.userInitiated` Swift task. If its threads get
+   a lower QoS on iOS, the scheduler may keep them on efficiency cores.
+
+Experiment (devices unlocked, screen on, same cable; about 5 minutes per device):
+
+- iPhone: threads 6, 2, 4, 6, back to back, then once more at 6 after 5 minutes of cooling,
+  unplugged if possible (not charging):
+  `xcrun devicectl device process launch --console --terminate-existing --device <udid>
+  dev.provingly.TxProver --prove --threads N`.
+- iPad: threads 8, 4, 8.
+
+Read the results:
+
+- If 2 threads is close to 6 on the iPhone, its efficiency cores add little: cause 1. Compare
+  4 threads on the iPad to 2 threads on the iPhone (performance cores only, per core).
+- If the back-to-back runs at 6 slow down and the cooled run is faster: cause 2. Also try with
+  Low Power Mode off and the phone on a cool surface.
+- If neither explains it: time the phases. Turn on tracing natively in `tx_prove_replay`, as
+  `init_logging` does on wasm, and compare the base trace commit with the FRI/FFT phases
+  between devices: cause 3. For cause 4, set the pool threads' QoS with
+  `pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED)` in a rayon `start_handler`.
+
+The first try (2026-10-08) did not run: the launch was refused (`RequestDenied`, phone
+locked) and then the phone was disconnected.
+
 ## What exists (Linux, 2026-10-08)
 
 The pipeline is: JSON-RPC reads (done by JS or by a driver), then blockifier execution, storage

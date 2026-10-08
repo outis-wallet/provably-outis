@@ -1,8 +1,11 @@
 """Serves this directory for the phone test and appends what the page POSTs to /result to results.log.
-POST /rpc is forwarded to the Starknet node (RPC_URL), which sends no CORS headers itself."""
-import http.server, os, sys, datetime, urllib.request
+POST /rpc is forwarded to the Starknet node (RPC_URL), which sends no CORS headers itself.
+Other devices need HTTPS (threads need a secure context): CERT=cert.pem KEY=key.pem HOST=0.0.0.0
+serves TLS on all interfaces (an mkcert certificate; see docs/MAC-IOS-PLAN.md)."""
+import http.server, os, ssl, sys, datetime, urllib.request
 
 RPC_URL = os.environ.get('RPC_URL', 'http://127.0.0.1:9545/rpc/v0_10')
+HOST = os.environ.get('HOST', '127.0.0.1')
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map, '.wasm': 'application/wasm', '.js': 'text/javascript'}
@@ -46,4 +49,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(answer)
 
-http.server.ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), Handler).serve_forever()
+server = http.server.ThreadingHTTPServer((HOST, int(sys.argv[1])), Handler)
+if os.environ.get('CERT'):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(os.environ['CERT'], os.environ.get('KEY'))
+    # Handshake in the request's thread, so a stalled client does not block accept().
+    server.socket = context.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
+server.serve_forever()

@@ -5,7 +5,9 @@
 <style>body{font:15px system-ui;margin:1.2em;max-width:52em} pre{white-space:pre-wrap;background:#f4f4f4;padding:.8em}</style>
 <h3>Prove a Starknet privacy-pool transaction in this tab</h3>
 <p>State from the node over JSON-RPC, then execution, the virtual OS, the privacy prover and the
-verifier, all in WebAssembly. Add <code>?threads=8</code> for the threaded build.</p>
+verifier, all in WebAssembly. Add <code>?threads=8</code> for the threaded build, <code>&amp;replay</code> to
+serve the RPC calls from the captured transaction instead of the node (the proof must then be
+identical to the native prover's).</p>
 <button id="go">Prove</button>
 <pre id="out"></pre>
 <script type="module">
@@ -23,9 +25,9 @@ const start = () => {
     if (data.error) { show("ERROR " + data.error); report({ page: "tx", error: data.error, ua: navigator.userAgent }); }
   };
   worker.onerror = (event) => { show("worker error " + event.message); report({ page: "tx", error: event.message }); };
-  const threads = Number(new URLSearchParams(location.search).get("threads") || 0);
-  const trace = new URLSearchParams(location.search).has("trace");
-  worker.postMessage({ threads, trace });
+  const params = new URLSearchParams(location.search);
+  const threads = Number(params.get("threads") || 0);
+  worker.postMessage({ threads, trace: params.has("trace"), replay: params.has("replay") });
 };
 document.getElementById("go").onclick = start;
 if (new URLSearchParams(location.search).has("auto")) start();

@@ -68,6 +68,46 @@ export async function buildOsInput({ TxSession, rpc, chainId, transaction, log =
   throw new Error(`execution still missing reads after ${MAX_ROUNDS} rounds`);
 }
 
+/**
+ * Serves the calls from a recording made by rpc-record-proxy.py: `recorded` is its rpc-log.jsonl,
+ * parsed ({request, response} per line). getCompiledCasm comes from `loadCasm(classHash)` (the
+ * capture's casm-<hash>.json results). `onCall` also gets the recorded entry that answered.
+ */
+export function replayRpc(recorded, loadCasm, onCall = () => {}) {
+  const same = (a, b) => BigInt(a) === BigInt(b);
+  return async (method, params) => {
+    if (method === "starknet_getCompiledCasm") {
+      onCall(method, params);
+      return loadCasm(params.class_hash);
+    }
+    const match = recorded.find(({ request }) => {
+      if (request.method !== method) return false;
+      const p = request.params;
+      if (method === "starknet_getStorageAt") return same(p.contract_address, params.contract_address) && same(p.key, params.key);
+      if (method === "starknet_getNonce" || method === "starknet_getClassHashAt") return same(p.contract_address, params.contract_address);
+      if (method === "starknet_getClass") return same(p.class_hash, params.class_hash);
+      return true;
+    });
+    if (!match) throw new Error(`not in the recording: ${method} ${JSON.stringify(params)}`);
+    onCall(method, params, match);
+    if (match.response.error) throw Object.assign(new Error(match.response.error.message), match.response.error);
+    return match.response.result;
+  };
+}
+
+/**
+ * Compares a prove result with the native prover's `starknet_proveTransaction` result: the proof
+ * must be identical; proof_facts and l2_to_l1_messages are compared by value.
+ */
+export function compareWithNative(result, native) {
+  const canonical = (messages) => JSON.stringify(messages.map((m) => [BigInt(m.from_address), BigInt(m.to_address), m.payload.map(BigInt)].map(String)));
+  return {
+    identical: result.proof === native.proof,
+    facts: JSON.stringify(result.proof_facts) === JSON.stringify(native.proof_facts),
+    messages: canonical(result.l2_to_l1_messages) === canonical(native.l2_to_l1_messages),
+  };
+}
+
 /** JSON-RPC over fetch. */
 export function liveRpc(url, onCall = () => {}) {
   let id = 0;

@@ -5,5 +5,9 @@ node_modules/
 *.wasm
 captures/replay-out/
 web/results.log
-web/server.log
+web/server*.log
+# mkcert certificate and key for serving web/ over HTTPS on the LAN.
+web/certs/
 .DS_Store
+# Xcode per-user state.
+xcuserdata/
