@@ -50,6 +50,7 @@ the gotchas are in `docs/BROWSER-TX-PLAN.md`.
 | MacBook Pro M5 Pro | 7.9 s (4.8 s with 18 threads) | 16.1 s Chrome, 21.9 s Safari | 2.3–2.7 GiB |
 | iPad Air 5 (M1) | 14.9 s | 41.8 s Safari | 2.3–2.6 GiB |
 | iPhone 17 Pro | 22.2 s (6 threads) | — | 2.3–2.5 GiB |
+| iPhone 12 Pro | 40.8 s (6 threads) | Safari crashes (memory) | 2.3–2.4 GiB |
 | x86 desktop | 16.7 s (9.8 s with 16 threads) | 28.6 s | 2.3–2.7 GiB |
 | Galaxy S25+ | 26.0 s | 30.9 s | 2.34 GiB |
 | Galaxy S9+ (2018) | 72.3 s | 134.2 s | 2.34 GiB |

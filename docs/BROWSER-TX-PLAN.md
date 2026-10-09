@@ -174,15 +174,28 @@ physical footprint (task_info, what jetsam counts) / peak RSS; browser = wasm me
 | iPad Air 5th gen (M1, 8 cores, 8 GB), iPadOS 26.6.2 | native app | 8 | 0.31 s | 14.9 s | 15.4 s | 2.34 / 2.61 GiB |
 | same | Safari (HTTPS, mkcert) | 8 | 0.4 s | 41.8 s | 47.2 s | 2.36 GiB wasm |
 | iPhone 17 Pro (A19 Pro, 2P+4E cores, 12 GB), iOS 26.5.2 | native app | 6 | 0.25 s | 22.2 s | 22.7 s | 2.33 / 2.51 GiB |
+| iPhone 12 Pro (A14, 2P+4E cores, 6 GB), iOS 26.6.2 (2026-10-09) | native app | 6 | 0.36 s | 40.8 s | 41.5 s | 2.30 / 2.40 GiB |
+| same | Safari (HTTPS, mkcert) | 6, 2, 1 | 0.5 s | crashed | — | — |
 
-- Thermal: nominal before and after on the iPad and the iPhone (ProcessInfo.thermalState); Mac
-  on mains. iPhone: native only (no Safari run, by choice).
+- Thermal: nominal before and after on the iPad and both iPhones (ProcessInfo.thermalState); Mac
+  on mains. iPhone 17 Pro: native only (no Safari run, by choice).
+- iPhone 12 Pro Safari FAILS. The tab's process dies during prove(): about 18 s in with
+  6 threads, 10 s with 2, and 6 s with the single-thread build. Safari reloads the tab once
+  (`&auto` restarts the run), then gives up ("A problem repeatedly occurred"). There is no
+  JetsamEvent and no crash report, so WebKit ended the page's process itself for going over
+  its per-page memory limit; it does not log that. The page needs about 2.4 GiB of wasm plus
+  the page process itself. That fits on the 8 GB iPad but not on a 6 GB phone. The native app
+  on the same phone peaks at a 2.30 GiB footprint and finishes (a JetsamEvent mid-run killed
+  only small background processes; TxProver was the largest process at 1.6 GiB resident).
+  Thread count does not help, since the peak hardly depends on it. Next: have the page report
+  the wasm size while proving (the main thread can poll the shared memory) to find the kill
+  size. Lowering peak memory is what would make 6 GB iPhones work in Safari.
 - Native/browser prove ratio: Mac Chrome 2.0x, Mac Safari 2.8x, iPad Safari 2.8x.
   JavaScriptCore's wasm is the slow part, not the device. Chrome gets slower past 8 threads.
 - Safari (macOS and iPadOS) needs nothing special: it grows shared wasm memory to 2.4 GiB and
   runs wasm-bindgen-rayon's nested module workers. No tab kill on the 8 GB iPad.
 - iPad and iPhone native: no jetsam kill without `increased-memory-limit` (footprint 2.34 GiB
-  of 8 GB, 2.33 GiB of 12 GB). The iPhone 17 Pro (2 performance cores) is slower than the M1
+  of 8 GB, 2.33 GiB of 12 GB, 2.30 GiB of 6 GB on the iPhone 12 Pro). The iPhone 17 Pro (2 performance cores) is slower than the M1
   iPad (4) and a little faster than the Galaxy S25+ native (26.0 s, 8 threads).
 - Page replay mode: `web/tx/?replay` serves the RPC from `web/tx/capture` (a link to
   captures/capture2) with the same lookup as replay.mjs (now `replayRpc` in tx-driver.mjs) and
@@ -203,8 +216,8 @@ physical footprint (task_info, what jetsam counts) / peak RSS; browser = wasm me
 
 ## Next
 - DONE: prove in the same wasm (identical to native), browser live, threads, S9+.
-- DONE: Mac (native, Chrome, Safari), iPad (native app, Safari), iPhone 17 Pro (native app);
-  see above.
+- DONE: Mac (native, Chrome, Safari), iPad (native app, Safari), iPhone 17 Pro and iPhone 12 Pro
+  (native app); see above.
 - Open: the M1 iPad Air proves faster than the iPhone 17 Pro (14.9 s vs 22.2 s). The causes
   and the experiment are in MAC-IOS-PLAN.md ("Open: why the iPad Air beats the iPhone 17 Pro").
 - S25+ run when it is attached.

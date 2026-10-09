@@ -7,7 +7,8 @@ on the Mac without any other context.
 
 ## Status (2026-10-08, on the Mac)
 
-Done on a MacBook Pro M5 Pro, an iPad Air 5th gen (M1) and an iPhone 17 Pro (native only). All
+Done on a MacBook Pro M5 Pro, an iPad Air 5th gen (M1), an iPhone 17 Pro and an iPhone 12 Pro
+(the iPhones native only). All
 are replays and all are IDENTICAL. Results are in `BROWSER-TX-PLAN.md` ("Mac and iPad").
 
 - Step 0b: done. Use `web/tx/?replay`. `web/tx/capture` is a symlink to `captures/capture2`
@@ -17,7 +18,9 @@ are replays and all are IDENTICAL. Results are in `BROWSER-TX-PLAN.md` ("Mac and
   --user-data-dir=<tmp> "http://localhost:8765/tx/?replay&threads=8&auto"`. Safari: run
   `open -a Safari <same URL>`.
 - Step 2: done. `replay` now prints peak RSS and peak footprint on macOS too.
-- Step 3: done on the iPad (not the iPhone) with mkcert, without `mkcert -install` (the iPad only needs the
+- Step 3: done on the iPad. It fails on the iPhone 12 Pro (6 GB): WebKit ends the tab's
+  process during proving, at every thread count (see BROWSER-TX-PLAN.md). The iPhone 17 Pro was
+  not tried. Set up with mkcert, without `mkcert -install` (the iPad only needs the
   public `rootCA.pem`).
   - Generate the cert:
     `mkdir -p web/certs && cd web/certs && mkcert -cert-file lan.pem -key-file lan-key.pem
@@ -44,7 +47,8 @@ are replays and all are IDENTICAL. Results are in `BROWSER-TX-PLAN.md` ("Mac and
   - Run: `xcrun devicectl device process launch --console --terminate-existing --device <udid>
     dev.provingly.TxProver --prove --threads 8`. The report is printed after
     `TX_PROVER_RESULT`.
-  - The increased-memory-limit capability was not needed on the 8 GB iPad or the 12 GB iPhone.
+  - The increased-memory-limit capability was not needed on the 8 GB iPad or on the iPhones
+    (12 GB and 6 GB).
 
 ## Open: why the iPad Air (M1) beats the iPhone 17 Pro
 
@@ -84,6 +88,15 @@ Read the results:
 
 The first try (2026-10-08) did not run: the launch was refused (`RequestDenied`, phone
 locked) and then the phone was disconnected.
+
+Evidence so far (2026-10-09): the iPhone 12 Pro (A14) proved in 40.8 s on 6 threads.
+- The A14 uses the M1's core designs, 2 performance + 4 efficiency against the M1's 4 + 4, at a
+  slightly lower clock (3.0 against 3.2 GHz). Twice the performance cores and the clock alone
+  would make the M1 about 2.1x faster; it is 2.7x faster (14.9 s). So the performance-core
+  count explains most of the gap (cause 1). The rest points to the phone's power or memory
+  limits (causes 2 and 3).
+- The iPhone 17 Pro is 1.84x the iPhone 12 Pro, close to their single-core ratio. That fits
+  cause 1 too: the same 2 + 4 layout, with faster cores.
 
 ## What exists (Linux, 2026-10-08)
 
