@@ -247,6 +247,8 @@ details.more .rows { margin-top: 10px; }
 }
 @media (min-width: 560px) { .sheet { left: 50%; width: 520px; margin-left: -260px; } }
 @keyframes sheet-up { from { transform: translateY(100%); } }
+/* Redrawn while open (results loading, another tab): no slide or fade again. */
+.sheet.steady, .scrim.steady { animation: none; }
 .grabber { width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); margin: 0 auto 4px; }
 .how { display: flex; gap: 14px; }
 .how .title { font-weight: 600; }
@@ -263,6 +265,9 @@ details.more .rows { margin-top: 10px; }
 .tab.picked { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .compare .labels small { color: var(--faint); font-weight: 400; margin-left: 4px; }
 .compare .caption svg.spinner { width: 14px; height: 14px; vertical-align: -2px; }
-.results-link { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px 7px 12px; border-radius: 999px; border: 1px solid var(--line-strong); background: var(--raised); color: var(--accent); font-size: 14px; font-weight: 600; }
-.results-link svg { width: 18px; height: 18px; }
-.results-link svg:last-child { width: 16px; height: 16px; color: var(--muted); }
+.quick-links { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.quick-link { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border-radius: var(--radius-card); border: 1px solid var(--line-strong); background: var(--raised); text-align: left; }
+.quick-link svg { width: 20px; height: 20px; flex: none; color: var(--accent); margin-top: 1px; }
+.quick-link span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.quick-link b { font-size: 15px; font-weight: 600; color: var(--ink); }
+.quick-link small { font-size: 12px; line-height: 1.35; color: var(--muted); }

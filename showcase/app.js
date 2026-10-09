@@ -10,9 +10,10 @@
   const params = new URLSearchParams(location.search);
 
   const state = {
-    view: "home", // "home" | "action" | "results"
+    view: "home", // "home" | "action"
     actionId: null,
-    sheet: false,
+    sheet: null, // the bottom sheet open: "how" | "results" | null
+    sheetShown: null, // the sheet drawn last, so that a redraw doesn't slide it up again
     runs: {}, // action id -> run
     running: null, // the action id being proven
     threads: Number(params.get("threads") || 0), // 0: every core
@@ -76,7 +77,7 @@
 
   // Navigation: a page comes in from the right, and goes back to the left, as in Outis.
   function go(view, actionId = null) {
-    const back = view === "home" && state.view !== "home";
+    const back = view === "home" && state.view === "action";
     state.view = view;
     state.actionId = actionId;
     render(back ? "enter-back" : "enter");
@@ -84,9 +85,15 @@
   }
 
   function render(motion = "") {
-    app.innerHTML = state.view === "action" ? renderAction(actionById(state.actionId), motion)
-      : state.view === "results" ? renderResults(motion) : renderHome(motion);
-    if (state.sheet) app.insertAdjacentHTML("beforeend", renderSheet());
+    const scrolled = app.querySelector(".sheet");
+    const sheetScroll = scrolled ? scrolled.scrollTop : 0;
+    app.innerHTML = state.view === "action" ? renderAction(actionById(state.actionId), motion) : renderHome(motion);
+    if (state.sheet) {
+      const steady = state.sheetShown === state.sheet;
+      app.insertAdjacentHTML("beforeend", state.sheet === "results" ? renderResultsSheet(steady) : renderSheet(steady));
+      if (steady) app.querySelector(".sheet").scrollTop = sheetScroll;
+    }
+    state.sheetShown = state.sheet;
     updateLive();
   }
 
@@ -101,16 +108,14 @@
       </header>
       <h1>Private actions, proven on this ${deviceKind}</h1>
       <p class="lede">Each step is a real Privacy Pool transaction, recorded on Starknet Sepolia. This ${deviceKind} builds its ZK proof itself, so the private key the proof needs never leaves it.</p>
-      <button class="results-link pressable" data-do="results">${icon("trophy")}<span>Results: how fast devices prove</span>${icon("next")}</button>
+      <div class="quick-links">
+        <button class="quick-link pressable" data-do="results">${icon("trophy")}<span><b>Results</b><small>How fast other devices build these proofs</small></span></button>
+        <button class="quick-link pressable" data-do="how">${icon("help")}<span><b>How it works</b><small>What is proven, and what stays private</small></span></button>
+      </div>
       <div class="section">
-        <h2 class="section-title">Four steps</h2>
+        <h2 class="section-title">Privacy Pool actions</h2>
         <div class="steps">${actions.map(renderStep).join("")}</div>
       </div>
-      <button class="well step pressable" data-do="how">
-        <span class="ring-icon">${icon("help")}</span>
-        <span class="body"><div class="title">How does this work?</div><div class="sub">What is proven, and what stays private</div></span>
-        <span class="end">${icon("next")}</span>
-      </button>
       <p class="footnote">Proofs are built and checked on this device, with the verifier the network uses. Nothing is sent unless you submit your score.</p>
     </main>`;
   }
@@ -209,7 +214,7 @@
     const next = actions[actionIndex(action.id) + 1];
     const nextButton = next
       ? `<button class="button primary" data-do="open" data-id="${next.id}">Next: ${shielded(next.title)}</button>`
-      : `<button class="button primary" data-do="home">Back to the four steps</button>`;
+      : `<button class="button primary" data-do="home">Back to the actions</button>`;
     const identical = report.identical
       ? `<div class="status success">${icon("ok")}<div>Identical, byte for byte, to the proof StarkWare's prover builds for this transaction.</div></div>` : "";
     const simulated = report.simulated ? `<div class="status info">${icon("info")}<div>A simulated run, to preview this screen in a browser. Not a real proof.</div></div>` : "";
@@ -315,8 +320,8 @@
     if (state.view === "action" && state.actionId === actionId) render();
   }
 
-  // The results page: each step's devices, ranked by their median time to build the proof.
-  function renderResults(motion) {
+  // The results sheet: each action's devices, ranked by their median time to build the proof.
+  function renderResultsSheet(steady) {
     const actionId = state.resultsAction;
     const entry = state.results[actionId];
     if (!entry) loadResults(actionId);
@@ -324,17 +329,16 @@
     let body = `<div class="well compare"><div class="caption">${spinner} Loading…</div></div>`;
     if (entry && entry.status === "failed") body = `<div class="status danger">${icon("danger")}<div>${escape(entry.error)}</div></div>`;
     if (entry && entry.status === "done") body = renderBoard(entry.data);
-    return `<main class="screen ${motion}">
-      <div class="title-bar">
-        <button class="back" data-do="home" aria-label="Back">${icon("back")}</button>
-        <span class="label">Results</span>
-      </div>
-      <h1>How fast devices prove</h1>
-      <p class="lede">Time to build each step's ZK proof, as people submitted it from their phones, tablets and browsers.</p>
-      <div class="tabs">${tabs}</div>
-      ${body}
-      <p class="footnote">Scores are sent by visitors. A score is accepted only if its proof verified and matched the reference one, but the time itself can't be checked.</p>
-    </main>`;
+    return `<div class="scrim ${steady ? "steady" : ""}" data-do="close"></div>
+      <div class="sheet ${steady ? "steady" : ""}" role="dialog" aria-label="Results">
+        <div class="grabber"></div>
+        <h1>Results</h1>
+        <p class="lede">How fast devices build each action's ZK proof, as people submitted it from their phones, tablets and browsers.</p>
+        <div class="tabs">${tabs}</div>
+        ${body}
+        <p class="footnote">Scores are sent by visitors. A score is accepted only if its proof verified and matched the reference one, but the time itself can't be checked.</p>
+        <div class="buttons"><button class="button secondary" data-do="close">Close</button></div>
+      </div>`;
   }
 
   function renderBoard(data) {
@@ -362,7 +366,7 @@
     } catch (problem) {
       state.results[actionId] = { status: "failed", error: problem.message || "Couldn't reach the results service" };
     }
-    if (state.view === "results" && state.resultsAction === actionId) render();
+    if (state.sheet === "results" && state.resultsAction === actionId) render();
   }
 
   const row = (key, value, note) => `<div class="row"><span class="key">${key}</span><span class="value">${value}${note ? `<small>${escape(note)}</small>` : ""}</span></div>`;
@@ -399,10 +403,10 @@
       </div></details>`;
   }
 
-  function renderSheet() {
+  function renderSheet(steady) {
     const how = (iconName, title, text) => `<div class="how"><span class="ring-icon accent">${icon(iconName)}</span><div><div class="title">${title}</div><p>${text}</p></div></div>`;
-    return `<div class="scrim" data-do="close"></div>
-      <div class="sheet" role="dialog" aria-label="How it works">
+    return `<div class="scrim ${steady ? "steady" : ""}" data-do="close"></div>
+      <div class="sheet ${steady ? "steady" : ""}" role="dialog" aria-label="How it works">
         <div class="grabber"></div>
         <h1>How it works</h1>
         <p class="lede">The Privacy Pool keeps amounts, and which notes pay for what, out of sight. Every action still has to follow the pool's rules. A ZK proof shows that it does without showing the secrets.</p>
@@ -521,25 +525,26 @@
       case "submit": submitScore(id); break;
       case "results":
         if (id) state.resultsAction = id;
-        go("results");
+        state.sheet = "results";
+        render();
         break;
       case "results-tab": state.resultsAction = id; render(); break;
-      case "how": state.sheet = true; render(); break;
-      case "close": state.sheet = false; render(); break;
+      case "how": state.sheet = "how"; render(); break;
+      case "close": state.sheet = null; render(); break;
     }
   });
 
   // Android's back button: true when the page handled it.
   engine.back = () => {
-    if (state.sheet) { state.sheet = false; render(); return true; }
+    if (state.sheet) { state.sheet = null; render(); return true; }
     if (state.view !== "home") { go("home"); return true; }
     return false;
   };
 
-  // outis.cash/prover/#results opens the results page; #results/<action> on that step's tab.
+  // outis.cash/prover/#results opens the results; #results/<action> on that action's tab.
   const [hashView, hashAction] = location.hash.slice(1).split("/");
   if (hashView === "results") {
-    state.view = "results";
+    state.sheet = "results";
     if (actionById(hashAction)) state.resultsAction = hashAction;
   }
   render("rise");
