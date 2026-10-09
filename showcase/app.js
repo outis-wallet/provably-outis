@@ -86,7 +86,7 @@
         ${device ? `<div class="device"><div class="name">${escape(deviceName)}</div><div class="spec">${spec}</div></div>` : ""}
       </header>
       <h1>Privacy Pool Proofs</h1>
-      <p class="lede">Each step is a real Privacy Pool transaction, recorded on Starknet Sepolia. This ${deviceKind} builds its ZK proof itself, so the private key the proof needs never leaves it.</p>
+      <p class="lede">Each step replays a real Privacy Pool transaction from Starknet Sepolia. This ${deviceKind} builds its ZK proof itself, so the private key the proof needs never leaves it.</p>
       <div class="quick-links">
         <a class="quick-link pressable" href="${resultsPage()}">${icon("trophy")}<span><b>Results</b><small>How fast other devices build these proofs</small></span></a>
         <button class="quick-link pressable" data-do="how">${icon("help")}<span><b>How it works</b><small>What is proven, and what stays private</small></span></button>
@@ -311,7 +311,7 @@
         ${how("proof", "It builds a ZK proof", "About 220 KB that shows the run followed Starknet's rules exactly. Building it is the heavy part: hundreds of thousands of steps, on every core.")}
         ${how("network", "The network checks the proof", "Starknet verifies it in milliseconds instead of running the action again, so it never needs the key or the notes.")}
         ${how("eyeOff", "Only the result is public", "The pool records which notes were spent and the new ones, encrypted. Amounts show only where tokens are shielded or unshielded.")}
-        <div class="status info">${icon("info")}<div>Proving on a server would mean sending it the private key. Here it stays on this ${deviceKind}. This demo proves recorded transactions and sends nothing.</div></div>
+        <div class="status info">${icon("info")}<div>Proving on a server would mean sending it the private key. Here it stays on this ${deviceKind}. This demo replays past transactions and sends nothing.</div></div>
         <div class="buttons"><button class="button secondary" data-do="close">Close</button></div>
       </div>`;
   }
