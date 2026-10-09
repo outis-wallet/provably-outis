@@ -199,8 +199,10 @@ heaptrack isn't installed here (no sudo), and it couldn't see the large blocks n
    - Change: hash each stripe a group of columns at a time instead of evaluating every column's
      stripe at once.
    - Estimate: −~500 MiB at the Cairo base commit, −~400 at the circuit's commits.
-   - Leaves the Cairo leg at about 1.75 GiB live (~1.8 GiB `wasm`), because the lookup data is still
-     whole at the end of `write_trace` and across the commit.
+   - Leaves the Cairo leg at about 1.75 GiB live, because the lookup data is still whole at the end
+     of `write_trace` and across the commit. **Corrected (see "ryun1's striped commitment" below):**
+     the whole proof would then peak in the circuit leg's composition, 1,909 MiB live (~1.98 GiB
+     `wasm`), which the commit doesn't touch.
    - Likely enough for the 17 Pro if its limit is near 2.9 GiB of footprint. Not enough for the
      12 Pro (2,251 MiB).
 2. **Keep the lookup data out of the base commit** (`cairo_claim_generator.rs` and 60+ component
@@ -209,6 +211,166 @@ heaptrack isn't installed here (no sudo), and it couldn't see the large blocks n
    - Change: regenerate each component's lookup data after the commit and turn it straight into
      that component's interaction trace (a second witness pass, costing about the "Write Base trace"
      phase again), or store it compactly.
-   - With 1, the estimate is a peak of about 1.4 GiB live (~1.45 GiB `wasm`): Cairo commit
+   - With 1, the estimate was a peak of about 1.4 GiB live (~1.45 GiB `wasm`): Cairo commit
      ~0.8–1.0 GiB, second witness pass ~1.2–1.3 GiB, circuit leg ~1.4 GiB.
-   - This is what reaches the 1.6 GiB target.
+   - **Corrected:** that estimate missed the circuit leg's composition (1,909 MiB live) and quotients
+     (1,689 MiB live), which neither change touches. 1 and 2 together land at about 1.9 GiB live.
+     The revised chain to 1.6 GiB is in "ryun1's striped commitment" below.
+
+## ryun1's striped commitment (provably.fast 0e80cbf9) on our captures (2026-10-09, i9, later)
+
+**Short version: don't adopt it.** On our proof it costs memory and time and saves nothing at our
+peak:
+- **As committed:** about +500 MiB of wasm memory (pay: 2,380 → 2,895 MiB in Node, 2,422 → 2,943 in
+  Chrome), +50 to +160 MiB of native RSS, 1.50x slower natively and 1.38x in Chrome.
+- **Why the memory:** `new_striped` takes every column's stripe-0 buffer from the pool before it
+  computes the first stripe (the block commented "Prefix columns get their stripe-0 buffer now").
+  So the coefficients, the scratch stripe and the stripe-0 buffers are all held at once, 515 MiB each
+  on the Cairo base trace. Natively, most of those pages aren't touched before stripe 0, so RSS
+  barely sees them; in wasm, allocated memory is memory taken. The provably.fast evaluator measures
+  natively, which is how it passed there. The challenge's maintainers may want to know.
+- **Fixed** (stripe 0 written into the column's scratch buffer instead; two lines): back to today's
+  numbers, 2,375 MiB on pay (−5), −110 MiB native RSS, still 1.5x slower.
+- **Our peak is the Cairo base commit, where both stripes hold the same thing:** the coefficients,
+  every column's stripe in flight, and about 1 GiB of lookup data neither touches. ryun1's gain on the
+  benchmark comes from composition (windowed), which isn't our peak. It does lower ours: the Cairo
+  composition goes from 1,443 to 1,344 MiB live, the circuit's from 1,909 to 1,707.
+
+### What was built (local only, not pushed)
+
+- proving `ryun1-stripe` (`b600ef12`, worktree `~/development/outis-wallet/proving-ryun1`):
+  - `d29f3c6a`, the 754321f3 port. It is tree-identical to starknet-innovation's `7029a7f2`.
+  - `0b690eeb`, ryun1's 9-file candidate dbdd1f84, as ported by starknet-innovation. Applied
+    unchanged.
+  - Our other commits:
+    - wasm32. Its `pcs/mod.rs` hunk, the stripe-to-stripe buffer hand-off, is dropped: ryun1 keeps one
+      scratch buffer per column across stripes.
+    - Android.
+    - The per-row Vec removal.
+    - `privacy_recursive_prove_once`. It now calls `CommitmentTreeProver::new` with the same
+      store flags as `prepare_recursive_prover_precomputes`; `new` stripes on its own.
+  - Not taken: `4956275c` (b24c7d1d). prove_once already builds the preprocessed circuit after the
+    Cairo proof, alongside the verifier context. What b24c7d1d adds is the circuit tree's commit
+    overlapping the fill, and two fewer Vecs per gate: about 1% of time, nothing at our peak.
+- The fix: proving `ryun1-stripe-defer-experiment` (`0f140ba5`, worktree `proving-defer`). It's in
+  `pcs/mod.rs`, which the fork marks `[SECURITY-CRITICAL]`, so it isn't pushed. It's proof-neutral:
+  all four captures are identical and verified, natively and in Node.
+- prover worktrees `prover-ryun1` and `prover-defer` (`[patch]` by path), plus `prover-trace-base`
+  and `prover-trace-new` for the tracer.
+- No new C dependencies: the nine files add only `malloc_trim`, a glibc extern gated to
+  linux-gnu, a no-op elsewhere. Nothing changes for the Mac's wasm build.
+
+### Measured
+
+Current = proving `70bc0693` / prover `a936dae`, re-measured in the same session. ryun1 = the
+branch above. Fix = ryun1 plus the two-line fix (not run in Chrome). Every proof below is
+identical to the native prover's and verified:
+- natively by the replay;
+- in Node by `os_native_probe verify` on its result;
+- in Chrome by the page.
+
+| | register | deposit | pay | withdraw |
+|---|---|---|---|---|
+| Native, 6 threads, peak RSS MiB, current / ryun1 / fix | 2,511 / 2,562 / 2,397 | 2,593 / 2,646 / 2,481 | 2,534 / 2,696 / 2,505 | 2,622 / 2,695 / 2,503 |
+| Native, 6 threads, prove s, current / ryun1 / fix | 20.9 / 31.5 / 31.5 | 22.9 / 33.7 / 33.9 | 20.9 / 31.4 / 31.4 | 20.1 / 30.7 / 30.5 |
+| Node, 1 thread, `wasm` MiB, current / ryun1 / fix | 2,281 / 2,766 / 2,272 | 2,340 / 2,848 / 2,337 | 2,380 / 2,895 / 2,375 | 2,380 / 2,896 / 2,375 |
+| Node, 1 thread, `peak` MiB, current / ryun1 / fix | 2,209 / 2,695 / 2,202 | 2,269 / 2,775 / 2,266 | 2,306 / 2,822 / 2,303 | 2,306 / 2,822 / 2,303 |
+| Chrome, 6 threads, `wasm` MiB, current / ryun1 | 2,320 / 2,810 | 2,384 / 2,896 | 2,422 / 2,943 | 2,415 / 2,938 |
+| Chrome, 6 threads, `peak` MiB, current / ryun1 | 2,249 / 2,740 | 2,314 / 2,824 | 2,350 / 2,870 | 2,343 / 2,866 |
+| Chrome, 6 threads, prove s, current / ryun1 | 28.0 / 39.7 | 30.9 / 42.3 | 28.9 / 39.5 | 28.3 / 39.0 |
+
+How these were taken:
+- Native: the median of 3 interleaved runs. RSS varies about 60 MiB from run to run.
+- Chrome 154, headless: 2 runs each. Memory is the higher run, time the mean.
+- Node: memory only. Its times aren't comparable (ten runs at once).
+- Live heap left after a proof: 19 MiB current, 41 with ryun1's change. Its `subdomain_twiddles`
+  cache is a process-lifetime static, never freed. The apps prove repeatedly; it stays bounded.
+- Time, ryun1 vs current: 1.47–1.53x natively, 1.37–1.42x in Chrome. That matches the benchmark's
+  ratios (s2 1.23x of 754321f3, ryun1 1.83x).
+- **Where the 1.5x goes.** I ran the fix with windowed composition off (`PARITY_MIN_LOG_SIZE` 64,
+  local commit `f322981e`), against current, natively at 6 threads, one run each, identical and
+  verified. The results:
+
+  | | register | deposit | pay | withdraw |
+  |---|---|---|---|---|
+  | Prove s, current / no windows | 21.7 / 24.9 | 23.4 / 27.2 | 20.7 / 24.4 | 20.5 / 24.0 |
+  | Peak RSS MiB, current / no windows | 2,492 / 2,563 | 2,571 / 2,587 | 2,510 / 2,572 | 2,606 / 2,570 |
+
+  - Without windows, ryun1's change costs 1.15–1.18x: its commit, its decommit, and composition
+    that extends each component whole, one at a time. Native RSS is the same as today's; its wasm
+    memory wasn't measured.
+  - The windowed composition adds the rest, about +0.34x of today's time (7 s of 21 natively).
+    It buys −200 MiB at the circuit's composition.
+  - So no configuration of 0b690eeb beats our stripe on this proof.
+
+### Phase by phase (pay, Node, live heap MiB)
+
+From the allocation tracer, extended to name each phase from the allocating stacks
+(`web-memory-tracer/trace2.mjs`). Each figure is the live heap's maximum in that phase.
+
+| Phase | current (s2) | ryun1 | ryun1 + fix |
+|---|---|---|---|
+| Cairo: end of `write_trace` | 1,738 | 1,738 | 1,738 |
+| **Cairo: base trace commit** | **2,306** | **2,822** | **2,304** |
+| Cairo: interaction trace | 1,842 | 1,838 | 1,832 |
+| Cairo: interaction commit | 1,685 | 2,173 | 1,673 |
+| Cairo: composition | 1,443 | 1,355 | 1,344 |
+| Cairo: quotients and FRI | 1,415 | 1,423 | 1,412 |
+| Circuit: end of `write_trace` | 1,586 | 1,594 | 1,594 |
+| Circuit: base trace commit | 1,884 | 2,278 | 1,896 |
+| Circuit: interaction commit | 1,818 | 2,258 | 1,829 |
+| Circuit: composition | 1,909 | 1,707 | 1,707 |
+| Circuit: quotients | 1,689 | 1,710 | 1,710 |
+
+### Where the Cairo leg's peak lands, and what #2 would take off
+
+- **With ryun1's change as committed,** the Cairo leg still peaks at its base trace commit:
+  2,822 MiB live, 2,895 `wasm`. With the fix, it's the same phase at today's size, 2,304 / 2,375.
+- **#2 (lookup data out of the base commit) takes about 1.0 GiB off that phase,** in all three, to
+  about 1.3 GiB live. The Cairo leg then peaks at its interaction commit: 1,685 (current),
+  2,173 (ryun1), 1,673 (fix).
+- **The proof's peak then moves to the circuit leg:**
+  - current: its composition, 1,909 live, about 1.98 GiB `wasm`;
+  - ryun1: its base commit, 2,278, about 2.35 GiB `wasm`;
+  - ryun1 + fix: its base commit, 1,896, about 1.97 GiB `wasm`.
+- So **#2 alone takes about 0.4 GiB off today's proof.** About 1.97 GiB `wasm` is roughly 2.5 GiB of
+  Safari footprint: possibly under the 17 Pro's limit, not under the 12 Pro's 2,251 MiB.
+
+### What 1.6–1.7 GiB would take (revised)
+
+After #2, the circuit leg sets the peak. From its base commit on it holds, alongside each phase's
+temporaries:
+- about 1.0 GiB of committed stripes (trace, interaction and composition trees);
+- about 170 MiB of the verifier circuit's context: its values (one 128 MiB Vec) and gate lists.
+  `prove_once` keeps `context` until it returns, and the circuit prover borrows the values for the
+  whole proof, though only its `write_trace` reads them;
+- about 75 MiB of the circuit's preprocessed columns.
+
+The chain, from today's fork, by live heap:
+1. **#2:** the Cairo base commit 2.31 → about 1.3 GiB. Peak: the circuit's composition, 1.91.
+2. **#1, the streamed commit:** the commits of both legs drop by about 0.4–0.5: the circuit's
+   1.88 / 1.82 to about 1.4. The peak is still the circuit's composition, 1.91.
+3. **Windowed composition** (ryun1's method, ported to our stripe): the circuit's composition 1.91 →
+   1.71 (measured above). Peak: the circuit's quotients, about 1.70.
+4. **The verifier context freed after the circuit's `write_trace`:** about −170 MiB across the
+   circuit proof. Peak about 1.53 GiB live, about 1.6 GiB `wasm`.
+
+1.6 is reachable only with all four, and with almost no margin. Steps 1–3 change code the fork marks
+`[AIR-GENERATED]` or `[SECURITY-CRITICAL]`; step 4 is orchestration (`privacy_prove`,
+`circuit_prover`). Time:
+- #2 adds a second witness pass, about the "Write Base trace" phase again.
+- Windowed composition as ryun1 wrote it adds about +0.34x (see "Where the 1.5x goes"). It
+  re-extends every column of a component for each of its 4 windows. A port would need a cheaper
+  form, for example windowing our part-wise composition, or windowing only the circuit leg, where
+  the peak is.
+
+### Recommendation
+
+- **Keep our stripe (s2). Don't adopt 0b690eeb,** neither as committed (+0.5 GiB in wasm, 1.5x) nor
+  fixed (no memory gain, 1.5x).
+- **Do #2 on our stripe,** if about 1.97 GiB `wasm` is worth it on its own. That's possibly enough
+  for the 17 Pro, whose limit isn't known.
+- **For the 12 Pro,** do 1–4 above. Of ryun1's change, only the idea of windowed composition is
+  worth taking. As written it costs +0.34x for −200 MiB, so it needs a cheaper form first.
+- **Nothing pushed** to outis-wallet/proving or prover, and the Outis engine isn't rebuilt: the
+  deployed engine stays `be58014d4e3f`.
