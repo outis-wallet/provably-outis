@@ -54,15 +54,9 @@ Screenshots at 420 px match the previous pages, apart from the running timers an
 ## Changing the UI from now on
 
 Edit `outis/wallet/apps/prover/src`. Preview with `pnpm dev` there, at
-`http://localhost:5196/prover/?mock`. Then regenerate the apps' copy:
-
-```
-cd outis/wallet/apps/prover
-NATIVE_OUT=../../../../provingly/showcase pnpm build:native   # outis and provingly side by side
-```
-
-Commit the four generated files here, saying which Outis commit they come from. Don't edit them
-by hand: the next build overwrites them.
+`http://localhost:5196/prover/?mock`. Then regenerate the apps' copy with `showcase/sync-ui.sh`.
+It builds from the Outis checkout next to provingly (`OUTIS=<path>` for another one) and prints
+the commit to make. Don't edit the four files by hand: the next sync overwrites them.
 
 ## Where things went
 

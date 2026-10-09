@@ -59,14 +59,10 @@ immediately. Without `?mock` the dev server proves with the wasm build, as the w
 
 The generated native files open from files too: `showcase/index.html?mock` in a browser.
 
-To update the apps' copy after changing the UI:
-
-```
-cd outis/wallet/apps/prover
-NATIVE_OUT=../../../../provingly/showcase pnpm build:native   # with outis and provingly side by side
-```
-
-Commit the four generated files here with the Outis commit they come from. The web engine changes
+To update the apps' copy after changing the UI, run `showcase/sync-ui.sh`. It builds the UI from
+the Outis checkout next to this one (`OUTIS=<path>` for another) and writes the four files here.
+Then it prints the commit to make, naming the Outis commit they come from (`+dirty` if that
+checkout had uncommitted changes in the app). The web engine changes
 only when the prover does: `showcase/build-web.sh` writes it into `outis/wallet/apps/prover/public`.
 
 ## iOS
