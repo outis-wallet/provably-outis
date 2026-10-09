@@ -11,7 +11,9 @@
     if (actionId) query.set("action", actionId);
     const service = new URLSearchParams(location.search).get("results");
     if (service) query.set("results", service);
-    return `results.html${query.toString() ? `?${query}` : ""}`;
+    // The apps load the pages from files; on the web the results page is /prover/results.
+    const page = location.protocol === "file:" ? "results.html" : "results";
+    return `${page}${query.toString() ? `?${query}` : ""}`;
   };
   const engine = window.provingly;
   const app = document.getElementById("app");

@@ -25,7 +25,9 @@
   const mine = new Set(JSON.parse(localStorage.getItem("outis-prover-submissions") || "[]").map((entry) => entry.label));
   if (engine && engine.device) mine.add(deviceLabel(engine.device, deviceNames));
 
-  const proverPage = () => `index.html${service ? `?results=${encodeURIComponent(service)}` : ""}`;
+  // The prover page: index.html in the apps (files); on the web its clean path (/prover).
+  const proverPath = location.protocol === "file:" ? "index.html" : new URL(".", document.baseURI).pathname.replace(/\/$/, "") || "/";
+  const proverPage = () => `${proverPath}${service ? `?results=${encodeURIComponent(service)}` : ""}`;
   if (engine) engine.back = () => { location.href = proverPage(); return true; }; // Android's back button
 
   function syncUrl() {

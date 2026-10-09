@@ -10,6 +10,17 @@ HOST = os.environ.get('HOST', '127.0.0.1')
 class Handler(http.server.SimpleHTTPRequestHandler):
     extensions_map = {**http.server.SimpleHTTPRequestHandler.extensions_map, '.wasm': 'application/wasm', '.js': 'text/javascript'}
     def translate_path(self, path):
+        # Clean URLs, as on Vercel: /prover serves /prover/index.html (no slash added) and
+        # /prover/results serves /prover/results.html.
+        bare = path.split('?')[0].split('#')[0]
+        target = super().translate_path(bare)
+        if not bare.endswith('/') and os.path.isdir(target) and os.path.isfile(os.path.join(target, 'index.html')):
+            return os.path.join(target, 'index.html')
+        if not os.path.exists(target) and os.path.isfile(target + '.html'):
+            return target + '.html'
+        return self.translate_path_original(path)
+
+    def translate_path_original(self, path):
         # wasm-bindgen-rayon's worker helper imports its package by directory ('../../..'), which a
         # bundler would resolve to the package's module: serve that module for the directory.
         bare = path.split('?')[0].rstrip('/')

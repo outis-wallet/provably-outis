@@ -12,8 +12,14 @@ PKG=${PKG:-web/tx/pkg-mt}
 rm -rf "$OUT" && mkdir -p "$OUT/engine" "$OUT/pkg-mt" "$OUT/captures/classes"
 
 # The UI, as in the apps.
-# Every page, style and script at the top of showcase/, as the apps bundle them.
+# Every page, style and script at the top of showcase/, as the apps bundle them. On the web the
+# pages are served at clean URLs (/prover, /prover/results, no trailing slash), so their relative
+# links resolve against a base instead of the page's own URL.
+BASE=${BASE:-/prover/}
 cp showcase/*.html showcase/*.css showcase/*.js "$OUT/"
+for page in "$OUT"/*.html; do
+  sed -i.bak "s|<head>|<head>\n<base href=\"$BASE\">|" "$page" && rm -f "$page.bak"
+done
 cp -r showcase/fonts "$OUT/"
 
 # The wasm module: no name section (debug symbols, 63 MiB), gzipped, named by its hash so it can
