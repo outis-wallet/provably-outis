@@ -267,8 +267,35 @@ fn compiled_class_v1_to_casm(class: &CompiledClassV1) -> Result<CasmContractClas
     })
 }
 
-fn js_error(error: impl std::fmt::Display) -> JsError {
-    JsError::new(&error.to_string())
+fn js_error(error: impl std::fmt::Display) -> Failure {
+    fail(&error.to_string())
+}
+
+/// What TxSession's methods fail with: a JS `Error` on wasm. Natively, the message itself:
+/// wasm-bindgen's JsError can't be made off wasm (it panics with "cannot call wasm-bindgen
+/// imported functions on non-wasm targets"), which would hide every error of a native run.
+#[cfg(target_arch = "wasm32")]
+pub type Failure = JsError;
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct Failure(pub String);
+
+// #[wasm_bindgen] checks the methods' types on every target, so a Failure must turn into a JsValue
+// natively too. Nothing calls this off wasm.
+#[cfg(not(target_arch = "wasm32"))]
+impl From<Failure> for JsValue {
+    fn from(failure: Failure) -> JsValue {
+        JsValue::from_str(&failure.0)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn fail(message: &str) -> Failure {
+    JsError::new(message)
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn fail(message: &str) -> Failure {
+    Failure(message.to_string())
 }
 
 /// One transaction's way from RPC data to a virtual OS run.
@@ -297,17 +324,17 @@ impl TxSession {
         chain_id: &str,
         header_json: &str,
         rpc_transaction_json: &str,
-    ) -> Result<TxSession, JsError> {
+    ) -> Result<TxSession, Failure> {
         let chain_id = ChainId::from(chain_id.to_string());
         let header: BlockHeader = serde_json::from_str(header_json).map_err(js_error)?;
         let RpcTransaction::Invoke(RpcInvokeTransaction::V3(invoke_v3)) =
             serde_json::from_str(rpc_transaction_json).map_err(js_error)?
         else {
-            return Err(JsError::new("only invoke v3 transactions are supported"));
+            return Err(fail("only invoke v3 transactions are supported"));
         };
         // The prover's input checks (validate_transaction_input with zero-fee validation on).
         if !invoke_v3.proof.is_empty() || !invoke_v3.proof_facts.is_empty() {
-            return Err(JsError::new("proof and proof_facts must be empty on input"));
+            return Err(fail("proof and proof_facts must be empty on input"));
         }
         let bounds = &invoke_v3.resource_bounds;
         if bounds.l1_gas.max_price_per_unit != GasPrice(0)
@@ -315,7 +342,7 @@ impl TxSession {
             || bounds.l1_data_gas.max_price_per_unit != GasPrice(0)
             || invoke_v3.tip != Tip(0)
         {
-            return Err(JsError::new("proving is client-side: gas prices and tip must be zero"));
+            return Err(fail("proving is client-side: gas prices and tip must be zero"));
         }
         let tx = InvokeTransaction::V3(invoke_v3.into());
         let tx_hash = tx.calculate_transaction_hash(&chain_id, &tx.version()).map_err(js_error)?;
@@ -356,7 +383,7 @@ impl TxSession {
     }
 
     /// Adds state reads in the `initial_reads` format of `starknet_simulateTransactions`.
-    pub fn add_reads(&mut self, initial_reads_json: &str) -> Result<(), JsError> {
+    pub fn add_reads(&mut self, initial_reads_json: &str) -> Result<(), Failure> {
         let reads: RpcInitialReads = serde_json::from_str(initial_reads_json).map_err(js_error)?;
         self.maps.storage.extend(reads.storage.into_iter().map(|e| ((e.contract_address, e.key), e.value)));
         self.maps.nonces.extend(reads.nonces.into_iter().map(|e| (e.contract_address, e.nonce)));
@@ -376,7 +403,7 @@ impl TxSession {
         class_hash: &str,
         casm_json: &str,
         sierra_program_head_json: &str,
-    ) -> Result<(), JsError> {
+    ) -> Result<(), Failure> {
         let class_hash = ClassHash(Felt::from_hex(class_hash).map_err(js_error)?);
         let casm: CasmContractClass = serde_json::from_str(casm_json).map_err(js_error)?;
         let head: Vec<Felt> = serde_json::from_str(sierra_program_head_json).map_err(js_error)?;
@@ -390,7 +417,7 @@ impl TxSession {
     }
 
     /// Records that the node does not know this class.
-    pub fn add_undeclared_class(&mut self, class_hash: &str) -> Result<(), JsError> {
+    pub fn add_undeclared_class(&mut self, class_hash: &str) -> Result<(), Failure> {
         self.undeclared_classes.insert(ClassHash(Felt::from_hex(class_hash).map_err(js_error)?));
         Ok(())
     }
@@ -398,7 +425,7 @@ impl TxSession {
     /// Executes the transaction. Returns `{"missing": ...}` when a read was not prefetched
     /// (fetch it, add it, call again), else `{"storage_proof_params": [...]}`: the
     /// `starknet_getStorageProof` requests to make.
-    pub fn execute(&mut self) -> Result<String, JsError> {
+    pub fn execute(&mut self) -> Result<String, Failure> {
         let state = PrefetchedState {
             maps: Arc::new(self.maps.clone()),
             classes: Arc::new(self.classes.clone()),
@@ -406,7 +433,7 @@ impl TxSession {
             missing: Arc::new(Mutex::new(Default::default())),
         };
         let base_block_info = BaseBlockInfo::new(self.header.clone(), self.chain_info.clone())
-            .map_err(|e| JsError::new(&e))?;
+            .map_err(|e| fail(&e))?;
         let result = executor::execute(
             base_block_info,
             state.clone(),
@@ -419,7 +446,7 @@ impl TxSession {
         if !missing.is_empty() {
             return Ok(serde_json::json!({ "missing": missing }).to_string());
         }
-        let execution = result.map_err(|e| JsError::new(&e))?;
+        let execution = result.map_err(|e| fail(&e))?;
         let query =
             storage_proofs::prepare_query(&execution.executed_class_hashes, &execution.initial_reads);
         let split = storage_proofs::split_query(&query);
@@ -434,14 +461,14 @@ impl TxSession {
 
     /// Takes the `starknet_getStorageProof` results (a JSON array, one per requested params),
     /// builds the virtual OS input and returns it as JSON (the native dump's format).
-    pub fn set_storage_proofs(&mut self, storage_proofs_json: &str) -> Result<String, JsError> {
+    pub fn set_storage_proofs(&mut self, storage_proofs_json: &str) -> Result<String, Failure> {
         let (execution, state) =
-            self.execution.take().ok_or_else(|| JsError::new("execute first"))?;
-        let (query, split) = self.query.take().ok_or_else(|| JsError::new("execute first"))?;
+            self.execution.take().ok_or_else(|| fail("execute first"))?;
+        let (query, split) = self.query.take().ok_or_else(|| fail("execute first"))?;
         let proofs: Vec<RpcStorageProof> =
             serde_json::from_str(storage_proofs_json).map_err(js_error)?;
         if proofs.len() != split.len() {
-            return Err(JsError::new("one storage proof per request expected"));
+            return Err(fail("one storage proof per request expected"));
         }
         let rpc_proof = storage_proofs::merge_storage_proofs(proofs, &split, &query);
 
@@ -466,9 +493,9 @@ impl TxSession {
             #[allow(unreachable_patterns)]
             let casm = match &compiled_class {
                 RunnableCompiledClass::V1(class) => {
-                    compiled_class_v1_to_casm(class).map_err(|e| JsError::new(&e))?
+                    compiled_class_v1_to_casm(class).map_err(|e| fail(&e))?
                 }
-                _ => return Err(JsError::new("Cairo 0 classes are not supported")),
+                _ => return Err(fail("Cairo 0 classes are not supported")),
             };
             compiled_classes.insert(compiled_class_hash, casm);
             class_hash_to_compiled_class_hash.insert(*class_hash, compiled_class_hash);
@@ -516,9 +543,9 @@ impl TxSession {
     }
 
     /// Runs the virtual OS on the built input; returns the PIE summary.
-    pub fn run_os(&mut self) -> Result<String, JsError> {
-        let input = self.os_input.take().ok_or_else(|| JsError::new("set_storage_proofs first"))?;
-        let pie = run_input(input).map_err(|e| JsError::new(&e))?;
+    pub fn run_os(&mut self) -> Result<String, Failure> {
+        let input = self.os_input.take().ok_or_else(|| fail("set_storage_proofs first"))?;
+        let pie = run_input(input).map_err(|e| fail(&e))?;
         let pie_summary = summary(&pie);
         self.pie = Some(pie);
         Ok(pie_summary)
@@ -526,15 +553,15 @@ impl TxSession {
 
     /// Proves the virtual OS run as the transaction prover does; returns the
     /// `starknet_proveTransaction` result JSON (proof, proof_facts, l2_to_l1_messages).
-    pub fn prove(&mut self) -> Result<String, JsError> {
+    pub fn prove(&mut self) -> Result<String, Failure> {
         if self.pie.is_none() {
             self.run_os()?;
         }
         let pie = self.pie.take().expect("the virtual OS ran");
         let precomputes = privacy_prove::prepare_recursive_prover_precomputes()
-            .map_err(|e| JsError::new(&format!("precomputes: {e}")))?;
+            .map_err(|e| fail(&format!("precomputes: {e}")))?;
         let output = privacy_prove::privacy_recursive_prove(pie, precomputes)
-            .map_err(|e| JsError::new(&format!("prover: {e}")))?;
+            .map_err(|e| fail(&format!("prover: {e}")))?;
         let proof = Proof::from(output.proof);
         let proof_facts = ProgramOutput::from(output.output_preimage)
             .try_into_proof_facts(VIRTUAL_SNOS)
@@ -593,7 +620,7 @@ pub fn memory_report() -> String {
 /// is no clock on wasm32-unknown-unknown.
 #[wasm_bindgen]
 pub fn init_logging(level: &str) -> Result<(), JsError> {
-    let level: tracing::Level = level.parse().map_err(js_error)?;
+    let level: tracing::Level = level.parse().map_err(|e| JsError::new(&format!("{e}")))?;
     tracing_subscriber::fmt()
         .without_time()
         .with_ansi(false)
