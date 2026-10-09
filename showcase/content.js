@@ -7,8 +7,8 @@ window.SHOWCASE = {
   actions: [
     {
       id: "register",
-      short: "Join",
-      title: "Bob joins the Privacy Pool",
+      short: "Register",
+      title: "Bob registers in the Privacy Pool",
       tagline: "Sets up a private balance",
       summary: "Bob registers with the pool, so that he can hold [STRK] and be paid privately.",
       icon: "key",

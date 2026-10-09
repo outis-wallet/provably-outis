@@ -101,15 +101,11 @@
       </header>
       <h1>Private actions, proven on this ${deviceKind}</h1>
       <p class="lede">Each step is a real Privacy Pool transaction, recorded on Starknet Sepolia. This ${deviceKind} builds its ZK proof itself, so the private key the proof needs never leaves it.</p>
+      <button class="results-link pressable" data-do="results">${icon("trophy")}<span>Results: how fast devices prove</span>${icon("next")}</button>
       <div class="section">
         <h2 class="section-title">Four steps</h2>
         <div class="steps">${actions.map(renderStep).join("")}</div>
       </div>
-      <button class="well step pressable" data-do="results">
-        <span class="ring-icon">${icon("trophy")}</span>
-        <span class="body"><div class="title">Results</div><div class="sub">How fast other devices build these proofs</div></span>
-        <span class="end">${icon("next")}</span>
-      </button>
       <button class="well step pressable" data-do="how">
         <span class="ring-icon">${icon("help")}</span>
         <span class="body"><div class="title">How does this work?</div><div class="sub">What is proven, and what stays private</div></span>

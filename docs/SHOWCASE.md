@@ -1,6 +1,6 @@
 # Outis Prover: the showcase app
 
-An app that proves the four captured Privacy Pool actions (captures/own-pool-flow: Bob joins,
+An app that proves the four captured Privacy Pool actions (captures/own-pool-flow: Bob registers,
 Alice shields 5 STRK, Alice sends Bob 3 [STRK], Bob unshields 2 [STRK]) on the device. It shows
 how long the proof took, what it says, and what stays private. It is styled after Outis
 (Midnight Sage, from outis/wallet/packages/ui).
