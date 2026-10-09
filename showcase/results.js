@@ -4,7 +4,7 @@
 // (and, not shown on the page, ?build=<build> and ?results=<service url>, for us).
 (function () {
   const { actions, deviceNames } = window.SHOWCASE;
-  const { icon, spinner, escape, logo, seconds, integer, gigabytes, ramLabel, deviceLabel, gpuChip } = window.OUTIS_UI;
+  const { icon, spinner, escape, seconds, integer, gigabytes, ramLabel, deviceLabel, gpuChip } = window.OUTIS_UI;
   const engine = window.provingly;
   const app = document.getElementById("app");
   const params = new URLSearchParams(location.search);
@@ -72,11 +72,7 @@
     if (state.status === "done") board = renderBoard(state.data);
 
     app.innerHTML = `<main class="screen wide">
-      <header class="header">
-        <a class="brand" href="${proverPage()}">${logo}<span class="tag">Prover</span></a>
-        <a class="button quiet" href="${proverPage()}">${icon("back")}Prove yours</a>
-      </header>
-      <h1>Results</h1>
+      <h1><a class="back-title" href="${proverPage()}" aria-label="Back to the prover">${icon("back")}Results</a></h1>
       <p class="lede">How long devices take to build each Privacy Pool action's ZK proof, as people submitted it from the Outis Prover apps and browsers.</p>
       <div class="tabs">${tabs}</div>
       <div class="well filters">

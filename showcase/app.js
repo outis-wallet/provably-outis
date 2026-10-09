@@ -82,10 +82,10 @@
     const spec = device ? `${arch ? `${arch} · ` : ""}${device.cores} cores${ram ? ` · ${ram}` : ""}` : "";
     return `<main class="screen ${motion}">
       <header class="header">
-        <div class="brand">${logo}<span class="tag">Prover</span></div>
+        <div class="brand">${logo}</div>
         ${device ? `<div class="device"><div class="name">${escape(deviceName)}</div><div class="spec">${spec}</div></div>` : ""}
       </header>
-      <h1>Private actions, proven on this ${deviceKind}</h1>
+      <h1>Privacy Pool Proofs</h1>
       <p class="lede">Each step is a real Privacy Pool transaction, recorded on Starknet Sepolia. This ${deviceKind} builds its ZK proof itself, so the private key the proof needs never leaves it.</p>
       <div class="quick-links">
         <a class="quick-link pressable" href="${resultsPage()}">${icon("trophy")}<span><b>Results</b><small>How fast other devices build these proofs</small></span></a>
