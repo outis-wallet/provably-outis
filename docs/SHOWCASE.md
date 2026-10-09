@@ -1,6 +1,6 @@
 # Outis Prover: the showcase app
 
-An app that proves the four captured Privacy Pool actions (captures/own-pool-flow: Bob registers,
+An app that proves the four captured Privacy Pool actions (prover/captures: Bob registers,
 Alice shields 5 STRK, Alice sends Bob 3 [STRK], Bob unshields 2 [STRK]) on the device. It shows
 how long the proof took, what it says, and what stays private. It is styled after Outis
 (Midnight Sage, from outis/wallet/packages/ui).
@@ -24,9 +24,9 @@ Each app wraps the native build in a thin shell that runs the Rust prover.
 | `showcase/index.html`, `results.html`, `app.js`, `app.css` | The native build of it, generated. The apps bundle these. |
 | `showcase/captures.txt` | The captures the apps bundle: action id, then capture directory. |
 | `showcase/fonts/` | Ubuntu Sans (variable, Latin), Outis's typeface, under the Ubuntu Font Licence. `app.css` loads it from here. |
-| `showcase/build-web.sh`, `showcase/web/worker.mjs` | The web engine (worker, threaded wasm, trimmed captures), built into `outis/wallet/apps/prover/public`. |
+| `prover/` | The prover, a submodule: [outis-wallet/prover](https://github.com/outis-wallet/prover). The apps link its pipeline as a static library and bundle its captures; `prover/scripts/build-web-engine.sh` builds the web engine (worker, threaded wasm, captures) into `outis/wallet/apps/prover/public`. |
 | `ios/TxProver/ShowcaseApp.swift` | The iOS shell: a WKWebView over the bundled page, and the bridge to `tx_prove_replay`. |
-| `sequencer/crates/os_wasm_probe/src/replay.rs` | The prover entry point: `replay()` with `Progress` events, and the C ABI `tx_prove_replay(dir, threads, callback, context)`. |
+| `prover/crates/os_wasm_probe/src/replay.rs` | The prover entry point: `replay()` with `Progress` events, and the C ABI `tx_prove_replay(dir, threads, callback, context)`. |
 
 ## The contract (outis/wallet/apps/prover/src/bridge.ts)
 
@@ -62,15 +62,19 @@ The generated native files open from files too: `showcase/index.html?mock` in a 
 To update the apps' copy after changing the UI, run `showcase/sync-ui.sh`. It builds the UI from
 the Outis checkout next to this one (`OUTIS=<path>` for another) and writes the four files here.
 Then it prints the commit to make, naming the Outis commit they come from (`+dirty` if that
-checkout had uncommitted changes in the app). The web engine changes
-only when the prover does: `showcase/build-web.sh` writes it into `outis/wallet/apps/prover/public`.
+checkout had uncommitted changes in the app). The web engine changes only when the prover does:
+`prover/scripts/build-wasm.sh web`, then `prover/scripts/build-web-engine.sh
+<outis>/wallet/apps/prover/public`.
 
 ## iOS
 
-1. `ios/build-rust.sh` builds the static library for the device and the simulator.
+1. `ios/build-rust.sh` builds the static library for the device and the simulator, in the
+   `prover/` submodule (`git submodule update --init prover` first). It needs the cairo-lang venv,
+   `prover/.venv` by default (`VENV=<path>` for another): `cd prover && uv venv && uv pip install
+   cairo-lang==0.14.3a3`. The toolchain and its iOS targets come from `prover/rust-toolchain.toml`.
 2. Build `ios/TxProver.xcodeproj` (scheme TxProver). Its "Bundle the showcase" phase copies
-   `showcase/`'s pages, scripts, styles and fonts to `web/`, and each capture in `captures.txt` to
-   `captures/<action>/`.
+   `showcase/`'s pages, scripts, styles and fonts to `web/`, and each capture in `captures.txt`
+   (from `prover/captures/`) to `captures/<action>/`.
 3. Install and run:
    `xcrun devicectl device install app --device <udid> <DerivedData>/Build/Products/Release-iphoneos/TxProver.app`,
    then `xcrun devicectl device process launch --device <udid> dev.provablyoutis.TxProver [--prove pay]`.
@@ -97,13 +101,15 @@ the page sends the scores itself.
 - `src/main/cpp/showcase_jni.c`: a JNI shim around `tx_prove_replay`. It attaches the prover's
   threads to forward their events to Java.
 - `CMakeLists.txt`: links the shim with the Rust static library into `libshowcase.so`.
-- `app/build.gradle`: syncs `showcase/` and the captures in `captures.txt` into the assets. Each
+- `app/build.gradle`: syncs `showcase/` and the captures in `captures.txt` (from `prover/captures/`,
+  with their contract classes copied from `prover/captures/classes`) into the assets. Each
   capture is copied to the files directory before its first proof, because `replay` reads a
   directory.
 
 To build and install:
 
 ```
+git submodule update --init prover                      # once; and the venv in prover/.venv (iOS above)
 android/build-rust.sh
 cd android && JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home \
   ANDROID_HOME=$HOME/Library/Android/sdk ./gradlew assembleDebug

@@ -5,20 +5,24 @@ Starknet virtual OS and the privacy prover (PROOF2), in the browser (WebAssembly
 (Linux, Android, macOS, iPadOS/iOS). The proofs are byte-identical to StarkWare's 0.14.4 transaction prover's and pass
 the sequencer's verifier.
 
-Snapshot of the work done on 2026-10-08. The results are in `docs/BROWSER-TX-PLAN.md`; the Mac,
-iPad and iPhone runs and their recipes are in `docs/MAC-IOS-PLAN.md`.
+The prover itself is published as [outis-wallet/prover](https://github.com/outis-wallet/prover)
+(here as the `prover/` submodule). This repository has the apps, the showcase's native build, the
+raw captures and the research notes: the results are in `docs/BROWSER-TX-PLAN.md`, the Mac, iPad
+and iPhone runs and their recipes in `docs/MAC-IOS-PLAN.md` (written when the prover was vendored
+here; its paths under `sequencer/` and `proving/` are now in the prover repository and its forks).
+
+Clone with the submodule: `git clone --recurse-submodules`, or `git submodule update --init prover`.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `sequencer/` | starkware-libs/sequencer at `PRIVACY-0.14.4-RC.0` (commit `0ee373ac`) plus our changes. The pipeline crate is `crates/os_wasm_probe` (wasm `TxSession`, native `os_native_probe`), with `wasm-stubs/c-kzg` and a few wasm build fixes. Its `[patch]` section points at `../proving`. |
-| `proving/` | starkware-libs/proving at `2b495a36` plus our striped (stripe-0 residency) prover, after ryun1's public description, plus wasm fixes: output preimage in memory, buffer pool. |
+| `prover/` | The prover, as a submodule: [outis-wallet/prover](https://github.com/outis-wallet/prover), pinned. The pipeline crate (`os_wasm_probe`), its native and wasm builds, the JS driver and the web engine (`scripts/build-web-engine.sh`, for outis.cash/prover), and the four captures the apps prove. It builds on Outis's forks of StarkWare's sequencer and prover ([outis-wallet/sequencer](https://github.com/outis-wallet/sequencer), [outis-wallet/proving](https://github.com/outis-wallet/proving), whose `OUTIS.md` says what each change is and whose). Until 2026-10-09 these were vendored here as `sequencer/` and `proving/`. |
 | `web/` | Test pages and `server.py` (COOP/COEP headers, `/rpc` forward to a node, optional HTTPS for the LAN). The `tx/` page proves a transaction (`?threads=N`, `&replay` to prove capture2 from its recording, `&trace`); the root and `mt/` pages are the earlier prover-only benchmark (`pair.json`). Prebuilt wasm is committed as `*.wasm.zst`. |
 | `showcase/` | Outis Prover, the showcase UI the iOS and Android apps load: the four Privacy Pool actions proven on the device, in Outis's style. Generated from `outis/wallet/apps/prover` (React), which is also outis.cash/prover (`?mock` previews it in a browser). See `docs/SHOWCASE.md`. |
 | `ios/` | The iOS app: `TxProver.xcodeproj` shows `showcase/` in a web view and links the pipeline as a static library (`build-rust.sh`). |
 | `android/` | The Android app: the same, in a WebView, with the pipeline linked through a JNI shim (`build-rust.sh`, then `./gradlew assembleDebug`). |
-| `tools/` | `tx-driver.mjs` (the JS side: RPC reads and the miss loop), `replay.mjs` (Node replay of a capture, `--prove --trace`), `os-node/` (Node build), and the recording proxies used to capture a transaction. |
+| `tools/` | The recording proxies used to capture a transaction (`rpc-record-proxy.py`, `record-proxy.py`, `capture-router.py`), `replay-all.sh` (replays a flow's captures with the prover submodule's builds) and `proof2-cron.sh` (does Sepolia accept PROOF2 yet). The JS driver and the Node replay are in `prover/js/`. |
 | `captures/capture2` | One captured Outis "bob registers" transaction: recorded RPC traffic, the prove request, the native prover's response (the identity reference), its virtual OS input, and node CASM. |
 | `docs/` | `BROWSER-TX-PLAN.md` (everything, with recipes and gotchas), `MAC-IOS-PLAN.md`, `SHOWCASE.md` (the showcase app), `STRIPE-PLAN.md` (the striped prover). |
 | `patches/` | The same changes as patches against upstream, plus earlier provably.fast candidates. |

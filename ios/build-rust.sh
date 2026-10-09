@@ -1,13 +1,15 @@
 #!/bin/sh
-# Builds os_wasm_probe as a static library for the iPhone and the iOS simulator; the Xcode project
-# links it from sequencer/target/<triple>/release. Needs the cairo-lang venv (sequencer_venv) and
-# the iOS targets of nightly-2026-01-15; see docs/MAC-IOS-PLAN.md.
+# Builds the prover (the prover submodule, github.com/outis-wallet/prover) as a static library for
+# the iPhone and the iOS simulator; the Xcode project links it from prover/target/<triple>/release.
+# Needs the cairo-lang venv (VENV, default prover/.venv); the toolchain and its iOS targets come
+# from prover/rust-toolchain.toml. See docs/MAC-REACT-SHOWCASE.md.
 # Usage: ios/build-rust.sh [target...] (default: aarch64-apple-ios aarch64-apple-ios-sim)
 set -e
-cd "$(dirname "$0")/../sequencer"
-. sequencer_venv/bin/activate
+cd "$(dirname "$0")/../prover"
+[ -f Cargo.toml ] || { echo "prover/ is empty: run git submodule update --init prover" >&2; exit 1; }
+. "${VENV:-.venv}/bin/activate"
 for target in ${*:-aarch64-apple-ios aarch64-apple-ios-sim}; do
-  IPHONEOS_DEPLOYMENT_TARGET=17.0 RUSTC_WRAPPER= cargo +nightly-2026-01-15 rustc --release \
+  IPHONEOS_DEPLOYMENT_TARGET=17.0 RUSTC_WRAPPER= cargo rustc --release \
     --target "$target" -p os_wasm_probe --lib --crate-type staticlib
   ls -l "target/$target/release/libos_wasm_probe.a"
 done

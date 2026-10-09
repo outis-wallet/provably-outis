@@ -1,8 +1,0 @@
-{
-    "compilerOptions": {
-        "lib": ["dom", "es2020"],
-        "noImplicitAny": false,
-        "strictNullChecks": false,
-        "checkJs": true
-    }
-}

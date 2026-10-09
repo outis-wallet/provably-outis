@@ -1,5 +1,5 @@
-// os_wasm_probe's replay entry points (sequencer/crates/os_wasm_probe/src/replay.rs), linked from
-// the static library that ios/build-rust.sh builds.
+// os_wasm_probe's replay entry points (prover/crates/os_wasm_probe/src/replay.rs, in the prover
+// submodule), linked from the static library that ios/build-rust.sh builds.
 #include <stdint.h>
 
 /// Gets each progress event as JSON (valid during the call), from any thread.

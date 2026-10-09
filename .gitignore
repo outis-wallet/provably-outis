@@ -1,5 +1,4 @@
 target*/
-sequencer/sequencer_venv
 node_modules/
 # The prebuilt wasm is committed compressed (*.wasm.zst); scripts/unpack-wasm.sh writes these.
 *.wasm

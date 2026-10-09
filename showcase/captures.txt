@@ -1,7 +1,7 @@
-# The transactions the showcase app proves: action id (content.js), then its capture directory
-# under captures/. The iOS build phase (and later the Android build) bundles each capture as
+# The transactions the apps prove: action id, then its capture directory under prover/captures/
+# (the prover submodule). The iOS build phase and the Android build bundle each one as
 # captures/<id>/ next to the web UI.
-register own-pool-flow/01
-deposit own-pool-flow/02
-pay own-pool-flow/03
-withdraw own-pool-flow/04
+register register
+deposit deposit
+pay pay
+withdraw withdraw

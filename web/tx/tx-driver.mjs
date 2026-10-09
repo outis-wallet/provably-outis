@@ -1,1 +1,1 @@
-../../tools/tx-driver.mjs
+../../prover/js/tx-driver.mjs

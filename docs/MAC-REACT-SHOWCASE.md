@@ -1,10 +1,35 @@
 # The showcase is now React: what the Mac needs to do
 
+## Latest: the prover moved to github.com/outis-wallet/prover
+
+The vendored `sequencer/` and `proving/` are gone. The prover is now the `prover/` submodule
+([outis-wallet/prover](https://github.com/outis-wallet/prover), pinned), built on Outis's forks
+of StarkWare's sequencer and prover. Proofs are the same: byte-identical on all four captures,
+natively, in Node and in Chrome. The apps' captures now come from `prover/captures/`. On the Mac:
+
+1. `git pull && git submodule update --init prover`.
+2. A cairo-lang venv for the prover's build: `cd prover && uv venv && uv pip install
+   cairo-lang==0.14.3a3`. The build scripts use `prover/.venv` (`VENV=<path>` for another).
+3. Remove what `git pull` leaves of the old trees (untracked: the old venv and build output):
+   `rm -rf sequencer proving`.
+4. `ios/build-rust.sh` and `android/build-rust.sh` as before. They build inside `prover/`, whose
+   `rust-toolchain.toml` installs nightly-2026-01-15 and the iOS and Android targets on first use.
+   Xcode and Gradle link from `prover/target/<triple>/release`.
+5. Clean build both apps, then check the contract classes were bundled as files, not symlinks
+   (`captures/classes` holds them once; each capture links to them, and both builds copy the
+   contents explicitly):
+   - Android: `unzip -l app/build/outputs/apk/debug/app-debug.apk | grep casm` lists eight files of
+     981,681 and 1,736,205 bytes;
+   - iOS: the same two sizes in the `.app`'s `captures/pay/`.
+
+Not tested on Linux: the Xcode build, the Gradle build (it needs JDK 17) and the Android NDK link.
+The copy step of the Xcode phase was run by hand and copies the classes as files. The Mac's build is
+the first real test of the new paths.
+
 The showcase UI the apps load (`showcase/`) is now generated from `outis/wallet/apps/prover`, a
 React app. The same app is outis.cash/prover. The hand-written `app.js`, `bridge.js`,
 `content.js`, `ui.js` and `results.js` are gone. `showcase/` now holds four generated files:
-`index.html`, `results.html`, `app.js` and `app.css`. `fonts/`, `captures.txt` and
-`build-web.sh` stay.
+`index.html`, `results.html`, `app.js` and `app.css`. `fonts/` and `captures.txt` stay.
 
 **The page/native contract is unchanged** apart from its names (the rename, below): the same
 messages and fields, on `provablyOutis.receive`, `provablyOutisNative`, `ProvablyOutisAndroid`
@@ -93,4 +118,4 @@ the commit to make. Don't edit the four files by hand: the next sync overwrites 
 | `content.js` | `content.ts` |
 | `bridge.js` | `bridge.ts` |
 | `app.css` | `showcase.css` (mobile, shared) and `desktop.css` (web only) |
-| `build-web.sh` (page and engine) | the page: the Outis site's build. The engine: still `build-web.sh`, now writing into `outis/wallet/apps/prover/public` |
+| `build-web.sh` (page and engine) | the page: the Outis site's build. The engine: `prover/scripts/build-web-engine.sh`, writing into `outis/wallet/apps/prover/public` |

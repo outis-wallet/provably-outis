@@ -35,7 +35,7 @@ android {
         buildConfigField 'String', 'COMMIT', "\"$commit\""
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
-            cmake { arguments "-DRUST_LIB_DIR=$repository/sequencer/target/aarch64-linux-android/release" }
+            cmake { arguments "-DRUST_LIB_DIR=$repository/prover/target/aarch64-linux-android/release" }
         }
     }
 
@@ -58,8 +58,10 @@ android {
     }
 }
 
-// The web UI as web/, and each capture showcase/captures.txt names as captures/<action>/, with the
-// files os_wasm_probe's replay reads (MainActivity copies one out to files before proving it).
+// The web UI as web/, and each capture showcase/captures.txt names (from the prover submodule's
+// captures/) as captures/<action>/, with the files os_wasm_probe's replay reads (MainActivity
+// copies one out to files before proving it). The contract classes are symlinks into
+// prover/captures/classes, so they are copied from there, as files, explicitly.
 def syncShowcase = tasks.register('syncShowcase', Sync) {
     def showcase = new File(repository, 'showcase')
     into showcaseAssets
@@ -69,8 +71,18 @@ def syncShowcase = tasks.register('syncShowcase', Sync) {
     }
     new File(showcase, 'captures.txt').readLines().findAll { it.trim() && !it.startsWith('#') }.each { line ->
         def (action, directory) = line.trim().split(/\s+/)
-        from(new File(repository, "captures/$directory")) {
-            include 'rpc-log.jsonl', 'request-*.json', 'response-*.json', 'casm-*.json'
+        def capture = new File(repository, "prover/captures/$directory")
+        if (!capture.isDirectory()) {
+            throw new GradleException("No prover/captures/$directory: run `git submodule update --init prover`")
+        }
+        from(capture) {
+            include 'rpc-log.jsonl', 'request-*.json', 'response-*.json'
+            into "captures/$action"
+        }
+        // The classes this capture names (its casm-*.json symlinks), from prover/captures/classes.
+        def classes = capture.list().findAll { it.startsWith('casm-') && it.endsWith('.json') }
+        from(new File(repository, 'prover/captures/classes')) {
+            include classes
             into "captures/$action"
         }
     }

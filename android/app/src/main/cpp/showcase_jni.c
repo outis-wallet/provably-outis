@@ -1,5 +1,6 @@
-// Prover.prove for Java: os_wasm_probe's C entry point (sequencer/crates/os_wasm_probe/src/replay.rs,
-// linked as a static library), with its progress events passed on to a Java listener.
+// Prover.prove for Java: os_wasm_probe's C entry point (prover/crates/os_wasm_probe/src/replay.rs,
+// in the prover submodule, linked as a static library), with its progress events passed on to a
+// Java listener.
 #include <jni.h>
 #include <stdint.h>
 
