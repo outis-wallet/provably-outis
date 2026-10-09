@@ -7,6 +7,7 @@ window.SHOWCASE = {
   actions: [
     {
       id: "register",
+      short: "Join",
       title: "Bob joins the Privacy Pool",
       tagline: "Sets up a private balance",
       summary: "Bob registers with the pool, so that he can hold [STRK] and be paid privately.",
@@ -18,6 +19,7 @@ window.SHOWCASE = {
     },
     {
       id: "deposit",
+      short: "Shield",
       title: "Alice shields 5 STRK",
       tagline: "From her public balance into the pool",
       summary: "Alice moves 5 STRK from her public balance into the Privacy Pool, where it becomes a note only she can spend.",
@@ -29,6 +31,7 @@ window.SHOWCASE = {
     },
     {
       id: "pay",
+      short: "Send",
       title: "Alice sends Bob 3 [STRK]",
       tagline: "A private payment",
       summary: "Inside the pool, Alice pays Bob 3 [STRK] and keeps 2 [STRK] as change. Bob sees the amount and that it came from her. Nobody else on-chain does.",
@@ -48,6 +51,7 @@ window.SHOWCASE = {
     },
     {
       id: "withdraw",
+      short: "Unshield",
       title: "Bob unshields 2 [STRK]",
       tagline: "Back to a public address",
       summary: "Bob takes 2 [STRK] out of the pool to a public address, and keeps 1 [STRK] private.",
@@ -67,6 +71,10 @@ window.SHOWCASE = {
     { id: "prove", label: "Build the ZK proof", doing: "Building the ZK proof…" },
     { id: "verify", label: "Verify the proof", doing: "Verifying the proof…", detail: "The check the network runs" },
   ],
+
+  // The prover-results service (outis/prover-results): scores sent from the result screen, and
+  // the results page. ?results=<url> points the page at another one (local testing).
+  resultsUrl: "https://rpc.outis.cash/prover-results",
 
   // Native prove times for this kind of transaction (docs/BROWSER-TX-PLAN.md).
   referenceDevices: [

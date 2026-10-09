@@ -5,6 +5,8 @@ import { buildOsInput, compareWithNative, replayRpc } from "./tx-driver.mjs";
 import * as pkg from "../pkg-mt/os_wasm_probe.js";
 
 const WASM = "../pkg-mt/__WASM_FILE__";
+// The prover build the scores belong to: the module's hash.
+const BUILD = `web-${(WASM.match(/bg\.([0-9a-f]+)\.wasm/) || [])[1] || "unknown"}`;
 const CAPTURES = "../captures/";
 
 const fetchOk = async (url) => {
@@ -83,6 +85,7 @@ self.onmessage = async ({ data: { action, threads } }) => {
     const { identical, facts, messages } = compareWithNative(result, native);
     self.postMessage({
       report: {
+        build: BUILD,
         block: Number(session.block_number()),
         tx_hash: session.tx_hash(),
         threads,

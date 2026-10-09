@@ -4,17 +4,20 @@
 // progress events only update the live parts (time, phases, memory) so animations keep going.
 (function () {
   const { actions, phases, referenceDevices, deviceNames } = window.SHOWCASE;
+  const resultsUrl = (params0 => params0.get("results") || window.SHOWCASE.resultsUrl)(new URLSearchParams(location.search));
   const engine = window.provingly;
   const app = document.getElementById("app");
   const params = new URLSearchParams(location.search);
 
   const state = {
-    view: "home", // "home" | "action"
+    view: "home", // "home" | "action" | "results"
     actionId: null,
     sheet: false,
     runs: {}, // action id -> run
     running: null, // the action id being proven
     threads: Number(params.get("threads") || 0), // 0: every core
+    resultsAction: "pay", // the results page's tab
+    results: {}, // action id -> {status: "loading" | "done" | "failed", data, error}
   };
 
   // Outis's line icons (packages/ui/src/Icon.tsx), and a few more in the same style.
@@ -42,6 +45,8 @@
     again: '<path d="M4 12a8 8 0 0 1 14-5.3L20 9M20 4v5h-5M20 12a8 8 0 0 1-14 5.3L4 15M4 20v-5h5"/>',
     phone: '<rect x="6.5" y="3" width="11" height="18" rx="2.5"/><path d="M10.5 18h3"/>',
     proof: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13.5l2 2 4-4.5"/>',
+    trophy: '<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0Z"/><path d="M7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4"/>',
+    upload: '<path d="M12 16V4m-4 4 4-4 4 4"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
     network: '<circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M11 6.8 6 16.2M13 6.8l5 9.4M7 18h10"/>',
   };
   const icon = (name, extra = "") => `<svg class="i ${extra}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
@@ -71,7 +76,7 @@
 
   // Navigation: a page comes in from the right, and goes back to the left, as in Outis.
   function go(view, actionId = null) {
-    const back = view === "home" && state.view === "action";
+    const back = view === "home" && state.view !== "home";
     state.view = view;
     state.actionId = actionId;
     render(back ? "enter-back" : "enter");
@@ -79,7 +84,8 @@
   }
 
   function render(motion = "") {
-    app.innerHTML = state.view === "action" ? renderAction(actionById(state.actionId), motion) : renderHome(motion);
+    app.innerHTML = state.view === "action" ? renderAction(actionById(state.actionId), motion)
+      : state.view === "results" ? renderResults(motion) : renderHome(motion);
     if (state.sheet) app.insertAdjacentHTML("beforeend", renderSheet());
     updateLive();
   }
@@ -99,12 +105,17 @@
         <h2 class="section-title">Four steps</h2>
         <div class="steps">${actions.map(renderStep).join("")}</div>
       </div>
+      <button class="well step pressable" data-do="results">
+        <span class="ring-icon">${icon("trophy")}</span>
+        <span class="body"><div class="title">Results</div><div class="sub">How fast other devices build these proofs</div></span>
+        <span class="end">${icon("next")}</span>
+      </button>
       <button class="well step pressable" data-do="how">
         <span class="ring-icon">${icon("help")}</span>
         <span class="body"><div class="title">How does this work?</div><div class="sub">What is proven, and what stays private</div></span>
         <span class="end">${icon("next")}</span>
       </button>
-      <p class="footnote">Proofs are built and checked on this device, with the verifier the network uses. Nothing is sent.</p>
+      <p class="footnote">Proofs are built and checked on this device, with the verifier the network uses. Nothing is sent unless you submit your score.</p>
     </main>`;
   }
 
@@ -211,6 +222,7 @@
       : `<div class="verdict failed"><span class="tick">${icon("close")}</span>The proof did not verify</div>`;
     return `${verdict}
       <div class="figure rise"><span class="label">Time to build it on this ${escape(deviceName)}</span><span class="amount">${value}<small>${unit}</small></span></div>
+      ${renderSubmit(action, run)}
       ${identical}${simulated}
       <div class="well rows">
         ${row("Proof", `${Math.round(report.proof_bytes / 1024)} KB`, "Sent instead of the private key and notes")}
@@ -228,13 +240,133 @@
         ${renderCompare(report)}
       </div>
       ${renderDetails(report, run)}
-      <div class="buttons">
-        ${nextButton}
-        <div class="button-row">
-          <button class="button secondary" data-do="share" data-id="${action.id}">${icon("share")}Share</button>
-          <button class="button secondary" data-do="prove" data-id="${action.id}">${icon("again")}Prove again</button>
-        </div>
+      <div class="buttons">${nextButton}</div>`;
+  }
+
+  // Submitting the score: the time and this device's specs go to the results, nothing else.
+  function renderSubmit(action, run) {
+    const submit = run.submit || {};
+    if (submit.status === "done") {
+      const place = submit.position ? `#${integer(submit.position)} of ${integer(submit.of)} for this step` : "Saved";
+      return `<div class="submit"><div class="status success">${icon("ok")}<div><b>Score submitted</b> · ${place}</div></div>
+        <button class="button secondary" data-do="results" data-id="${action.id}">${icon("trophy")}See results</button></div>`;
+    }
+    const failed = submit.status === "failed" ? `<div class="status danger">${icon("danger")}<div>${escape(submit.error)}</div></div>` : "";
+    const busy = submit.status === "submitting";
+    return `<div class="submit">${failed}
+      <button class="button secondary ${busy ? "busy" : ""}" data-do="submit" data-id="${action.id}" ${busy ? "disabled" : ""}>${busy ? spinner : icon("upload")}${busy ? "Submitting…" : failed ? "Try again" : "Submit score"}</button>
+      <p class="hint">Sends the time and this ${escape(deviceKind)}'s specs (${escape(deviceLabel())}) to the results. No key, no account.</p></div>`;
+  }
+
+  // What the results group by: the device's name in the apps; in a browser the phone's model
+  // (Chrome on Android tells it), else the chip its GPU names, else OS, architecture and cores,
+  // then the browser.
+  function deviceLabel() {
+    if (!device) return "Unknown device";
+    if (device.platform !== "web") return deviceName;
+    const hardware = device.hardware ? deviceNames[device.hardware] || device.hardware : null;
+    const chip = gpuChip(device.gpu);
+    const base = hardware || chip || [device.os, device.arch, device.cores ? `${device.cores}-core` : ""].filter(Boolean).join(" ");
+    const browser = (device.name || "").split(" on ")[0];
+    return browser ? `${base} · ${browser}` : base;
+  }
+
+  // The chip a GPU name gives away: Apple silicon on a Mac, and phone GPUs (their SoC's).
+  function gpuChip(gpu) {
+    if (!gpu) return null;
+    const apple = gpu.match(/Apple (M\d+(?: Pro| Max| Ultra)?)/);
+    if (apple) return `Apple ${apple[1]}`;
+    const mobile = gpu.match(/(Adreno|Mali|Immortalis|Xclipse|PowerVR)[^,)]*/);
+    return mobile ? mobile[0].replace(/\s*\(TM\)\s*/g, " ").trim() : null;
+  }
+
+  async function submitScore(actionId) {
+    const run = state.runs[actionId];
+    if (!run || run.status !== "done" || (run.submit && ["submitting", "done"].includes(run.submit.status))) return;
+    const report = run.report;
+    const peak = report.peak || {};
+    const spec = {};
+    for (const key of ["platform", "model", "name", "os", "arch", "cores", "ramGiB", "ramAtLeast", "hardware", "gpu", "chip", "soc", "perfCores", "efficiencyCores"]) {
+      if (device && device[key] !== undefined && device[key] !== null) spec[key] = typeof device[key] === "string" ? device[key].slice(0, 100) : device[key];
+    }
+    const payload = {
+      action: actionId,
+      build: report.build || (window.provinglyNative && window.provinglyNative.build) || `${engine.platform}-unknown`,
+      platform: ["ios", "android"].includes(engine.platform) ? engine.platform : "web",
+      device_label: deviceLabel().slice(0, 100),
+      device: spec,
+      conditions: run.conditions || {},
+      report: {
+        prove_s: report.prove_s, total_s: report.total_s, os_s: report.os_s, input_s: report.input_s, verify_s: report.verify_s,
+        threads: report.threads, os_steps: report.os_steps, proof_bytes: report.proof_bytes, verified: report.verified,
+        identical: Boolean(report.identical), simulated: Boolean(report.simulated), peak_mib: peak.run_mib || peak.footprint_mib || peak.rss_mib || null,
+      },
+    };
+    run.submit = { status: "submitting" };
+    render();
+    try {
+      const response = await fetch(`${resultsUrl}/v1/results`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ? `Not accepted: ${body.error}` : `The results service answered ${response.status}`);
+      run.submit = { status: "done", id: body.id, position: body.position, of: body.of };
+      const mine = JSON.parse(localStorage.getItem("outis-prover-submissions") || "[]");
+      mine.push({ id: body.id, action: actionId, label: payload.device_label });
+      localStorage.setItem("outis-prover-submissions", JSON.stringify(mine.slice(-200)));
+      delete state.results[actionId];
+    } catch (problem) {
+      run.submit = { status: "failed", error: problem.message || "Couldn't reach the results service" };
+    }
+    if (state.view === "action" && state.actionId === actionId) render();
+  }
+
+  // The results page: each step's devices, ranked by their median time to build the proof.
+  function renderResults(motion) {
+    const actionId = state.resultsAction;
+    const entry = state.results[actionId];
+    if (!entry) loadResults(actionId);
+    const tabs = actions.map((action) => `<button class="tab ${action.id === actionId ? "picked" : ""}" data-do="results-tab" data-id="${action.id}">${escape(action.short || action.title)}</button>`).join("");
+    let body = `<div class="well compare"><div class="caption">${spinner} Loading…</div></div>`;
+    if (entry && entry.status === "failed") body = `<div class="status danger">${icon("danger")}<div>${escape(entry.error)}</div></div>`;
+    if (entry && entry.status === "done") body = renderBoard(entry.data);
+    return `<main class="screen ${motion}">
+      <div class="title-bar">
+        <button class="back" data-do="home" aria-label="Back">${icon("back")}</button>
+        <span class="label">Results</span>
+      </div>
+      <h1>How fast devices prove</h1>
+      <p class="lede">Time to build each step's ZK proof, as people submitted it from their phones, tablets and browsers.</p>
+      <div class="tabs">${tabs}</div>
+      ${body}
+      <p class="footnote">Scores are sent by visitors. A score is accepted only if its proof verified and matched the reference one, but the time itself can't be checked.</p>
+    </main>`;
+  }
+
+  function renderBoard(data) {
+    if (!data.devices.length) return `<div class="well compare"><div class="caption">No scores for this step yet. Prove it and submit yours.</div></div>`;
+    const mine = new Set(JSON.parse(localStorage.getItem("outis-prover-submissions") || "[]").map((entry) => entry.label));
+    mine.add(deviceLabel());
+    const longest = Math.max(...data.devices.map((entry) => entry.median_s));
+    const rows = data.devices.slice(0, 100).map((entry, index) => {
+      const you = mine.has(entry.device_label);
+      const where = entry.platform === "web" ? "browser" : entry.platform === "ios" ? "iOS app" : "Android app";
+      return `<div class="${you ? "you" : ""}">
+        <div class="labels"><span>${index + 1}. ${escape(entry.device_label)} <small>${where} · ${entry.runs} run${entry.runs === 1 ? "" : "s"}</small></span><span>${seconds(entry.median_s)}</span></div>
+        <div class="track"><div class="fill" style="width:${Math.max(3, (entry.median_s / longest) * 100)}%;animation-delay:${Math.min(index, 20) * 40}ms"></div></div>
       </div>`;
+    }).join("");
+    return `<div class="well compare">${rows}<div class="caption">${integer(data.runs)} run${data.runs === 1 ? "" : "s"} · median per device, shorter is faster</div></div>`;
+  }
+
+  async function loadResults(actionId) {
+    state.results[actionId] = { status: "loading" };
+    try {
+      const response = await fetch(`${resultsUrl}/v1/results?action=${encodeURIComponent(actionId)}`);
+      if (!response.ok) throw new Error(`The results service answered ${response.status}`);
+      state.results[actionId] = { status: "done", data: await response.json() };
+    } catch (problem) {
+      state.results[actionId] = { status: "failed", error: problem.message || "Couldn't reach the results service" };
+    }
+    if (state.view === "results" && state.resultsAction === actionId) render();
   }
 
   const row = (key, value, note) => `<div class="row"><span class="key">${key}</span><span class="value">${value}${note ? `<small>${escape(note)}</small>` : ""}</span></div>`;
@@ -347,6 +479,8 @@
     clearInterval(ticker);
     render();
     window.scrollTo(0, 0);
+    // For testing: ?autosubmit submits the score when the proof is done.
+    if (params.has("autosubmit") && run.status === "done") submitScore(run.actionId);
   }
 
   engine.onMessage = (message) => {
@@ -380,11 +514,6 @@
     }
   };
 
-  function shareText(action) {
-    const report = state.runs[action.id].report;
-    return `My ${deviceName} built the ZK proof for a Starknet Privacy Pool action ("${action.title}") in ${seconds(report.prove_s)}: ${Math.round(report.proof_bytes / 1024)} KB, ${gigabytes(report.peak.run_mib || 0)} GB of memory, ${integer(report.os_steps)} steps, verified on the device. The private key never left it.`;
-  }
-
   app.addEventListener("click", (event) => {
     const target = event.target.closest("[data-do]");
     if (!target) return;
@@ -393,7 +522,12 @@
       case "open": go("action", id); break;
       case "home": go("home"); break;
       case "prove": startProof(id); break;
-      case "share": engine.share(shareText(actionById(id))); break;
+      case "submit": submitScore(id); break;
+      case "results":
+        if (id) state.resultsAction = id;
+        go("results");
+        break;
+      case "results-tab": state.resultsAction = id; render(); break;
       case "how": state.sheet = true; render(); break;
       case "close": state.sheet = false; render(); break;
     }
@@ -402,10 +536,16 @@
   // Android's back button: true when the page handled it.
   engine.back = () => {
     if (state.sheet) { state.sheet = false; render(); return true; }
-    if (state.view === "action") { go("home"); return true; }
+    if (state.view !== "home") { go("home"); return true; }
     return false;
   };
 
+  // outis.cash/prover/#results opens the results page; #results/<action> on that step's tab.
+  const [hashView, hashAction] = location.hash.slice(1).split("/");
+  if (hashView === "results") {
+    state.view = "results";
+    if (actionById(hashAction)) state.resultsAction = hashAction;
+  }
   render("rise");
   engine.onDevice = () => { if (!state.running) render(); };
   engine.ready();

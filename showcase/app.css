@@ -255,3 +255,11 @@ details.more .rows { margin-top: 10px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition: none !important; }
 }
+
+/* Submitting a score, and the results page. */
+.submit { display: flex; flex-direction: column; gap: 8px; }
+.tabs { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.tab { flex: 1 0 auto; display: grid; place-items: center; min-height: 36px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); font-size: 14px; font-weight: 600; background: transparent; }
+.tab.picked { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.compare .labels small { color: var(--faint); font-weight: 400; margin-left: 4px; }
+.compare .caption svg.spinner { width: 14px; height: 14px; vertical-align: -2px; }
