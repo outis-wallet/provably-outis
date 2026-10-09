@@ -1,4 +1,4 @@
-# provingly
+# provably-outis
 
 Client-side proving of Starknet transactions (an Outis privacy-pool transaction): execution, the
 Starknet virtual OS and the privacy prover (PROOF2), in the browser (WebAssembly) and natively

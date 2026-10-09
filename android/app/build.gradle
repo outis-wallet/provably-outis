@@ -20,12 +20,12 @@ def commit = {
 def showcaseAssets = layout.buildDirectory.dir('generated/showcase-assets')
 
 android {
-    namespace 'dev.provingly.showcase'
+    namespace 'dev.provablyoutis.showcase'
     compileSdk 36
     ndkVersion '27.1.12297006'
 
     defaultConfig {
-        applicationId 'dev.provingly.showcase'
+        applicationId 'dev.provablyoutis.showcase'
         // getCurrentThermalStatus.
         minSdk 29
         // 34, not 35: from 35 apps are drawn edge to edge, under the system bars.

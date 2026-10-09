@@ -35,7 +35,7 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     override init() {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.addUserScript(WKUserScript(
-            source: "window.provinglyNative = \(Self.json(["device": Device.info, "build": Device.build]));",
+            source: "window.provablyOutisNative = \(Self.json(["device": Device.info, "build": Device.build]));",
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -120,7 +120,7 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     func send(_ message: [String: Any]) { sendJSON(Self.json(message)) }
 
     func sendJSON(_ json: String) {
-        webView.evaluateJavaScript("provingly.receive(\(json))")
+        webView.evaluateJavaScript("provablyOutis.receive(\(json))")
     }
 
     static func json(_ object: [String: Any]) -> String {

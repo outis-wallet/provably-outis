@@ -36,7 +36,7 @@ static void forward_event(void *context, const char *event_json) {
     if (attached) (*java_vm)->DetachCurrentThread(java_vm);
 }
 
-JNIEXPORT jstring JNICALL Java_dev_provingly_showcase_Prover_prove(JNIEnv *env, jclass prover, jstring capture_dir,
+JNIEXPORT jstring JNICALL Java_dev_provablyoutis_showcase_Prover_prove(JNIEnv *env, jclass prover, jstring capture_dir,
                                                                   jint threads, jobject listener_object) {
     struct listener listener = {
         .object = (*env)->NewGlobalRef(env, listener_object),

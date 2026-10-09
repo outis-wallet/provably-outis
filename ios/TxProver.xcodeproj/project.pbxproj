@@ -211,7 +211,7 @@
 					"-framework",
 					Security,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.provingly.TxProver;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.provablyoutis.TxProver;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RUST_LIB_DIR = "$(PROJECT_DIR)/../sequencer/target/aarch64-apple-ios/release";
 				"RUST_LIB_DIR[sdk=iphonesimulator*]" = "$(PROJECT_DIR)/../sequencer/target/aarch64-apple-ios-sim/release";
@@ -249,7 +249,7 @@
 					"-framework",
 					Security,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.provingly.TxProver;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.provablyoutis.TxProver;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RUST_LIB_DIR = "$(PROJECT_DIR)/../sequencer/target/aarch64-apple-ios/release";
 				"RUST_LIB_DIR[sdk=iphonesimulator*]" = "$(PROJECT_DIR)/../sequencer/target/aarch64-apple-ios-sim/release";

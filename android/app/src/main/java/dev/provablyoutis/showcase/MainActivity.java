@@ -1,4 +1,4 @@
-package dev.provingly.showcase;
+package dev.provablyoutis.showcase;
 
 import android.app.Activity;
 import android.app.ActivityManager;
@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
         webView.getSettings().setJavaScriptEnabled(true);
         // The page keeps the scores it sent in localStorage (to mark them on the results page).
         webView.getSettings().setDomStorageEnabled(true);
-        webView.addJavascriptInterface(new Bridge(), "ProvinglyAndroid");
+        webView.addJavascriptInterface(new Bridge(), "ProvablyOutisAndroid");
         webView.setWebViewClient(new WebViewClient() {
             // Only the bundled page; a link out opens in the browser.
             @Override
@@ -87,12 +87,12 @@ public class MainActivity extends Activity {
     public void onBackPressed() {
         // Each page handles it first: the prover closes its sheet or goes home, results.html goes to
         // the prover. A page without a handler lets the app close.
-        webView.evaluateJavascript("window.provingly && provingly.back ? provingly.back() : false", handled -> {
+        webView.evaluateJavascript("window.provablyOutis && provablyOutis.back ? provablyOutis.back() : false", handled -> {
             if (!"true".equals(handled)) MainActivity.super.onBackPressed();
         });
     }
 
-    /** What the page calls, as window.ProvinglyAndroid (on WebView's own thread). */
+    /** What the page calls, as window.ProvablyOutisAndroid (on WebView's own thread). */
     private final class Bridge {
         @JavascriptInterface
         public void postMessage(String json) {
@@ -168,7 +168,7 @@ public class MainActivity extends Activity {
 
     /**
      * Extras {@code prove} (an action) and {@code threads} start a proof once the page is ready:
-     * {@code adb shell am start -S -n dev.provingly.showcase/.MainActivity --es prove pay --ei threads 8}.
+     * {@code adb shell am start -S -n dev.provablyoutis.showcase/.MainActivity --es prove pay --ei threads 8}.
      */
     private void startFromIntent() {
         String action = getIntent().getStringExtra("prove");
@@ -193,7 +193,7 @@ public class MainActivity extends Activity {
     }
 
     private void sendJson(String json) {
-        webView.evaluateJavascript("provingly.receive(" + json + ")", null);
+        webView.evaluateJavascript("provablyOutis.receive(" + json + ")", null);
     }
 
     /** The captures in the assets, copied to files on first use: the prover reads a directory. */

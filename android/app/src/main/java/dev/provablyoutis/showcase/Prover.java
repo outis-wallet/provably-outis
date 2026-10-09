@@ -1,4 +1,4 @@
-package dev.provingly.showcase;
+package dev.provablyoutis.showcase;
 
 /** os_wasm_probe's replay (the Rust prover), through the JNI shim in src/main/cpp. */
 final class Prover {

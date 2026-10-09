@@ -32,8 +32,8 @@ Each app wraps the native build in a thin shell that runs the Rust prover.
 
 - Page to native: `{type: "prove", action, threads}` and `{type: "ready"}`.
   - iOS receives them on `webkit.messageHandlers.prover`.
-  - Android receives them on `ProvinglyAndroid.postMessage(json)`.
-- Native to page: `provingly.receive(message)`, with one of:
+  - Android receives them on `ProvablyOutisAndroid.postMessage(json)`.
+- Native to page: `provablyOutis.receive(message)`, with one of:
   - `{type: "event", event}`: a `Progress` event, as JSON.
   - `{type: "result", report, conditions}`: the `Report`, plus the thermal state before and after
     and Low Power Mode.
@@ -41,10 +41,10 @@ Each app wraps the native build in a thin shell that runs the Rust prover.
   - `{type: "auto", action, threads}`: launch arguments `--prove <action> [--threads N]`, for
     testing.
 - Device info:
-  - iOS sets `window.provinglyNative = {device, build}` before the page loads.
-  - Android returns it from `ProvinglyAndroid.deviceJson()`.
+  - iOS sets `window.provablyOutisNative = {device, build}` before the page loads.
+  - Android returns it from `ProvablyOutisAndroid.deviceJson()`.
   - Fields: `{platform, model, os, cores, ramGiB}`, and the optional ones of docs/RESULTS.md.
-- Android's back button calls `provingly.back()`. It returns true when the page handled it.
+- Android's back button calls `provablyOutis.back()`. It returns true when the page handled it.
 
 The prover's `Progress` events are `phase` (state, execute, os, prove, verify), `transaction`
 (block, tx_hash), `os_steps`, `memory` (MiB, about every 250 ms) and `note`. `Report.peak.run_mib`
@@ -73,7 +73,7 @@ only when the prover does: `showcase/build-web.sh` writes it into `outis/wallet/
    `captures/<action>/`.
 3. Install and run:
    `xcrun devicectl device install app --device <udid> <DerivedData>/Build/Products/Release-iphoneos/TxProver.app`,
-   then `xcrun devicectl device process launch --device <udid> dev.provingly.TxProver [--prove pay]`.
+   then `xcrun devicectl device process launch --device <udid> dev.provablyoutis.TxProver [--prove pay]`.
    With `--console`, the report is printed after `SHOWCASE_RESULT`. Ending a `--console`
    session also ends the app.
 
@@ -93,7 +93,7 @@ the page sends the scores itself.
 
 `android/` is the same shell in plain Java, with no AndroidX or Kotlin:
 - `MainActivity.java`: a WebView over `file:///android_asset/web/index.html`, the
-  `ProvinglyAndroid` bridge, the back button and the device info.
+  `ProvablyOutisAndroid` bridge, the back button and the device info.
 - `src/main/cpp/showcase_jni.c`: a JNI shim around `tx_prove_replay`. It attaches the prover's
   threads to forward their events to Java.
 - `CMakeLists.txt`: links the shim with the Rust static library into `libshowcase.so`.
@@ -108,7 +108,7 @@ android/build-rust.sh
 cd android && JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home \
   ANDROID_HOME=$HOME/Library/Android/sdk ./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -S -n dev.provingly.showcase/.MainActivity [--es prove pay --ei threads 8]
+adb shell am start -S -n dev.provablyoutis.showcase/.MainActivity [--es prove pay --ei threads 8]
 ```
 
 With `--es prove`, the report is logged after `SHOWCASE_RESULT` (`adb logcat -s Showcase`).

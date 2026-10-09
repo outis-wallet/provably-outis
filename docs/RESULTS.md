@@ -37,7 +37,7 @@ apps need: very little, since the submission and the results page are the shared
 }
 ```
 
-- **`device`**: copied from `provingly.device`. The page sends only these keys if present:
+- **`device`**: copied from `provablyOutis.device`. The page sends only these keys if present:
   `platform, model, name, os, arch, cores, ramGiB, ramAtLeast, hardware, gpu, chip, soc,
   perfCores, efficiencyCores`. Strings are cut to 100 characters.
 - **`device_label`**: what the results group by, computed by the page. The apps get it for free:
@@ -45,13 +45,13 @@ apps need: very little, since the submission and the results page are the shared
 - **`report`**: the native Report as the apps already pass it.
   - `peak_mib` is taken from `peak.run_mib`, else `footprint_mib`, else `rss_mib`.
   - `identical` must be true, which the replay of a bundled capture gives.
-- **`build`**: from `report.build`, else `window.provinglyNative.build`, else
+- **`build`**: from `report.build`, else `window.provablyOutisNative.build`, else
   `"<platform>-unknown"`.
 
 ## What the apps do (done 2026-10-09)
 
 - **Build**:
-  - iOS sets `window.provinglyNative.build`, `ios-<version>-<commit>`. The "Bundle the
+  - iOS sets `window.provablyOutisNative.build`, `ios-<version>-<commit>`. The "Bundle the
     showcase" phase writes the commit as `build.txt`, with `+dirty` if there are uncommitted
     changes.
   - Android puts `build` in the Report, `android-<version>-<commit>`, from `BuildConfig.COMMIT`
@@ -74,7 +74,7 @@ apps need: very little, since the submission and the results page are the shared
 
 The steps as they were planned:
 
-1. **Give a build string.** Set `window.provinglyNative.build` before the page loads, or add
+1. **Give a build string.** Set `window.provablyOutisNative.build` before the page loads, or add
    `build` to the Report JSON. Use 64 characters at most, from `[A-Za-z0-9._+-]`, e.g.
    `ios-<app version>-<git short sha>`. Scores are stored per build, so a faster prover later can be
    told apart.
@@ -96,7 +96,7 @@ The steps as they were planned:
 
 Page to native: `{type: "submit", id, payload}`, where `payload` is the JSON above. The native
 side POSTs it to `https://rpc.outis.cash/prover-results/v1/results` and answers
-`provingly.receive({type: "submitted", id, ok, status, body})`. Then `Prover.tsx`'s `submitScore`
+`provablyOutis.receive({type: "submitted", id, ok, status, body})`. Then `Prover.tsx`'s `submitScore`
 needs a branch that posts through the bridge when `engine.platform` is `ios` or `android`. The
 results page's GET would go the same way (`{type: "results", id, action}`). Implement this only if
 step 3 fails.

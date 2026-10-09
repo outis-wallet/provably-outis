@@ -45,7 +45,7 @@ are replays and all are IDENTICAL. Results are in `BROWSER-TX-PLAN.md` ("Mac and
     have the latest Program License Agreement accepted.
   - Install: `xcrun devicectl device install app --device <udid> <DerivedData>/Build/Products/Release-iphoneos/TxProver.app`.
   - Run: `xcrun devicectl device process launch --console --terminate-existing --device <udid>
-    dev.provingly.TxProver --prove pay --threads 8`. The report is printed after
+    dev.provablyoutis.TxProver --prove pay --threads 8`. The report is printed after
     `SHOWCASE_RESULT`. Since 2026-10-09 the app is the showcase (docs/SHOWCASE.md): a web
     UI over the same prover, proving the four own-pool-flow actions. The single-screen
     capture2 app came before it.
@@ -74,7 +74,7 @@ Experiment (devices unlocked, screen on, same cable; about 5 minutes per device)
 - iPhone: threads 6, 2, 4, 6, back to back, then once more at 6 after 5 minutes of cooling,
   unplugged if possible (not charging):
   `xcrun devicectl device process launch --console --terminate-existing --device <udid>
-  dev.provingly.TxProver --prove --threads N`.
+  dev.provablyoutis.TxProver --prove --threads N`.
 - iPad: threads 8, 4, 8.
 
 Read the results:
@@ -136,11 +136,11 @@ For each, record: virtual OS time, prove time, total, peak memory, and identical
 
 ## Step 0: get the code on the Mac
 
-Everything is in the private repo `github.com/broody/provingly`. Its README has the layout. The
+Everything is in the private repo `github.com/broody/provably-outis`. Its README has the layout. The
 paths below are relative to its root.
 
 ```
-git clone https://github.com/broody/provingly.git ~/dev/provingly && cd ~/dev/provingly
+git clone https://github.com/broody/provably-outis.git ~/dev/provably-outis && cd ~/dev/provably-outis
 brew install zstd && scripts/unpack-wasm.sh
 ```
 
@@ -153,7 +153,7 @@ became `proving/`; `runs/wasm/web` became `web/`; `runs/wasm/tx` and `runs/osdum
 
 1. Serve the pages. `localhost` is a secure context, so threads (SharedArrayBuffer) work without
    HTTPS:
-   `cd ~/dev/provingly/web && python3 server.py 8765`
+   `cd ~/dev/provably-outis/web && python3 server.py 8765`
 2. Pick live or replay:
    - Live RPC needs the Starknet node. `server.py` forwards POST `/rpc` to `RPC_URL`, default
      `http://127.0.0.1:9545/rpc/v0_10`. On Linux that port is an SSH tunnel to the user's node
@@ -195,13 +195,13 @@ Toolchain:
 - Python 3 with `uv`;
 - a venv with `cairo-lang==0.14.3a3`. The `apollo_starknet_os_program` build script needs
   `cairo-compile` on PATH:
-  `cd ~/dev/provingly/sequencer && uv venv sequencer_venv && . sequencer_venv/bin/activate && uv pip install cairo-lang==0.14.3a3`.
+  `cd ~/dev/provably-outis/sequencer && uv venv sequencer_venv && . sequencer_venv/bin/activate && uv pip install cairo-lang==0.14.3a3`.
 - Disable `sccache` if the repo config asks for it: `RUSTC_WRAPPER=`.
 
 Build and run:
 
 ```
-cd ~/dev/provingly/sequencer && . sequencer_venv/bin/activate
+cd ~/dev/provably-outis/sequencer && . sequencer_venv/bin/activate
 RUSTC_WRAPPER= cargo +nightly-2026-01-15 build --release -p os_wasm_probe --bin os_native_probe
 /usr/bin/time -l ./target/release/os_native_probe replay ../captures/capture2 /tmp/mac-result.json
 RAYON_NUM_THREADS=8 ./target/release/os_native_probe replay ../captures/capture2

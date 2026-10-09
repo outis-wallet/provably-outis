@@ -3,7 +3,7 @@
 # proves a 0.1 STRK own-pool payment with our 0.14.4 prover and submits it. Refusals cost nothing;
 # results go to the spike's .state/proof2-checks.jsonl, the run output to .state/proof2-cron.log.
 # After the first acceptance the step does nothing more. Starts the prover on :3000 when it is down.
-# crontab: 17 */6 * * * /home/broody/development/provingly/tools/proof2-cron.sh
+# crontab: 17 */6 * * * /home/broody/development/provably-outis/tools/proof2-cron.sh
 SPIKE=${SPIKE:-$HOME/development/outis/wallet/spike/strk20}
 PROVER=${PROVER:-$HOME/development/sequencer-0144/target/release/starknet_transaction_prover}
 export PATH="$HOME/.nvm/versions/node/v22.22.1/bin:$HOME/.local/share/pnpm:/usr/local/bin:/usr/bin:/bin"
