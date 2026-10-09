@@ -56,7 +56,8 @@ apps need: very little, since the submission and the results page are the shared
     changes.
   - Android puts `build` in the Report, `android-<version>-<commit>`, from `BuildConfig.COMMIT`
     (app/build.gradle).
-- **Device fields**:
+- **Device fields**: `form` (`phone`, `tablet`; the iOS simulator says `desktop`), as the web
+  sends it for the results page's Device filter.
   - iOS: `arch` ARM64; `chip` from the model (`Device.chips`); `perfCores` and
     `efficiencyCores` from `hw.perflevel0/1.physicalcpu`.
   - Android: `arch` from `SUPPORTED_ABIS[0]`; `soc` from `Build.SOC_MODEL` (API 31+);

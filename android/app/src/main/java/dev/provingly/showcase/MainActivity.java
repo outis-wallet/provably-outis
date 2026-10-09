@@ -85,7 +85,9 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        webView.evaluateJavascript("provingly.back()", handled -> {
+        // Each page handles it first: the prover closes its sheet or goes home, results.html goes to
+        // the prover. A page without a handler lets the app close.
+        webView.evaluateJavascript("window.provingly && provingly.back ? provingly.back() : false", handled -> {
             if (!"true".equals(handled)) MainActivity.super.onBackPressed();
         });
     }
@@ -235,6 +237,8 @@ public class MainActivity extends Activity {
                         .put("name", Build.MANUFACTURER + " " + Build.MODEL)
                         .put("os", "Android " + Build.VERSION.RELEASE)
                         .put("arch", Build.SUPPORTED_ABIS[0])
+                        // What the results page sorts devices by (Phones, Tablets, Desktops).
+                        .put("form", context.getResources().getConfiguration().smallestScreenWidthDp >= 600 ? "tablet" : "phone")
                         .put("cores", Runtime.getRuntime().availableProcessors())
                         .put("ramGiB", memory.totalMem / (double) (1L << 30));
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) device.put("soc", Build.SOC_MODEL);

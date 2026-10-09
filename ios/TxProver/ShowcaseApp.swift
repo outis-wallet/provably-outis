@@ -184,6 +184,9 @@ enum Device {
             "model": model,
             "os": "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)",
             "arch": "ARM64",
+            // What the results page sorts devices by (Phones, Tablets, Desktops). The simulator
+            // runs on a Mac.
+            "form": model.hasPrefix("iPad") ? "tablet" : model == "Simulator" ? "desktop" : "phone",
             "cores": ProcessInfo.processInfo.activeProcessorCount,
             "ramGiB": Double(ProcessInfo.processInfo.physicalMemory) / Double(1 << 30),
         ]
