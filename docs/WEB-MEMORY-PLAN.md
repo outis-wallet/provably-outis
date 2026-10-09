@@ -145,6 +145,9 @@ The plan's other checks:
 Live heap at the other phases (pay, before the cut): the Cairo interaction commit about 1,740 MiB, the
 circuit leg's commits about 1,885 and 1,819 MiB.
 
+The tracer (a feature patch for `memory.rs` and a Node driver) isn't committed. It's on the i9 in
+`~/development/outis-wallet/web-memory-tracer/`, with a README.
+
 heaptrack isn't installed here (no sudo), and it couldn't see the large blocks natively anyway:
 `LargeBlockCache` maps blocks of 1 MiB and up with `mmap`. The native column below is peak RSS.
 
@@ -172,8 +175,7 @@ heaptrack isn't installed here (no sudo), and it couldn't see the large blocks n
 
 - Every proof is identical and verified: native, Node and Chrome, all four captures.
 - Node's times weren't measured in isolation (four runs at once), so they aren't in the table.
-- Deploy state: Outis main is `86d033c` (engine `58caf328de4e`), pushed. Its Vercel build hadn't
-  reported when checked once. outis.cash/prover was serving `c7c4d3803be4` at that point.
+- Deploy state: Outis main is `86d033c`, deployed: outis.cash/prover serves `58caf328de4e`.
 - The prover's `Cargo.lock` now uses the already-locked hashbrown 0.15.5 for five proving crates
   (their requirement is >=0.15.2), instead of 0.17.1.
 
