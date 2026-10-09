@@ -102,3 +102,98 @@ outis.cash/prover serves `os_wasm_probe_bg.c7c4d3803be4.wasm.gz`, which came in 
 then raised the web threads from 8 to 16 without a new wasm. If `c7c4d38` doesn't have the
 allocator change, the site runs 16 threads on the locked allocator. Either way, rebuild the engine
 from `9288647` and deploy it.
+
+## Results from the i9 (2026-10-09)
+
+**Short version:** one cut landed: −85 MiB in wasm, −73 to −146 MiB natively, no time cost,
+byte-identical proofs. **1.6 GiB is not reachable by freeing buffers earlier.** About 1 GiB of the
+peak is lookup data that has to outlive the base trace commit. Getting below 1.6 GiB needs changes
+to code the proving fork marks AIR-generated or security-critical, which waits for a decision (see
+"What's left").
+
+### Check first: answered
+
+`c7c4d3803be4` is the allocator build. A clean `9288647` (cargo: Fresh) rebuilds exactly
+`os_wasm_probe_bg.c7c4d3803be4.wasm.gz`. Outis `395848b` shows 15:59 because amending the commit
+kept its original author date; its engine was built from the tree committed as `9288647`.
+
+### What's alive at the peak
+
+The peak is the Cairo leg's base trace commit, in every capture. A wasm build that reports every
+block of 64 KiB or more to JS, with its stack, gave this for pay (Node, 1 thread, live 2,386 MiB):
+
+| Alive at the peak | MiB |
+|---|---|
+| Allocated by the components' `write_trace`: the base trace (now its coefficients, 515 MiB, 135.2 M cells) and the **lookup data** (the rest, about 1,000 MiB). The largest: `blake_g` 278, `blake_round` 266, `add_opcode_small` 155, `range_check_20` 128, `add_opcode` 110, `assert_eq_opcode_double_deref` 75 | ~1,520 |
+| The commit's stripe buffers: every column's evaluation on one stripe at a time | 540 |
+| The circuit's preprocessed circuit, built up front though only the second leg uses it | ~75+ |
+| Twiddles 32, Merkle leaf plan 32, the Cairo preprocessed tree 16 | ~80 |
+
+The plan's other checks:
+- **What the OS run leaves alive:** negligible. The live heap is 62 MiB after the OS run, the PIE
+  included. The bootloader's runner and relocated trace are freed before proving starts.
+- **Duplicate copies:** none found. The base trace is interpolated in place: at commit entry the live
+  heap goes from 1,822 to 1,830 MiB.
+- **Per-thread scratch:** Chrome at 6 threads peaks 30–50 MiB above Node at 1 thread.
+- **Waste in wasm (`wasm` − `peak`):** about 70 MiB in every run, so not worth chasing.
+- **The lookup data:** each component stores, per row, copies of the values it looks up. For
+  example, `blake_g` stores 86 values per row against 53 trace columns. The interaction trace is
+  built from them after the base commitment, because its random elements are drawn from that
+  commitment. So the whole lookup data is held from the end of `write_trace` until after the
+  commit. The live heap is already 1,822 MiB at commit entry.
+
+Live heap at the other phases (pay, before the cut): the Cairo interaction commit about 1,740 MiB, the
+circuit leg's commits about 1,885 and 1,819 MiB.
+
+heaptrack isn't installed here (no sudo), and it couldn't see the large blocks natively anyway:
+`LargeBlockCache` maps blocks of 1 MiB and up with `mmap`. The native column below is peak RSS.
+
+### The cut (proving 70bc0693, prover 1b38be8, Outis 86d033c, wasm 58caf328de4e)
+
+- **`privacy_recursive_prove_once`** builds each leg's precomputes when that leg starts and drops
+  them when it ends. The Cairo proof no longer carries the circuit's preprocessed circuit, and the
+  circuit proof no longer carries the Cairo preprocessed trace and tree.
+- **`TxSession::prove`** uses it and frees the session's input side (state maps, compiled classes,
+  execution data) before proving.
+- **Leak fixed:** the old path leaked its process-lifetime precomputes (`ManuallyDrop`) on every
+  proof, leaving 338 MiB live after a proof. Now 19. This matters for the apps' repeated proofs.
+- `privacy_recursive_prove` and its precomputes are unchanged, for the sequencer.
+
+| | register | deposit | pay | withdraw |
+|---|---|---|---|---|
+| Native, 6 threads, peak RSS MiB, before → after | 2,584 → 2,438 | 2,598 → 2,481 | 2,648 → 2,565 | 2,617 → 2,544 |
+| Native, 6 threads, prove s, before → after | 22.3 → 21.9 | 24.1 → 24.1 | 21.7 → 21.5 | 21.3 → 21.1 |
+| Native, 1 thread, peak RSS MiB, before | 2,528 | 2,592 | 2,614 | 2,615 |
+| Node, 1 thread, `wasm` MiB, before → after | 2,366 → 2,281 | 2,424 → 2,340 | 2,465 → 2,380 | 2,465 → 2,380 |
+| Node, 1 thread, `peak` MiB, before → after | 2,294 → 2,209 | 2,354 → 2,269 | 2,391 → 2,306 | 2,391 → 2,306 |
+| Chrome, 6 threads, `wasm` MiB, before → after | 2,396 → 2,339 | 2,453 → 2,388 | 2,506 → 2,403 | 2,509 → 2,412 |
+| Chrome, 6 threads, `peak` MiB, before → after | 2,326 → 2,268 | 2,384 → 2,318 | 2,434 → 2,331 | 2,438 → 2,339 |
+| Chrome, 6 threads, prove s, before → after | 27.7 → 27.8 | 30.2 → 30.0 | 27.9 → 27.8 | 27.5 → 27.4 |
+
+- Every proof is identical and verified: native, Node and Chrome, all four captures.
+- Node's times weren't measured in isolation (four runs at once), so they aren't in the table.
+- Deploy state: Outis main is `86d033c` (engine `58caf328de4e`), pushed. Its Vercel build hadn't
+  reported when checked once. outis.cash/prover was serving `c7c4d3803be4` at that point.
+- The prover's `Cargo.lock` now uses the already-locked hashbrown 0.15.5 for five proving crates
+  (their requirement is >=0.15.2), instead of 0.17.1.
+
+### What's left: two changes, each needing a decision
+
+1. **Stream the commit** (stwo `pcs/mod.rs` `new_striped`, `vcs_lifted` leaf hashing; the fork's
+   guide marks them `[SECURITY-CRITICAL]`).
+   - Change: hash each stripe a group of columns at a time instead of evaluating every column's
+     stripe at once.
+   - Estimate: −~500 MiB at the Cairo base commit, −~400 at the circuit's commits.
+   - Leaves the Cairo leg at about 1.75 GiB live (~1.8 GiB `wasm`), because the lookup data is still
+     whole at the end of `write_trace` and across the commit.
+   - Likely enough for the 17 Pro if its limit is near 2.9 GiB of footprint. Not enough for the
+     12 Pro (2,251 MiB).
+2. **Keep the lookup data out of the base commit** (`cairo_claim_generator.rs` and 60+ component
+   files, all AIR-generated; the fork already hand-edits generated files: `43450c3d`, and about 30
+   in the frontier commit).
+   - Change: regenerate each component's lookup data after the commit and turn it straight into
+     that component's interaction trace (a second witness pass, costing about the "Write Base trace"
+     phase again), or store it compactly.
+   - With 1, the estimate is a peak of about 1.4 GiB live (~1.45 GiB `wasm`): Cairo commit
+     ~0.8–1.0 GiB, second witness pass ~1.2–1.3 GiB, circuit leg ~1.4 GiB.
+   - This is what reaches the 1.6 GiB target.
