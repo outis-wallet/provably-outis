@@ -58,10 +58,13 @@
   const clockParts = (s) => (s >= 60 ? [`${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`, "min"] : [s.toFixed(1), "s"]);
   const gigabytes = (mib) => (mib / 1024).toFixed(1);
   const integer = (n) => Number(n).toLocaleString("en-US");
-  const nominalRam = (gib) => [2, 3, 4, 6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 96, 128].find((size) => size >= gib * 0.93) || Math.round(gib);
+  // Browsers other than Chrome don't tell the RAM (ramGiB null): then it is left out.
+  const nominalRam = (gib) => (gib ? [2, 3, 4, 6, 8, 12, 16, 18, 24, 32, 36, 48, 64, 96, 128].find((size) => size >= gib * 0.93) || Math.round(gib) : null);
+  // "12 GB", or "32+ GB" where the figure is only a lower bound (a browser's deviceMemory).
+  const ramLabel = (dev) => { const gb = dev && nominalRam(dev.ramGiB); return gb ? `${gb}${dev.ramAtLeast ? "+" : ""} GB` : null; };
   const device = engine.device;
   const deviceName = device ? deviceNames[device.model] || device.name || device.model : "this device";
-  const deviceKind = device && /^iPad/.test(device.model) ? "iPad" : device && /^iPhone/.test(device.model) ? "iPhone" : "phone";
+  const deviceKind = device && device.kind ? device.kind : device && /^iPad/.test(device.model) ? "iPad" : device && /^iPhone/.test(device.model) ? "iPhone" : "phone";
 
   const actionById = (id) => actions.find((action) => action.id === id);
   const actionIndex = (id) => actions.findIndex((action) => action.id === id);
@@ -82,7 +85,9 @@
   }
 
   function renderHome(motion) {
-    const spec = device ? `${device.cores} cores · ${nominalRam(device.ramGiB)} GB` : "";
+    const ram = ramLabel(device);
+    const arch = device && (device.arch || (device.platform === "ios" ? "ARM64" : null));
+    const spec = device ? `${arch ? `${arch} · ` : ""}${device.cores} cores${ram ? ` · ${ram}` : ""}` : "";
     return `<main class="screen ${motion}">
       <header class="header">
         <div class="brand">${logo}<span class="tag">Prover</span></div>
@@ -154,7 +159,7 @@
     const error = run && run.status === "error"
       ? `<div class="status danger">${icon("danger")}<div><div class="head">The proof didn't finish</div><div class="selectable">${escape(run.error)}</div></div></div>` : "";
     let button;
-    if (!engine.canProve) button = `<button class="button primary" disabled>Build the ZK proof</button><p class="hint">Proofs are built in the app, on iPhone, iPad and Android.</p>`;
+    if (!engine.canProve) button = `<button class="button primary" disabled>Build the ZK proof</button><p class="hint">${escape(engine.unsupported || "Proofs are built in the app, on iPhone, iPad and Android.")}</p>`;
     else if (busy) button = `<button class="button primary" disabled>Another proof is being built</button>`;
     else button = `<button class="button primary" data-do="prove" data-id="${action.id}">Build the ZK proof on this ${deviceKind}</button>
       <p class="hint">About 15 to 45 seconds on a recent phone, with about 2.4 GB of memory.</p>`;
@@ -209,7 +214,7 @@
       ${identical}${simulated}
       <div class="well rows">
         ${row("Proof", `${Math.round(report.proof_bytes / 1024)} KB`, "Sent instead of the private key and notes")}
-        ${row("Peak memory", `${gigabytes(peakMib)} GB`, device ? `of ${nominalRam(device.ramGiB)} GB on this ${deviceKind}` : "")}
+        ${row("Peak memory", `${gigabytes(peakMib)} GB`, ramLabel(device) ? `of ${ramLabel(device)} on this ${deviceKind}` : "")}
         ${row("Steps proven", integer(report.os_steps), "Of the Starknet OS, running the action")}
         ${row("CPU cores", report.threads, "Working at once")}
       </div>
@@ -312,7 +317,7 @@
     });
     if (run.memoryMib) {
       const total = device ? nominalRam(device.ramGiB) : 0;
-      set("memory", `${gigabytes(run.memoryMib)} GB${total ? ` of ${total} GB` : ""}`);
+      set("memory", `${gigabytes(run.memoryMib)} GB${total ? ` of ${ramLabel(device)}` : ""}`);
       const bar = app.querySelector('[data-live="memory-bar"]');
       if (bar && total) bar.style.width = `${Math.min(100, (run.memoryMib / 1024 / total) * 100)}%`;
     }
@@ -402,6 +407,7 @@
   };
 
   render("rise");
+  engine.onDevice = () => { if (!state.running) render(); };
   engine.ready();
   if (params.has("auto") && engine.canProve) {
     const action = params.get("action") || "pay";

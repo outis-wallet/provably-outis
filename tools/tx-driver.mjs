@@ -5,12 +5,15 @@
 const SIMULATION_FLAGS = ["RETURN_INITIAL_READS", "SKIP_FEE_CHARGE"];
 const MAX_ROUNDS = 20;
 
-export async function buildOsInput({ TxSession, rpc, chainId, transaction, log = () => {} }) {
+// `onTransaction({block, tx_hash})` reports the base block and the transaction's hash once known;
+// `onPhase("execute")` is called before each execution round (the first one ends reading state).
+export async function buildOsInput({ TxSession, rpc, chainId, transaction, log = () => {}, onPhase = () => {}, onTransaction = () => {} }) {
   const header = await rpc("starknet_getBlockWithTxHashes", { block_id: "latest" });
   // Pin every later read to this block, so a new block cannot slip in between.
   const block_id = { block_number: header.block_number };
   const session = new TxSession(chainId, JSON.stringify(header), JSON.stringify(transaction));
   log(`block ${header.block_number}, tx ${session.tx_hash()}`);
+  onTransaction({ block: header.block_number, tx_hash: session.tx_hash() });
 
   const simulation = await rpc("starknet_simulateTransactions", {
     block_id,
@@ -41,6 +44,7 @@ export async function buildOsInput({ TxSession, rpc, chainId, transaction, log =
   await Promise.all(initialReads.class_hashes.map((entry) => addClass(entry.class_hash)));
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
+    onPhase("execute");
     const result = JSON.parse(session.execute());
     if (!result.missing) {
       log(`executed in round ${round}; ${result.storage_proof_params.length} storage proof request(s)`);

@@ -14,3 +14,4 @@ xcuserdata/
 captures/**/replay-out/
 captures/**/native-result.json
 captures/**/current-virtual-os-input.json
+dist-web/

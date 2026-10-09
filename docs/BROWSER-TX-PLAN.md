@@ -264,3 +264,37 @@ transfer and withdrawal run 18-21% more OS steps than register. None crosses a p
 trace size, so prove time is the same within noise and memory is +2-4% (wasm +83 MiB at most).
 Expect the phone numbers above to hold for all four actions. Not measured yet: a transfer that
 spends several notes, and the public pool.
+
+## Wasm size (2026-10-09)
+
+The threaded build (`web/tx/pkg-mt`) is 148 MiB raw and 12.8 MiB gzip. By section:
+
+| Part | Size |
+|---|---|
+| `name` custom section (function names, debug only) | 63 MiB |
+| code | 46 MiB |
+| data | 39 MiB: the virtual OS program (`virtual_os_bytes`, 37 MB) plus about 4 MiB of other data, the privacy bootloader JSON among it |
+
+The full OS (53 MB) and the aggregator (8 MB) are dropped by the linker; only the virtual OS is
+linked.
+
+Done for the web showcase: no name section (`wasm-bindgen --remove-name-section`). That gives
+86 MiB raw and **10.9 MiB gzip**, which is what a visitor downloads. Nothing changes at runtime
+except less readable stack traces.
+
+Further options, not done yet:
+1. **`opt-level = "s"` for the crates outside the prover hot path** (cairo-vm, blockifier, serde,
+   starknet_api, ...) through per-package profile overrides; stwo, stwo-cairo-prover and
+   circuit-prover stay at `3`. Guess: 20-30% less code, 1-2 MiB less gzip. Cost: slower OS run
+   and slower privacy-bootloader run inside the proof (cairo-vm, about 600k steps). Measure both.
+2. **binaryen `wasm-opt -O2` (or `-Oz`)** with `--enable-threads --enable-bulk-memory
+   --enable-simd` (not installed yet). Typically 5-15% less code. Check the proof stays IDENTICAL
+   and the speed.
+3. **Store `virtual_os_bytes` compressed** (zstd or deflate, through a build-script change in
+   apollo_starknet_os_program) and decompress at load. About 30 MB less raw size and about 30 MB
+   less linear memory. The download barely changes, since gzip already compresses the JSON.
+4. **Native apps:** the same symbols bloat the iOS and Android binaries (98-152 MB). Strip them
+   (`strip = "symbols"` in the release profile, or Xcode / Gradle stripping) to shrink the app
+   downloads.
+
+Realistic floor with 1-3: about 8-9 MiB gzip. Below that is the prover's own code.
