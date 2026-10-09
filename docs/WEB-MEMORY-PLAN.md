@@ -87,21 +87,34 @@ wasm, and record the numbers.
 - **The Mac then measures** Safari's footprint in the simulator and proves in Safari on the 12 Pro
   and the 17 Pro.
 
-## Left to the Mac
+## From the Mac (2026-10-09, later)
 
-- **`wallet/apps/prover/src/bridge.ts`:** after a run, the tab kept its 2.8 GiB, because the
-  finished worker's `WebAssembly.Memory` stays referenced. A second proof in the same tab stacks
-  on top of it. The Mac fixes it and tests it in Safari, so leave that file alone. The Mac's Outis
-  checkout also has uncommitted UI work in `Prover.tsx` and `format.ts` (the low-memory warning).
-- **Reading the 17 Pro's limit.**
-
-## Check first
-
-outis.cash/prover serves `os_wasm_probe_bg.c7c4d3803be4.wasm.gz`, which came in with Outis
-`395848b` (15:59). That's before prover `9288647`, the allocator change (17:15). Outis `ccefd93`
-then raised the web threads from 8 to 16 without a new wasm. If `c7c4d38` doesn't have the
-allocator change, the site runs 16 threads on the locked allocator. Either way, rebuild the engine
-from `9288647` and deploy it.
+- **A second proof in a Safari tab failed. Fixed in prover `a936dae`** (on `1b38be8`; Outis
+  `09a4b7e`, wasm `be58014d4e3f`). The cause wasn't the page holding the memory: the rayon pool's
+  workers park in a wasm atomic wait between jobs, and Safari can't end a worker parked there.
+  Ending the engine worker, ending the pool's workers, or reloading the page all left them, and the
+  run's 2.8 GiB, until the tab's process died.
+  - `os_wasm_probe::stop_threads` traps each pool thread out of wasm. `js/worker.mjs` calls it when a
+    run is over, ends the workers it started, then posts the outcome.
+  - The memory figure comes from a watcher worker on a port the page sends (`memoryPort`).
+  - Errors now carry the panic message and `memory_report`, since Safari's stack has no message
+    line.
+  - Tested in Safari in the simulator: deposit, then pay, in one tab. Both verified and identical,
+    and the tab is back under 0.1 GiB after each.
+- **Safari stops a tab's wasm memory at about 2.6 GiB,** apart from iOS's limit on the tab. Seen in
+  the simulator, which has no such limit: an allocation failed at `wasm 2687` MiB. So on any
+  iPhone, the wasm memory has to stay under it too.
+- **iPhone 17 Pro:** Safari's tab dies about 2 s into "Build the ZK proof", in every capture tried.
+  The page reloads, then Safari says "A problem repeatedly occurred". iOS wrote no JetsamEvent for
+  it, so its limit isn't known. An Instruments (Activity Monitor) recording of one crash is on the
+  Mac, not read yet.
+- **Home screen warnings (Outis `d808663`, live):** on iOS, any browser shows "Safari may close
+  this page during a proof" and says an app is coming. Elsewhere, the low-memory warning shows
+  for devices with 4 GB of RAM or less.
+- **Building the threaded wasm on a Mac:** Apple's clang has no wasm32 target, which `zstd-sys`
+  needs. Point it at the Android NDK's:
+  `CC_wasm32_unknown_unknown=<ndk>/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang` and
+  `AR_wasm32_unknown_unknown=<same>/llvm-ar`.
 
 ## Results from the i9 (2026-10-09)
 
@@ -111,9 +124,9 @@ peak is lookup data that has to outlive the base trace commit. Getting below 1.6
 to code the proving fork marks AIR-generated or security-critical, which waits for a decision (see
 "What's left").
 
-### Check first: answered
+### The deployed engine already had the allocator change
 
-`c7c4d3803be4` is the allocator build. A clean `9288647` (cargo: Fresh) rebuilds exactly
+The plan asked whether it did. `c7c4d3803be4` is the allocator build. A clean `9288647` (cargo: Fresh) rebuilds exactly
 `os_wasm_probe_bg.c7c4d3803be4.wasm.gz`. Outis `395848b` shows 15:59 because amending the commit
 kept its original author date; its engine was built from the tree committed as `9288647`.
 
