@@ -95,7 +95,10 @@
       : /Mac OS X/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : "";
     const browser = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Browser";
     const gpu = webGpu();
-    const device = { platform: "web", kind: "browser", model: `${browser}-${os}`, name: os ? `${browser} on ${os}` : browser, os, cores: navigator.hardwareConcurrency || 1, ramGiB: navigator.deviceMemory || null, ramAtLeast: true, arch: uaArch(ua, os, gpu), gpu };
+    // Phone, tablet or desktop, for the results. iPadOS Safari calls itself a Mac with touch.
+    const ipad = /iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+    const form = ipad ? "tablet" : /iPhone|iPod/.test(ua) ? "phone" : /Android/.test(ua) ? (/Mobile/.test(ua) ? "phone" : "tablet") : "desktop";
+    const device = { platform: "web", kind: "browser", model: `${browser}-${os}`, name: os ? `${browser} on ${os}` : browser, os, cores: navigator.hardwareConcurrency || 1, ramGiB: navigator.deviceMemory || null, ramAtLeast: true, form, arch: uaArch(ua, os, gpu), gpu };
     // Chromium tells the architecture (and an Android phone's model) through client hints, later.
     if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
       navigator.userAgentData.getHighEntropyValues(["architecture", "bitness", "model", "platformVersion"]).then((hints) => {

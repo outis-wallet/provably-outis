@@ -12,7 +12,8 @@ PKG=${PKG:-web/tx/pkg-mt}
 rm -rf "$OUT" && mkdir -p "$OUT/engine" "$OUT/pkg-mt" "$OUT/captures/classes"
 
 # The UI, as in the apps.
-cp showcase/index.html showcase/app.css showcase/app.js showcase/content.js showcase/bridge.js "$OUT/"
+# Every page, style and script at the top of showcase/, as the apps bundle them.
+cp showcase/*.html showcase/*.css showcase/*.js "$OUT/"
 cp -r showcase/fonts "$OUT/"
 
 # The wasm module: no name section (debug symbols, 63 MiB), gzipped, named by its hash so it can

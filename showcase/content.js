@@ -76,16 +76,6 @@ window.SHOWCASE = {
   // the results page. ?results=<url> points the page at another one (local testing).
   resultsUrl: "https://rpc.outis.cash/prover-results",
 
-  // Native prove times for this kind of transaction (docs/BROWSER-TX-PLAN.md).
-  referenceDevices: [
-    { name: "MacBook Pro (M5 Pro)", seconds: 4.8 },
-    { name: "iPad Air (M1)", seconds: 14.9 },
-    { name: "iPhone 17 Pro", seconds: 22.2 },
-    { name: "Galaxy S25+", seconds: 26.0 },
-    { name: "iPhone 12 Pro", seconds: 40.8 },
-    { name: "Galaxy S9+ (2018)", seconds: 72.3 },
-  ],
-
   // Hardware identifiers to marketing names (only ones we are sure of; others show as is).
   deviceNames: {
     "iPhone13,1": "iPhone 12 mini", "iPhone13,2": "iPhone 12", "iPhone13,3": "iPhone 12 Pro", "iPhone13,4": "iPhone 12 Pro Max",
