@@ -79,8 +79,8 @@ svg.i { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor;
 .logo .name { fill: var(--ink); }
 .tag { border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
 .device { text-align: right; min-width: 0; }
-.device .name { font-weight: 600; white-space: nowrap; }
-.device .spec { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+.device .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.device .spec { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .title-bar { display: flex; align-items: center; gap: 6px; min-height: 48px; }
 .title-bar .back { width: 40px; height: 40px; display: grid; place-items: center; margin-left: -8px; color: var(--ink); }

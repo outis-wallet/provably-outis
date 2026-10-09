@@ -85,6 +85,6 @@ window.SHOWCASE = {
     "iPhone16,1": "iPhone 15 Pro", "iPhone16,2": "iPhone 15 Pro Max", "iPhone17,1": "iPhone 16 Pro", "iPhone17,2": "iPhone 16 Pro Max",
     "iPhone17,3": "iPhone 16", "iPhone17,4": "iPhone 16 Plus", "iPhone17,5": "iPhone 16e", "iPhone18,1": "iPhone 17 Pro",
     "iPad13,16": "iPad Air (M1)", "iPad13,17": "iPad Air (M1)",
-    "SM-S936B": "Galaxy S25+", "SM-S936U": "Galaxy S25+", "SM-S936U1": "Galaxy S25+", "SM-G965F": "Galaxy S9+", "SM-G965U": "Galaxy S9+",
+    "SM-S936B": "Galaxy S25+", "SM-S936U": "Galaxy S25+", "SM-S936U1": "Galaxy S25+", "SM-G965F": "Galaxy S9+", "SM-G965U": "Galaxy S9+", "SM-G965U1": "Galaxy S9+",
   },
 };

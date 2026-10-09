@@ -69,6 +69,9 @@ Results through the app (2026-10-09, Alice sends Bob 3 [STRK], 459,169 steps):
 
 The page runs in WebKit's own process, so its memory does not count toward the app's limit.
 
+Scores and the results page: docs/RESULTS.md. The apps add the build string and device fields;
+the page sends the scores itself.
+
 ## Android
 
 `android/` is the same shell in plain Java, with no AndroidX or Kotlin:
@@ -102,6 +105,13 @@ Gotchas:
   aarch64-unknown-linux-musl, so they never took that path.
 - Static-archive symbols are exported from a `.so` by default, so `--gc-sections` keeps all of
   them (245 MB). `-Wl,--exclude-libs,ALL` and `--strip-debug` bring it to 100 MB.
+- `TMPDIR`: privacy_prove writes a temporary file. Android 10 doesn't set `TMPDIR` for apps, so
+  Rust picks `/data/local/tmp`, which apps can't write ("Permission denied (os error 13)" on the
+  Galaxy S9+). MainActivity sets it to the app's cache directory. The S25+, on a newer Android, has
+  it set already.
+- TxSession's errors were wasm-bindgen `JsError`s, which can't be made natively: every failure read
+  "cannot call wasm-bindgen imported functions on non-wasm targets". Natively they are now
+  `Failure(message)` (lib.rs), so the app shows the real error.
 - Android freezes an app that is not in the foreground. A proof started while the phone is locked
   waits until the app is brought to the front.
 
@@ -110,3 +120,4 @@ Results through the app (2026-10-09, Alice sends Bob 3 [STRK]):
 | Device | Threads | Prove | Peak memory | Check |
 |---|---|---|---|---|
 | Galaxy S25+ (SM-S936U1) | 8 | 27.2 s | 2697 MiB RSS | identical |
+| Galaxy S9+ (SM-G965U1, Android 10), Bob registers | 8 | 78.3 s | 2486 MiB RSS | identical |

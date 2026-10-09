@@ -1,8 +1,7 @@
 // The engine behind the UI. The native apps prove with the Rust pipeline (os_wasm_probe::replay)
 // and talk to this page through one contract, the same on iOS and Android:
 //
-//   page -> native: a JSON message {type: "prove", action, threads} | {type: "share", text} |
-//                   {type: "ready"}
+//   page -> native: a JSON message {type: "prove", action, threads} | {type: "ready"}
 //     iOS:     window.webkit.messageHandlers.prover.postMessage(message)
 //     Android: window.ProvinglyAndroid.postMessage(JSON.stringify(message))
 //   native -> page: provingly.receive(message) with
@@ -10,8 +9,9 @@
 //     {type: "result", report, conditions} the Report and the device conditions around the run
 //     {type: "error", message}
 //     {type: "auto", action, threads}      start a proof (launch arguments, for testing)
-//   device info: iOS sets window.provinglyNative = {device} before the page loads; Android
-//     returns it from ProvinglyAndroid.deviceJson().
+//   device info: iOS sets window.provinglyNative = {device, build} before the page loads;
+//     Android returns the device from ProvinglyAndroid.deviceJson() and puts `build` in the
+//     Report. Scores go straight to the results service with fetch (docs/RESULTS.md).
 //
 // In a plain browser the page proves itself: the web engine below runs the same pipeline compiled
 // to WebAssembly (threads through wasm-bindgen-rayon) in a Web Worker, on the bundled captures.
@@ -46,11 +46,6 @@
     onMessage: () => {},
     onDevice: () => {}, // the device became better known (the browser's client hints arrived)
     prove: (action, threads) => post({ type: "prove", action, threads }),
-    share: (text) => {
-      if (ios || android) post({ type: "share", text });
-      else if (navigator.share) navigator.share({ text }).catch(() => {});
-      else navigator.clipboard && navigator.clipboard.writeText(text);
-    },
     ready: () => post({ type: "ready" }),
     receive: (message) => window.provingly.onMessage(message),
   };

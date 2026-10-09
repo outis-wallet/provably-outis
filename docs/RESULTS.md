@@ -48,7 +48,30 @@ apps need: very little, since the submission and the results page are the shared
 - **`build`**: from `report.build`, else `window.provinglyNative.build`, else
   `"<platform>-unknown"`.
 
-## What the apps need to do
+## What the apps do (done 2026-10-09)
+
+- **Build**:
+  - iOS sets `window.provinglyNative.build`, `ios-<version>-<commit>`. The "Bundle the
+    showcase" phase writes the commit as `build.txt`, with `+dirty` if there are uncommitted
+    changes.
+  - Android puts `build` in the Report, `android-<version>-<commit>`, from `BuildConfig.COMMIT`
+    (app/build.gradle).
+- **Device fields**:
+  - iOS: `arch` ARM64; `chip` from the model (`Device.chips`); `perfCores` and
+    `efficiencyCores` from `hw.perflevel0/1.physicalcpu`.
+  - Android: `arch` from `SUPPORTED_ABIS[0]`; `soc` from `Build.SOC_MODEL` (API 31+);
+    `perfCores` and `efficiencyCores` from `cpuinfo_max_freq`. A core reaching 70% of the
+    fastest counts as performance, so a Snapdragon 8 Elite's 2 + 6 cores are all performance.
+- **fetch from the file:// page**:
+  - iOS (WKWebView): works. The results page loads from the live service.
+  - Android needed the INTERNET permission, which it didn't have, and DOM storage: `app.js`
+    keeps its submissions in `localStorage`, which a WebView leaves off by default.
+  - So no bridge fallback.
+- **Share** is gone from both shells and from `bridge.js`.
+- **The iOS simulator** reports model `Simulator`, named "iOS Simulator (<the Mac's chip>)". It
+  runs on the Mac's CPU, so its scores must not be grouped with the iPhone it simulates.
+
+The steps as they were planned:
 
 1. **Give a build string.** Set `window.provinglyNative.build` before the page loads, or add
    `build` to the Report JSON. Use 64 characters at most, from `[A-Za-z0-9._+-]`, e.g.

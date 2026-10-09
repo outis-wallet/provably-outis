@@ -35,7 +35,7 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     override init() {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.addUserScript(WKUserScript(
-            source: "window.provinglyNative = { device: \(Device.json) };",
+            source: "window.provinglyNative = \(Self.json(["device": Device.info, "build": Device.build]));",
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -57,7 +57,6 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         switch type {
         case "prove": prove(action: body["action"] as? String ?? "", threads: body["threads"] as? Int ?? 0)
-        case "share": share(text: body["text"] as? String ?? "")
         case "ready": startFromArguments()
         default: break
         }
@@ -106,15 +105,6 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
-    private func share(text: String) {
-        let sheet = UIActivityViewController(activityItems: [text], applicationActivities: nil)
-        sheet.popoverPresentationController?.sourceView = webView
-        sheet.popoverPresentationController?.sourceRect = CGRect(x: webView.bounds.midX, y: webView.bounds.maxY - 120, width: 1, height: 1)
-        var presenter = webView.window?.rootViewController
-        while let presented = presenter?.presentedViewController { presenter = presented }
-        presenter?.present(sheet, animated: true)
-    }
-
     /// Launch arguments `--prove <action> [--threads N]` (devicectl, an Xcode scheme) start a proof
     /// once the page is ready.
     private func startFromArguments() {
@@ -161,23 +151,77 @@ private let progressToPage: tx_progress_callback = { context, eventJson in
 }
 
 enum Device {
-    /// The hardware identifier, e.g. "iPhone18,1"; in the simulator, the simulated device's.
+    /// The hardware identifier, e.g. "iPhone18,1". In the simulator, "Simulator": it runs on the
+    /// Mac's chip, so its scores must not be taken for the simulated iPhone's.
     static let model: String = {
-        if let simulated = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] { return simulated }
+        #if targetEnvironment(simulator)
+        return "Simulator"
+        #else
         var system = utsname()
         uname(&system)
         return withUnsafeBytes(of: &system.machine) { bytes in String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self) }
+        #endif
     }()
 
-    /// What the page shows about this device (bridge.js `device`).
-    static var json: String {
-        Showcase.json([
+    /// The Mac's chip, e.g. "Apple M5 Pro", when running in the simulator.
+    private static let simulatorHost: String? = {
+        #if targetEnvironment(simulator)
+        var size = 0
+        guard sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var name = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("machdep.cpu.brand_string", &name, &size, nil, 0) == 0 else { return nil }
+        return String(cString: name)
+        #else
+        return nil
+        #endif
+    }()
+
+    /// What the page shows about this device (bridge.js `device`), and sends with a score
+    /// (docs/RESULTS.md: flat, strings and numbers).
+    static var info: [String: Any] {
+        var info: [String: Any] = [
             "platform": "ios",
             "model": model,
             "os": "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)",
+            "arch": "ARM64",
             "cores": ProcessInfo.processInfo.activeProcessorCount,
             "ramGiB": Double(ProcessInfo.processInfo.physicalMemory) / Double(1 << 30),
-        ])
+        ]
+        if let chip = chips[model] ?? simulatorHost { info["chip"] = chip }
+        // The page labels a device by its name when the model isn't one it knows (content.js).
+        if model == "Simulator" { info["name"] = simulatorHost.map { "iOS Simulator (\($0))" } ?? "iOS Simulator" }
+        if let performance = sysctlInt("hw.perflevel0.physicalcpu") { info["perfCores"] = performance }
+        if let efficiency = sysctlInt("hw.perflevel1.physicalcpu") { info["efficiencyCores"] = efficiency }
+        return info
+    }
+
+    /// What the scores are stored under: ios-<version>-<the repository's commit> (bundled as
+    /// build.txt by the "Bundle the showcase" phase), so that a faster prover can be told apart.
+    static let build: String = {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+        let commit = Bundle.main.url(forResource: "build", withExtension: "txt")
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) }?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+        let text = "ios-\(version)-\(commit)"
+        return String(text.filter { $0.isASCII && ($0.isLetter || $0.isNumber || "._+-".contains($0)) }.prefix(64))
+    }()
+
+    /// The chip in each model we know of (Apple's identifiers; others are left out).
+    private static let chips: [String: String] = [
+        "iPhone13,1": "A14 Bionic", "iPhone13,2": "A14 Bionic", "iPhone13,3": "A14 Bionic", "iPhone13,4": "A14 Bionic",
+        "iPhone14,2": "A15 Bionic", "iPhone14,3": "A15 Bionic", "iPhone14,4": "A15 Bionic", "iPhone14,5": "A15 Bionic",
+        "iPhone14,6": "A15 Bionic", "iPhone14,7": "A15 Bionic", "iPhone14,8": "A15 Bionic",
+        "iPhone15,2": "A16 Bionic", "iPhone15,3": "A16 Bionic", "iPhone15,4": "A16 Bionic", "iPhone15,5": "A16 Bionic",
+        "iPhone16,1": "A17 Pro", "iPhone16,2": "A17 Pro",
+        "iPhone17,1": "A18 Pro", "iPhone17,2": "A18 Pro", "iPhone17,3": "A18", "iPhone17,4": "A18", "iPhone17,5": "A18",
+        "iPhone18,1": "A19 Pro", "iPhone18,2": "A19 Pro",
+        "iPad13,16": "Apple M1", "iPad13,17": "Apple M1",
+    ]
+
+    private static func sysctlInt(_ name: String) -> Int? {
+        var value: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        return sysctlbyname(name, &value, &size, nil, 0) == 0 ? Int(value) : nil
     }
 
     static var thermalState: String {

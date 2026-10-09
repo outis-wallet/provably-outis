@@ -6,6 +6,17 @@ plugins {
 }
 
 def repository = file("$rootDir/..")
+
+// The repository's commit, for the build string scores are stored under (MainActivity.BUILD).
+def commit = {
+    try {
+        def head = providers.exec { commandLine 'git', '-C', repository.path, 'rev-parse', '--short=10', 'HEAD' }.standardOutput.asText.get().trim()
+        def clean = providers.exec { commandLine 'git', '-C', repository.path, 'diff', '--quiet', 'HEAD'; ignoreExitValue = true }.result.get().exitValue == 0
+        return clean ? head : "$head+dirty"
+    } catch (Exception ignored) {
+        return 'unknown'
+    }
+}()
 def showcaseAssets = layout.buildDirectory.dir('generated/showcase-assets')
 
 android {
@@ -21,6 +32,7 @@ android {
         targetSdk 34
         versionCode 1
         versionName '1.0'
+        buildConfigField 'String', 'COMMIT', "\"$commit\""
         ndk { abiFilters 'arm64-v8a' }
         externalNativeBuild {
             cmake { arguments "-DRUST_LIB_DIR=$repository/sequencer/target/aarch64-linux-android/release" }
@@ -37,6 +49,8 @@ android {
     sourceSets {
         main { assets.srcDirs += showcaseAssets.get().asFile }
     }
+
+    buildFeatures { buildConfig true }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

@@ -11,6 +11,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.system.ErrnoException;
+import android.system.Os;
 import android.util.Log;
 import android.view.HapticFeedbackConstants;
 import android.view.WindowManager;
@@ -36,6 +38,8 @@ public class MainActivity extends Activity {
     private static final String TAG = "Showcase";
     /** The page's color (app.css --page), shown before it draws. */
     private static final int PAGE = 0xFF16231F;
+    /** What scores are stored under: android-<version>-<the repository's commit>. */
+    private static final String BUILD = "android-" + BuildConfig.VERSION_NAME + "-" + BuildConfig.COMMIT;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private WebView webView;
@@ -45,9 +49,18 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
+        // The prover writes a temporary file (privacy_prove's bootloader output). Without TMPDIR,
+        // Rust picks /data/local/tmp, which apps can't write: Android 10 doesn't set it for apps.
+        try {
+            Os.setenv("TMPDIR", getCacheDir().getAbsolutePath(), true);
+        } catch (ErrnoException exception) {
+            Log.w(TAG, "can't set TMPDIR", exception);
+        }
         webView = new WebView(this);
         webView.setBackgroundColor(PAGE);
         webView.getSettings().setJavaScriptEnabled(true);
+        // The page keeps the scores it sent in localStorage (to mark them on the results page).
+        webView.getSettings().setDomStorageEnabled(true);
         webView.addJavascriptInterface(new Bridge(), "ProvinglyAndroid");
         webView.setWebViewClient(new WebViewClient() {
             // Only the bundled page; a link out opens in the browser.
@@ -95,7 +108,6 @@ public class MainActivity extends Activity {
             JSONObject message = new JSONObject(json);
             switch (message.optString("type")) {
                 case "prove": prove(message.optString("action"), message.optInt("threads", 0)); break;
-                case "share": share(message.optString("text")); break;
                 case "ready": startFromIntent(); break;
                 default: break;
             }
@@ -145,14 +157,11 @@ public class MainActivity extends Activity {
             send(error("Unreadable report: " + exception.getMessage()));
             return;
         }
-        // The report goes on as the prover wrote it, so its numbers keep their precision.
-        sendJson("{\"type\":\"result\",\"report\":" + report + ",\"conditions\":" + conditions + "}");
+        // The report goes on as the prover wrote it, so its numbers keep their precision, with the
+        // build its score is stored under (docs/RESULTS.md) put in front.
+        String withBuild = "{\"build\":" + JSONObject.quote(BUILD) + "," + report.trim().substring(1);
+        sendJson("{\"type\":\"result\",\"report\":" + withBuild + ",\"conditions\":" + conditions + "}");
         webView.performHapticFeedback(HapticFeedbackConstants.CONFIRM);
-    }
-
-    private void share(String text) {
-        Intent intent = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text);
-        startActivity(Intent.createChooser(intent, null));
     }
 
     /**
@@ -220,17 +229,44 @@ public class MainActivity extends Activity {
             ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
             ((ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE)).getMemoryInfo(memory);
             try {
-                return new JSONObject()
+                JSONObject device = new JSONObject()
                         .put("platform", "android")
                         .put("model", Build.MODEL)
                         .put("name", Build.MANUFACTURER + " " + Build.MODEL)
                         .put("os", "Android " + Build.VERSION.RELEASE)
+                        .put("arch", Build.SUPPORTED_ABIS[0])
                         .put("cores", Runtime.getRuntime().availableProcessors())
-                        .put("ramGiB", memory.totalMem / (double) (1L << 30))
-                        .toString();
+                        .put("ramGiB", memory.totalMem / (double) (1L << 30));
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) device.put("soc", Build.SOC_MODEL);
+                int[] split = coreSplit();
+                if (split != null) device.put("perfCores", split[0]).put("efficiencyCores", split[1]);
+                return device.toString();
             } catch (JSONException impossible) {
                 throw new IllegalStateException(impossible);
             }
+        }
+
+        /**
+         * Performance and efficiency cores, from each core's top frequency: a core reaching at
+         * least 70% of the fastest one's counts as performance. (A Snapdragon 8 Elite's 2 + 6
+         * cores are all performance cores; an Exynos 9810's 2.9 GHz and 1.8 GHz quads split 4 + 4.)
+         */
+        static int[] coreSplit() {
+            int cores = Runtime.getRuntime().availableProcessors();
+            long[] frequencies = new long[cores];
+            long fastest = 0;
+            for (int core = 0; core < cores; core++) {
+                File file = new File("/sys/devices/system/cpu/cpu" + core + "/cpufreq/cpuinfo_max_freq");
+                try (java.util.Scanner scanner = new java.util.Scanner(file)) {
+                    frequencies[core] = scanner.nextLong();
+                } catch (IOException | RuntimeException unreadable) {
+                    return null;
+                }
+                fastest = Math.max(fastest, frequencies[core]);
+            }
+            int performance = 0;
+            for (long frequency : frequencies) if (frequency * 10 >= fastest * 7) performance++;
+            return new int[] {performance, cores - performance};
         }
 
         static String conditions(Context context, String thermalBefore) {
