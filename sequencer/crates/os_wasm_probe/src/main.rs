@@ -7,6 +7,8 @@
 use std::path::Path;
 use std::time::Instant;
 
+use os_wasm_probe::replay::{Phase, Progress};
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let usage = "usage: os_native_probe os <input.json> | verify <response.json> | replay <capture dir> [out.json]";
@@ -29,14 +31,20 @@ fn main() {
 }
 
 fn replay(capture: &Path, out: Option<&Path>) {
-    let report = os_wasm_probe::replay::replay(capture, &mut |line| println!("{line}"));
+    let report = os_wasm_probe::replay::replay(capture, &|event| match event {
+        Progress::Transaction { block, tx_hash } => println!("block {block}, tx {tx_hash}"),
+        Progress::Note { message } => println!("{message}"),
+        Progress::Phase { phase: Phase::Prove } => println!("proving"),
+        _ => {}
+    });
     if let Some(out) = out {
         std::fs::write(out, &report.result_json).expect("write result");
     }
     let footprint = report.peak.footprint_mib.map_or(String::new(), |mib| format!(", peak footprint {mib} MiB"));
+    let proof_kib = report.proof_bytes / 1024;
     println!(
         "input {:.2} s ({} rounds), OS {:.2} s, prove {:.1} s ({} threads), verify {:.2} s {}; proof {} to the \
-         native prover's; peak RSS {} MiB{footprint}",
+         native prover's; {} steps, proof {proof_kib} KiB; peak RSS {} MiB{footprint}",
         report.input_s,
         report.rounds,
         report.os_s,
@@ -45,6 +53,7 @@ fn replay(capture: &Path, out: Option<&Path>) {
         report.verify_s,
         report.verify_error.as_deref().map_or("Ok".to_string(), |error| format!("FAILED: {error}")),
         if report.identical { "IDENTICAL" } else { "DIFFERENT" },
+        report.os_steps,
         report.peak.rss_mib,
     );
 }

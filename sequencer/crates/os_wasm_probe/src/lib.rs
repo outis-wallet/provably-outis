@@ -548,6 +548,13 @@ impl TxSession {
     }
 }
 
+impl TxSession {
+    /// Cairo steps of the virtual OS run, once `run_os` ran (until `prove` takes the run).
+    pub fn os_steps(&self) -> Option<usize> {
+        self.pie.as_ref().map(|pie| pie.execution_resources.n_steps)
+    }
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = error)]
