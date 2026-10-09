@@ -255,8 +255,8 @@
     const failed = submit.status === "failed" ? `<div class="status danger">${icon("danger")}<div>${escape(submit.error)}</div></div>` : "";
     const busy = submit.status === "submitting";
     return `<div class="submit">${failed}
-      <button class="button secondary ${busy ? "busy" : ""}" data-do="submit" data-id="${action.id}" ${busy ? "disabled" : ""}>${busy ? spinner : icon("upload")}${busy ? "Submitting…" : failed ? "Try again" : "Submit score"}</button>
-      <p class="hint">Sends the time and this ${escape(deviceKind)}'s specs (${escape(deviceLabel())}) to the results. No key, no account.</p></div>`;
+      <button class="button primary ${busy ? "busy" : ""}" data-do="submit" data-id="${action.id}" ${busy ? "disabled" : ""}>${busy ? spinner : icon("upload")}${busy ? "Submitting…" : failed ? "Try again" : "Submit score"}</button>
+      <p class="hint">Sends the time and this ${escape(deviceKind)}'s specs (${escape(deviceLabel())}) to the results.</p></div>`;
   }
 
   // What the results group by: the device's name in the apps; in a browser the phone's model
