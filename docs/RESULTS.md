@@ -3,15 +3,15 @@
 People can submit their proving time with their device's specs. A results page ranks the devices.
 The web build (outis.cash/prover) does this already. This document is what the iOS and Android
 apps need: very little, since the submission and the results page are the shared UI's
-(`showcase/app.js`), not the native shells'.
+(`outis/wallet/apps/prover`, built into `showcase/`), not the native shells'.
 
 ## The pieces
 
 | Piece | Where | What it is |
 |---|---|---|
 | Service | `outis/prover-results/` (Rust, axum, SQLite) | `POST /v1/results` stores a score; `GET /v1/results?action=<id>` ranks the devices; `GET /v1/summary`; `GET /health`. |
-| Public URL | `https://rpc.outis.cash/prover-results` (`resultsUrl` in `showcase/content.js`) | Caddy on the Sepolia node's host, to `127.0.0.1:8095`. Any origin (CORS `*`), GET and POST. |
-| UI | `showcase/app.js` | A "Submit score" button by the time on the result screen (Share and "Prove again" are gone), a Results row on the home screen, and the results page: tabs per action, devices ranked by their median time. `#results` in the URL opens it. |
+| Public URL | `https://rpc.outis.cash/prover-results` (`resultsUrl` in `outis/wallet/apps/prover/src/content.ts`) | Caddy on the Sepolia node's host, to `127.0.0.1:8095`. Any origin (CORS `*`), GET and POST. |
+| UI | `outis/wallet/apps/prover/src/` | A "Submit score" button by the time on the result screen (`Prover.tsx`), and the results page (`Results.tsx`, `results.html`): tabs per action, devices ranked by their median time. |
 
 `?results=<url>` points the page at another service, e.g. a local one:
 `cargo run --release -- --listen 127.0.0.1:8095 --database /tmp/results.db` in
@@ -19,7 +19,7 @@ apps need: very little, since the submission and the results page are the shared
 
 ## What the page sends
 
-`showcase/app.js`, `submitScore()`:
+`Prover.tsx`, `submitScore()`:
 
 ```json
 {
@@ -41,7 +41,7 @@ apps need: very little, since the submission and the results page are the shared
   `platform, model, name, os, arch, cores, ramGiB, ramAtLeast, hardware, gpu, chip, soc,
   perfCores, efficiencyCores`. Strings are cut to 100 characters.
 - **`device_label`**: what the results group by, computed by the page. The apps get it for free:
-  it is `deviceName`, the marketing name from `content.js` `deviceNames`, else the model.
+  it is `deviceName`, the marketing name from `content.ts` `deviceNames`, else the model.
 - **`report`**: the native Report as the apps already pass it.
   - `peak_mib` is taken from `peak.run_mib`, else `footprint_mib`, else `rss_mib`.
   - `identical` must be true, which the replay of a bundled capture gives.
@@ -65,10 +65,10 @@ apps need: very little, since the submission and the results page are the shared
     fastest counts as performance, so a Snapdragon 8 Elite's 2 + 6 cores are all performance.
 - **fetch from the file:// page**:
   - iOS (WKWebView): works. The results page loads from the live service.
-  - Android needed the INTERNET permission, which it didn't have, and DOM storage: `app.js`
+  - Android needed the INTERNET permission, which it didn't have, and DOM storage: the page
     keeps its submissions in `localStorage`, which a WebView leaves off by default.
   - So no bridge fallback.
-- **Share** is gone from both shells and from `bridge.js`.
+- **Share** is gone from both shells and from the bridge.
 - **The iOS simulator** reports model `Simulator`, named "iOS Simulator (<the Mac's chip>)". It
   runs on the Mac's CPU, so its scores must not be grouped with the iPhone it simulates.
 
@@ -96,7 +96,7 @@ The steps as they were planned:
 
 Page to native: `{type: "submit", id, payload}`, where `payload` is the JSON above. The native
 side POSTs it to `https://rpc.outis.cash/prover-results/v1/results` and answers
-`provingly.receive({type: "submitted", id, ok, status, body})`. Then `app.js`'s `submitScore`
+`provingly.receive({type: "submitted", id, ok, status, body})`. Then `Prover.tsx`'s `submitScore`
 needs a branch that posts through the bridge when `engine.platform` is `ios` or `android`. The
 results page's GET would go the same way (`{type: "results", id, action}`). Implement this only if
 step 3 fails.

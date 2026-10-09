@@ -7,24 +7,32 @@ how long the proof took, what it says, and what stays private. It is styled afte
 
 ## Layout
 
-One UI for every platform, written in plain HTML, CSS and JS, with no build step. Each platform
-wraps it in a thin native shell that runs the Rust prover.
+One UI for every platform, in React, in the Outis repository: `outis/wallet/apps/prover`. It has
+two builds:
+- **native** (`pnpm build:native`): one classic script and stylesheet with two pages, loaded from
+  files. These are `showcase/index.html`, `results.html`, `app.js` and `app.css` here. They are
+  generated: don't edit them, edit the React app and build again (below).
+- **web** (`pnpm build`): outis.cash/prover, proving in the browser with the wasm build. On
+  screens 1024 px and wider the web build has a desktop layout (split view, results table). The
+  native build never does, so an iPad in landscape keeps the phone UI.
+
+Each app wraps the native build in a thin shell that runs the Rust prover.
 
 | Path | What it is |
 |---|---|
-| `showcase/index.html`, `app.css`, `app.js` | The UI: the four steps, an action screen, the proving screen (phases, time, memory), the result, and "How it works". |
-| `showcase/content.js` | The words and facts: the actions, what each keeps private and makes public, the phases, the reference devices, and device names. |
-| `showcase/bridge.js` | The page/native contract (below), and `?mock`, a pretend engine for working on the UI in a browser. |
+| `outis/wallet/apps/prover/src/` | The UI. `Prover.tsx`: the four steps, an action screen, the proving screen (phases, time, memory), the result, "How it works". `Results.tsx`: the results page. `content.ts`: the words and facts (actions, what each keeps private and makes public, phases, device names). `bridge.ts`: the page/native contract (below), the web engine and `?mock`. |
+| `showcase/index.html`, `results.html`, `app.js`, `app.css` | The native build of it, generated. The apps bundle these. |
 | `showcase/captures.txt` | The captures the apps bundle: action id, then capture directory. |
-| `showcase/fonts/` | Ubuntu Sans (variable, Latin), Outis's typeface, under the Ubuntu Font Licence. |
+| `showcase/fonts/` | Ubuntu Sans (variable, Latin), Outis's typeface, under the Ubuntu Font Licence. `app.css` loads it from here. |
+| `showcase/build-web.sh`, `showcase/web/worker.mjs` | The web engine (worker, threaded wasm, trimmed captures), built into `outis/wallet/apps/prover/public`. |
 | `ios/TxProver/ShowcaseApp.swift` | The iOS shell: a WKWebView over the bundled page, and the bridge to `tx_prove_replay`. |
 | `sequencer/crates/os_wasm_probe/src/replay.rs` | The prover entry point: `replay()` with `Progress` events, and the C ABI `tx_prove_replay(dir, threads, callback, context)`. |
 
-## The contract (showcase/bridge.js)
+## The contract (outis/wallet/apps/prover/src/bridge.ts)
 
-- Page to native: `{type: "prove", action, threads}`, `{type: "share", text}` and `{type: "ready"}`.
+- Page to native: `{type: "prove", action, threads}` and `{type: "ready"}`.
   - iOS receives them on `webkit.messageHandlers.prover`.
-  - Android will receive them on `ProvinglyAndroid.postMessage(json)`.
+  - Android receives them on `ProvinglyAndroid.postMessage(json)`.
 - Native to page: `provingly.receive(message)`, with one of:
   - `{type: "event", event}`: a `Progress` event, as JSON.
   - `{type: "result", report, conditions}`: the `Report`, plus the thermal state before and after
@@ -33,9 +41,9 @@ wraps it in a thin native shell that runs the Rust prover.
   - `{type: "auto", action, threads}`: launch arguments `--prove <action> [--threads N]`, for
     testing.
 - Device info:
-  - iOS sets `window.provinglyNative = {device}` before the page loads.
+  - iOS sets `window.provinglyNative = {device, build}` before the page loads.
   - Android returns it from `ProvinglyAndroid.deviceJson()`.
-  - Fields: `{platform, model, os, cores, ramGiB}`.
+  - Fields: `{platform, model, os, cores, ramGiB}`, and the optional ones of docs/RESULTS.md.
 - Android's back button calls `provingly.back()`. It returns true when the page handled it.
 
 The prover's `Progress` events are `phase` (state, execute, os, prove, verify), `transaction`
@@ -45,15 +53,28 @@ the same app reports its own peak.
 
 ## Working on the UI
 
-Serve the folder with `python3 -m http.server 8766 -d showcase`, then open
-`http://localhost:8766/?mock` at phone size. `?mock` simulates a run with real-looking events.
-Add `&auto&action=pay` to start one immediately.
+In `outis/wallet/apps/prover`: `pnpm dev`, then open `http://localhost:5196/prover/?mock` at
+phone size. `?mock` simulates a run with real-looking events; add `&auto&action=pay` to start one
+immediately. Without `?mock` the dev server proves with the wasm build, as the web does.
+
+The generated native files open from files too: `showcase/index.html?mock` in a browser.
+
+To update the apps' copy after changing the UI:
+
+```
+cd outis/wallet/apps/prover
+NATIVE_OUT=../../../../provingly/showcase pnpm build:native   # with outis and provingly side by side
+```
+
+Commit the four generated files here with the Outis commit they come from. The web engine changes
+only when the prover does: `showcase/build-web.sh` writes it into `outis/wallet/apps/prover/public`.
 
 ## iOS
 
 1. `ios/build-rust.sh` builds the static library for the device and the simulator.
 2. Build `ios/TxProver.xcodeproj` (scheme TxProver). Its "Bundle the showcase" phase copies
-   `showcase/` to `web/`, and each capture in `captures.txt` to `captures/<action>/`.
+   `showcase/`'s pages, scripts, styles and fonts to `web/`, and each capture in `captures.txt` to
+   `captures/<action>/`.
 3. Install and run:
    `xcrun devicectl device install app --device <udid> <DerivedData>/Build/Products/Release-iphoneos/TxProver.app`,
    then `xcrun devicectl device process launch --device <udid> dev.provingly.TxProver [--prove pay]`.
@@ -76,7 +97,7 @@ the page sends the scores itself.
 
 `android/` is the same shell in plain Java, with no AndroidX or Kotlin:
 - `MainActivity.java`: a WebView over `file:///android_asset/web/index.html`, the
-  `ProvinglyAndroid` bridge, sharing, the back button and the device info.
+  `ProvinglyAndroid` bridge, the back button and the device info.
 - `src/main/cpp/showcase_jni.c`: a JNI shim around `tx_prove_replay`. It attaches the prover's
   threads to forward their events to Java.
 - `CMakeLists.txt`: links the shim with the Rust static library into `libshowcase.so`.

@@ -1,6 +1,6 @@
 // The showcase on iOS: the shared web UI (showcase/, bundled as web/) in a full-screen web view, and
 // the bridge from it to the Rust prover (os_wasm_probe::replay, linked as a static library). The
-// page/native contract is in showcase/bridge.js; the Android app implements the same one.
+// page/native contract is in outis/wallet/apps/prover/src/bridge.ts; the Android app implements the same one.
 import SwiftUI
 import UIKit
 import WebKit
@@ -176,7 +176,7 @@ enum Device {
         #endif
     }()
 
-    /// What the page shows about this device (bridge.js `device`), and sends with a score
+    /// What the page shows about this device (bridge.ts `device`), and sends with a score
     /// (docs/RESULTS.md: flat, strings and numbers).
     static var info: [String: Any] {
         var info: [String: Any] = [
@@ -191,7 +191,7 @@ enum Device {
             "ramGiB": Double(ProcessInfo.processInfo.physicalMemory) / Double(1 << 30),
         ]
         if let chip = chips[model] ?? simulatorHost { info["chip"] = chip }
-        // The page labels a device by its name when the model isn't one it knows (content.js).
+        // The page labels a device by its name when the model isn't one it knows (content.ts).
         if model == "Simulator" { info["name"] = simulatorHost.map { "iOS Simulator (\($0))" } ?? "iOS Simulator" }
         if let performance = sysctlInt("hw.perflevel0.physicalcpu") { info["perfCores"] = performance }
         if let efficiency = sysctlInt("hw.perflevel1.physicalcpu") { info["efficiencyCores"] = efficiency }

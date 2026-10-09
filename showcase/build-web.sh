@@ -1,26 +1,18 @@
 #!/bin/sh
-# Assembles the showcase as a static site for browsers (outis.cash/prover): the same UI as the
-# apps, with the web engine (bridge.js + engine/worker.mjs) proving through the threaded wasm
-# build, and the captures of captures.txt trimmed to what the replay reads.
+# Builds the web engine of outis.cash/prover: the worker (engine/), the threaded wasm build
+# (pkg-mt/) and the captures of captures.txt trimmed to what the replay reads (captures/). The
+# page itself is outis/wallet/apps/prover (React), whose public/ these go to; see
+# docs/SHOWCASE.md.
 #
-# Usage: showcase/build-web.sh [out dir, default dist-web/prover] (needs python3, zstd, gzip)
-# Serve the result with COOP: same-origin and COEP: require-corp (threads need shared memory).
+# Usage: showcase/build-web.sh [out dir, default ../outis/wallet/apps/prover/public]
+# (needs python3, zstd, gzip). Only engine/, pkg-mt/ and captures/ are replaced in the out dir.
+# Pages served with it need COOP: same-origin and COEP: require-corp (threads need shared memory).
 set -e
 cd "$(dirname "$0")/.."
-OUT=${1:-dist-web/prover}
+OUT=${1:-../outis/wallet/apps/prover/public}
 PKG=${PKG:-web/tx/pkg-mt}
-rm -rf "$OUT" && mkdir -p "$OUT/engine" "$OUT/pkg-mt" "$OUT/captures/classes"
-
-# The UI, as in the apps.
-# Every page, style and script at the top of showcase/, as the apps bundle them. On the web the
-# pages are served at clean URLs (/prover, /prover/results, no trailing slash), so their relative
-# links resolve against a base instead of the page's own URL.
-BASE=${BASE:-/prover/}
-cp showcase/*.html showcase/*.css showcase/*.js "$OUT/"
-for page in "$OUT"/*.html; do
-  sed -i.bak "s|<head>|<head>\n<base href=\"$BASE\">|" "$page" && rm -f "$page.bak"
-done
-cp -r showcase/fonts "$OUT/"
+rm -rf "$OUT/engine" "$OUT/pkg-mt" "$OUT/captures"
+mkdir -p "$OUT/engine" "$OUT/pkg-mt" "$OUT/captures/classes"
 
 # The wasm module: no name section (debug symbols, 63 MiB), gzipped, named by its hash so it can
 # be cached forever.
@@ -84,4 +76,4 @@ for casm in glob.glob(os.path.join(source, "casm-*.json")):
 PY
 done
 
-du -sh "$OUT" "$OUT/pkg-mt/$wasm_file" "$OUT/captures"
+du -sh "$OUT/pkg-mt/$wasm_file" "$OUT/captures"

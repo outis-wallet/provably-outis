@@ -32,7 +32,7 @@ import org.json.JSONObject;
 /**
  * The showcase on Android: the shared web UI (showcase/, in the assets as web/) in a full-screen
  * WebView, and the bridge from it to the Rust prover. The page/native contract is in
- * showcase/bridge.js; the iOS app (ios/TxProver/ShowcaseApp.swift) implements the same one.
+ * outis/wallet/apps/prover/src/bridge.ts; the iOS app (ios/TxProver/ShowcaseApp.swift) implements the same one.
  */
 public class MainActivity extends Activity {
     private static final String TAG = "Showcase";
@@ -225,7 +225,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** What the page shows about this device (bridge.js `device`), and the conditions of a run. */
+    /** What the page shows about this device (bridge.ts `device`), and the conditions of a run. */
     static final class Device {
         static String json(Context context) {
             ActivityManager.MemoryInfo memory = new ActivityManager.MemoryInfo();
