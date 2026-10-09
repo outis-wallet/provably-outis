@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Outis's mark (outis/wallet/packages/ui/src/brand.ts), 500 units, inside the adaptive icon's
+     66 dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.11"
+        android:scaleY="0.11"
+        android:translateX="26.5"
+        android:translateY="26.5">
+        <path
+            android:fillColor="@color/accent"
+            android:pathData="M499.2 230H407.74C278.77 230 250 98.37 250 97.37C250 98.37 221.23 230 92.26 230H0.8A250 250 0 0 1 499.2 230ZM499.2 270A250 250 0 0 1 0.8 270H92.26C221.23 270 250 401.63 250 402.63C250 401.63 278.77 270 407.74 270Z" />
+    </group>
+</vector>

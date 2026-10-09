@@ -1,0 +1,257 @@
+/* The showcase in Outis's look, Midnight Sage (outis/wallet/packages/ui/src/tokens.css): its colors,
+   type, shape and motion. As on Outis's phone screens, the page is the forest surface, and fields
+   and cards are wells sunk into it. Dark only, like Outis. Animations use transform and opacity,
+   so they stay smooth while the prover keeps every core busy. */
+@font-face {
+  font-family: "Ubuntu Sans Variable";
+  src: url("fonts/ubuntu-sans-latin-wght-normal.woff2") format("woff2-variations");
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+:root {
+  --page: #16231f;
+  --well: #0c1413;
+  --line: #2c4036;
+  --line-soft: #223329;
+  --line-strong: #3d5649;
+  --picked: #76907f;
+  --raised: #1b2b26;
+  --ink: #edf3ee;
+  --muted: #a0b2a6;
+  --faint: #8a9e92;
+  --accent: #b7d9c0;
+  --on-accent: #0c1413;
+  --logo: #c7d7ba;
+  --danger: #e3a09a;
+  --danger-soft: #302321;
+  --warning: #dcc48e;
+  --warning-soft: #2d291e;
+  --success: #93c7ab;
+  --success-soft: #1b3026;
+  --info: #a9c4d4;
+  --info-soft: #17272f;
+  --scrim: rgb(0 0 0 / 55%);
+  --radius-control: 10px;
+  --radius-box: 8px;
+  --radius-card: 14px;
+  --sans: "Ubuntu Sans", "Ubuntu Sans Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; min-height: 100%; background: var(--page); }
+body {
+  color: var(--ink);
+  font: 15px/1.45 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+  overflow-x: hidden;
+}
+button { font: inherit; color: inherit; border: 0; background: none; padding: 0; cursor: pointer; text-align: inherit; }
+:where(button, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.mono { font-family: var(--mono); }
+.selectable { -webkit-user-select: text; user-select: text; }
+svg.i { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+.screen {
+  max-width: 520px;
+  margin: 0 auto;
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) 16px calc(env(safe-area-inset-bottom, 0px) + 24px);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.screen.enter { animation: slide-in 260ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.screen.enter-back { animation: slide-in-left 260ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+@keyframes slide-in { from { transform: translateX(100%); opacity: 0.4; } }
+@keyframes slide-in-left { from { transform: translateX(-30%); opacity: 0.4; } }
+.rise { animation: rise-in 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes rise-in { from { opacity: 0; transform: translateY(8px); } }
+
+/* Header: the logo, as on the wallet's home screen, and this device where the account would be. */
+.header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; }
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand .logo { height: 34px; width: auto; }
+.logo .mark { fill: var(--accent); }
+.logo .name { fill: var(--ink); }
+.tag { border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.device { text-align: right; min-width: 0; }
+.device .name { font-weight: 600; white-space: nowrap; }
+.device .spec { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+.title-bar { display: flex; align-items: center; gap: 6px; min-height: 48px; }
+.title-bar .back { width: 40px; height: 40px; display: grid; place-items: center; margin-left: -8px; color: var(--ink); }
+.title-bar .back svg { width: 24px; height: 24px; }
+.title-bar .spacer { flex: 1; }
+
+h1 { font-size: 28px; line-height: 1.2; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+.lede { color: var(--muted); margin: 0; }
+.label { font-size: 15px; color: var(--muted); }
+.section-title { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0; }
+.section { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--line); padding-top: 14px; }
+.footnote { color: var(--faint); font-size: 12px; text-align: center; margin: 0 8px; }
+
+/* Wells: what the phone screens use for fields and the choice not taken. */
+.well { background: var(--well); border: 1px solid var(--line); border-radius: var(--radius-card); }
+.well.picked { background: var(--page); border-color: var(--picked); }
+.pressable { transition: border-color 150ms ease, background 150ms ease, transform 150ms ease; }
+.pressable:active { transform: scale(0.985); border-color: var(--picked); }
+
+/* An icon in a ring, like the Private / Public choice on the send screen. */
+.ring-icon { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--line); display: grid; place-items: center; color: var(--muted); flex: none; }
+.ring-icon svg { width: 22px; height: 22px; }
+.ring-icon.accent { color: var(--accent); border-color: var(--line-strong); }
+
+/* The four steps: rows like the wallet's asset list, each in a well. */
+.steps { display: flex; flex-direction: column; gap: 10px; }
+.step { display: flex; align-items: center; gap: 14px; padding: 14px; width: 100%; }
+.step .body { flex: 1; min-width: 0; }
+.step .title { font-weight: 600; font-size: 16px; }
+.step .sub { color: var(--muted); font-size: 13px; margin-top: 1px; }
+.step .end { display: flex; align-items: center; gap: 6px; color: var(--faint); }
+.step .end svg { width: 18px; height: 18px; }
+.step.done .ring-icon { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+.badge { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 2px 9px 2px 7px; font-size: 12px; line-height: 1.5; font-weight: 600; white-space: nowrap; }
+.badge svg { width: 14px; height: 14px; }
+.badge.success { background: var(--success-soft); color: var(--success); }
+.badge.info { background: var(--info-soft); color: var(--info); }
+.badge.plain { border: 1px solid var(--line); color: var(--muted); }
+
+/* Status: a message with a meaning, its icon and words (Outis's <Status>). */
+.status { display: flex; align-items: flex-start; gap: 8px; border-radius: var(--radius-box); padding: 12px; font-size: 13px; overflow-wrap: anywhere; }
+.status svg { width: 18px; height: 18px; margin-top: 1px; }
+.status ul { margin: 4px 0 0; padding-left: 16px; }
+.status li + li { margin-top: 3px; }
+.status .head { font-weight: 600; }
+.status.success { background: var(--success-soft); color: var(--success); }
+.status.warning { background: var(--warning-soft); color: var(--warning); }
+.status.info { background: var(--info-soft); color: var(--info); }
+.status.danger { background: var(--danger-soft); color: var(--danger); }
+.status.private { background: var(--well); border: 1px solid var(--line); color: var(--ink); }
+.status.private .head, .status.private svg { color: var(--accent); }
+.status.private li { color: var(--muted); }
+
+/* What moves where: two ends, and an arrow with what crosses between them. */
+.flow { display: grid; grid-template-columns: 76px 1fr 76px; align-items: start; padding: 18px 12px 14px; }
+.flow .end { display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; font-size: 12.5px; font-weight: 600; }
+.flow .end .ring-icon { width: 48px; height: 48px; background: var(--page); }
+.flow .crossing { position: relative; margin-top: 24px; height: 1.5px; background: var(--muted); }
+.flow .crossing::after { content: ""; position: absolute; right: -1px; top: -4px; width: 8px; height: 8px; border-top: 1.5px solid var(--muted); border-right: 1.5px solid var(--muted); transform: rotate(45deg); }
+.flow .crossing .what { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; font-size: 13px; font-weight: 600; color: var(--ink); }
+.flow .crossing.hidden { background: none; border-top: 1.5px dashed var(--accent); }
+.flow .crossing.hidden::after { border-color: var(--accent); top: -5.5px; }
+.flow .crossing.hidden .what span { filter: blur(4px); }
+.flow .crossing .seal { position: absolute; left: 0; right: 0; top: 7px; display: flex; justify-content: center; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 600; color: var(--accent); }
+.flow .crossing .seal svg { width: 14px; height: 14px; }
+
+/* Buttons (Outis's <Button>). */
+.buttons { display: flex; flex-direction: column; gap: 10px; }
+.button {
+  display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 50px;
+  border-radius: var(--radius-control); border: 1px solid transparent; padding: 12px 14px; font-weight: 600; font-size: 16px;
+}
+.button svg { width: 20px; height: 20px; }
+.button.primary { background: var(--accent); color: var(--on-accent); }
+.button.secondary { border-color: var(--line); color: var(--ink); }
+.button.quiet { color: var(--muted); min-height: 40px; }
+.button:active { filter: brightness(0.95); }
+.button[disabled] { opacity: 0.45; pointer-events: none; }
+.button.busy[disabled] { opacity: 1; }
+.button-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.hint { color: var(--faint); font-size: 12px; text-align: center; margin: 0; }
+.spinner { width: 18px; height: 18px; animation: spin 900ms linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Proving: the time so far in a ring, then each phase with Outis's step marks. */
+.proving { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 20px 16px; text-align: center; }
+.clock { position: relative; width: 168px; height: 168px; }
+.clock svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.clock .track { stroke: var(--line); }
+.clock .arc { stroke: var(--accent); transform-origin: 50% 50%; animation: spin 1.8s linear infinite; }
+.clock .time { position: absolute; inset: 0; display: grid; place-content: center; }
+.clock .seconds { font-size: 40px; line-height: 1.1; font-weight: 600; font-variant-numeric: tabular-nums; }
+.clock .seconds small { font-size: 18px; color: var(--muted); margin-left: 2px; }
+.proving .now { font-weight: 600; font-size: 16px; margin-top: 10px; }
+.proving .keep { color: var(--muted); font-size: 13px; }
+
+.phases { list-style: none; margin: 0; padding: 4px 14px; }
+.phase { display: grid; grid-template-columns: 22px 1fr auto; gap: 12px; align-items: start; padding: 11px 0; }
+.phase + .phase { border-top: 1px solid var(--line-soft); }
+.mark { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line); background: var(--page); display: grid; place-items: center; margin-top: 1px; transition: background 300ms ease, border-color 300ms ease; }
+.mark svg { width: 14px; height: 14px; }
+.phase.done .mark { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.phase.working .mark { border-color: var(--accent); color: var(--accent); }
+.phase .name { font-weight: 600; }
+.phase.pending .name { color: var(--muted); }
+.phase .detail { color: var(--muted); font-size: 13px; }
+.phase .took { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; padding-top: 2px; }
+.phase.working .took { color: var(--accent); font-weight: 600; }
+
+.meter { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.meter .row { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); }
+.meter .row b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.meter .bar { height: 6px; border-radius: 999px; background: var(--line-soft); overflow: hidden; }
+.meter .fill { height: 100%; width: 0; border-radius: inherit; background: var(--accent); transition: width 300ms ease; }
+
+/* The result: the time like the wallet's balance, then rows of what it took. */
+.verdict { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 16px; }
+.verdict .tick { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); animation: pop 450ms cubic-bezier(0.2, 1.4, 0.4, 1); }
+.verdict .tick svg { width: 18px; height: 18px; stroke-width: 2.4; }
+.verdict.failed .tick { background: var(--danger-soft); color: var(--danger); }
+@keyframes pop { from { transform: scale(0.5); opacity: 0; } }
+.amount { font-size: 40px; line-height: 1.1; font-weight: 600; font-variant-numeric: tabular-nums; }
+.amount small { font-size: 20px; color: var(--muted); margin-left: 3px; }
+.figure { display: flex; flex-direction: column; gap: 4px; }
+
+.rows { padding: 2px 14px; }
+.rows .row { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 11px 0; }
+.rows .row + .row { border-top: 1px solid var(--line-soft); }
+.rows .key { color: var(--muted); }
+.rows .value { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rows .value small { display: block; color: var(--faint); font-weight: 400; font-size: 12px; }
+
+.claim { padding: 14px; }
+.claim b { font-weight: 600; color: var(--accent); }
+
+.compare { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.compare .labels { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px; }
+.compare .labels span:last-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+.compare .track { height: 6px; border-radius: 999px; background: var(--line-soft); overflow: hidden; }
+.compare .fill { height: 100%; border-radius: inherit; background: var(--line-strong); transform-origin: left; animation: grow 700ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.compare .you .labels { font-weight: 600; }
+.compare .you .labels span:last-child { color: var(--ink); }
+.compare .you .fill { background: var(--accent); }
+.compare .caption { color: var(--faint); font-size: 12px; }
+@keyframes grow { from { transform: scaleX(0); } }
+
+details.more summary { list-style: none; cursor: pointer; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+details.more summary::-webkit-details-marker { display: none; }
+details.more summary svg { width: 16px; height: 16px; transition: transform 200ms ease; }
+details.more[open] summary svg { transform: rotate(90deg); }
+details.more .rows { margin-top: 10px; }
+.code { display: block; font-family: var(--mono); font-size: 12px; background: var(--well); border: 1px solid var(--line); border-radius: var(--radius-box); padding: 10px; word-break: break-all; color: var(--ink); text-align: left; font-weight: 400; }
+
+/* How it works: a sheet over a scrim. */
+.scrim { position: fixed; inset: 0; z-index: 10; background: var(--scrim); animation: fade-in 120ms ease-out; }
+@keyframes fade-in { from { opacity: 0; } }
+.sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 11; max-height: 90vh; overflow-y: auto;
+  background: var(--page); border-top: 1px solid var(--line); border-radius: 18px 18px 0 0;
+  padding: 10px 16px calc(env(safe-area-inset-bottom, 0px) + 20px);
+  display: flex; flex-direction: column; gap: 14px;
+  animation: sheet-up 320ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@media (min-width: 560px) { .sheet { left: 50%; width: 520px; margin-left: -260px; } }
+@keyframes sheet-up { from { transform: translateY(100%); } }
+.grabber { width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); margin: 0 auto 4px; }
+.how { display: flex; gap: 14px; }
+.how .title { font-weight: 600; }
+.how p { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition: none !important; }
+}

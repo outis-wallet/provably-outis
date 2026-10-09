@@ -15,10 +15,12 @@ iPad and iPhone runs and their recipes are in `docs/MAC-IOS-PLAN.md`.
 | `sequencer/` | starkware-libs/sequencer at `PRIVACY-0.14.4-RC.0` (commit `0ee373ac`) plus our changes. The pipeline crate is `crates/os_wasm_probe` (wasm `TxSession`, native `os_native_probe`), with `wasm-stubs/c-kzg` and a few wasm build fixes. Its `[patch]` section points at `../proving`. |
 | `proving/` | starkware-libs/proving at `2b495a36` plus our striped (stripe-0 residency) prover, after ryun1's public description, plus wasm fixes: output preimage in memory, buffer pool. |
 | `web/` | Test pages and `server.py` (COOP/COEP headers, `/rpc` forward to a node, optional HTTPS for the LAN). The `tx/` page proves a transaction (`?threads=N`, `&replay` to prove capture2 from its recording, `&trace`); the root and `mt/` pages are the earlier prover-only benchmark (`pair.json`). Prebuilt wasm is committed as `*.wasm.zst`. |
-| `ios/` | `TxProver.xcodeproj`, a one-screen SwiftUI app that links the pipeline as a static library (`build-rust.sh`) and proves capture2 on an iPhone or iPad. |
+| `showcase/` | Outis Prover, the showcase UI: the four Privacy Pool actions proven on the device, in Outis's style. Plain HTML/CSS/JS shared by the iOS and Android apps (`?mock` previews it in a browser). See `docs/SHOWCASE.md`. |
+| `ios/` | The iOS app: `TxProver.xcodeproj` shows `showcase/` in a web view and links the pipeline as a static library (`build-rust.sh`). |
+| `android/` | The Android app: the same, in a WebView, with the pipeline linked through a JNI shim (`build-rust.sh`, then `./gradlew assembleDebug`). |
 | `tools/` | `tx-driver.mjs` (the JS side: RPC reads and the miss loop), `replay.mjs` (Node replay of a capture, `--prove --trace`), `os-node/` (Node build), and the recording proxies used to capture a transaction. |
 | `captures/capture2` | One captured Outis "bob registers" transaction: recorded RPC traffic, the prove request, the native prover's response (the identity reference), its virtual OS input, and node CASM. |
-| `docs/` | `BROWSER-TX-PLAN.md` (everything, with recipes and gotchas), `MAC-IOS-PLAN.md`, `STRIPE-PLAN.md` (the striped prover). |
+| `docs/` | `BROWSER-TX-PLAN.md` (everything, with recipes and gotchas), `MAC-IOS-PLAN.md`, `SHOWCASE.md` (the showcase app), `STRIPE-PLAN.md` (the striped prover). |
 | `patches/` | The same changes as patches against upstream, plus earlier provably.fast candidates. |
 | `results/` | Browser run log (`browser-results.log`: desktop, Galaxy S9+ and S25+) and memory traces before and after the buffer-pool fix. |
 

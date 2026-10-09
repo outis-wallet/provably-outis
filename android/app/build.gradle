@@ -1,0 +1,64 @@
+// The showcase on Android: a WebView over the shared UI (showcase/), and the Rust prover as
+// libshowcase.so (src/main/cpp, linking android/build-rust.sh's static library). See
+// docs/SHOWCASE.md.
+plugins {
+    id 'com.android.application'
+}
+
+def repository = file("$rootDir/..")
+def showcaseAssets = layout.buildDirectory.dir('generated/showcase-assets')
+
+android {
+    namespace 'dev.provingly.showcase'
+    compileSdk 36
+    ndkVersion '27.1.12297006'
+
+    defaultConfig {
+        applicationId 'dev.provingly.showcase'
+        // getCurrentThermalStatus.
+        minSdk 29
+        // 34, not 35: from 35 apps are drawn edge to edge, under the system bars.
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild {
+            cmake { arguments "-DRUST_LIB_DIR=$repository/sequencer/target/aarch64-linux-android/release" }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    sourceSets {
+        main { assets.srcDirs += showcaseAssets.get().asFile }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+// The web UI as web/, and each capture showcase/captures.txt names as captures/<action>/, with the
+// files os_wasm_probe's replay reads (MainActivity copies one out to files before proving it).
+def syncShowcase = tasks.register('syncShowcase', Sync) {
+    def showcase = new File(repository, 'showcase')
+    into showcaseAssets
+    from(showcase) {
+        include '*.html', '*.css', '*.js', 'fonts/**'
+        into 'web'
+    }
+    new File(showcase, 'captures.txt').readLines().findAll { it.trim() && !it.startsWith('#') }.each { line ->
+        def (action, directory) = line.trim().split(/\s+/)
+        from(new File(repository, "captures/$directory")) {
+            include 'rpc-log.jsonl', 'request-*.json', 'response-*.json', 'casm-*.json'
+            into "captures/$action"
+        }
+    }
+}
+tasks.named('preBuild') { dependsOn syncShowcase }

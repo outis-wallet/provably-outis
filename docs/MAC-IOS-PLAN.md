@@ -45,8 +45,10 @@ are replays and all are IDENTICAL. Results are in `BROWSER-TX-PLAN.md` ("Mac and
     have the latest Program License Agreement accepted.
   - Install: `xcrun devicectl device install app --device <udid> <DerivedData>/Build/Products/Release-iphoneos/TxProver.app`.
   - Run: `xcrun devicectl device process launch --console --terminate-existing --device <udid>
-    dev.provingly.TxProver --prove --threads 8`. The report is printed after
-    `TX_PROVER_RESULT`.
+    dev.provingly.TxProver --prove pay --threads 8`. The report is printed after
+    `SHOWCASE_RESULT`. Since 2026-10-09 the app is the showcase (docs/SHOWCASE.md): a web
+    UI over the same prover, proving the four own-pool-flow actions. The single-screen
+    capture2 app came before it.
   - The increased-memory-limit capability was not needed on the 8 GB iPad or on the iPhones
     (12 GB and 6 GB).
 
