@@ -1,0 +1,11 @@
+<!-- The Outis Prover apps' icon: a stopwatch with Outis's star as its dial (Outis's own mark is
+     for the official app). Full bleed: iOS and Android cut the corners. ios/.../AppIcon-1024.png is
+     this, rendered at 1024 px; android/.../ic_launcher_foreground.xml draws the same shapes. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="#16231f"/>
+  <circle cx="512" cy="560" r="280" fill="none" stroke="#b7d9c0" stroke-width="64"/>
+  <rect x="452" y="176" width="120" height="72" rx="18" fill="#b7d9c0"/>
+  <rect x="490" y="236" width="44" height="60" fill="#b7d9c0"/>
+  <rect x="742" y="262" width="76" height="52" rx="14" fill="#b7d9c0" transform="rotate(45 780 288)"/>
+  <path d="M512 410 Q539 533 662 560 Q539 587 512 710 Q485 587 362 560 Q485 533 512 410Z" fill="#b7d9c0"/>
+</svg>

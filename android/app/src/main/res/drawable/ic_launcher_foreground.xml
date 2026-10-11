@@ -1,18 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Outis's mark (outis/wallet/packages/ui/src/brand.ts), 500 units, inside the adaptive icon's
-     66 dp safe zone. -->
+<!-- The Outis Prover icon (icon/prover-icon.svg): a stopwatch with Outis's star as its dial, the
+     same shapes in the SVG's 1024 units, scaled into the adaptive icon's 66 dp safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <group
-        android:scaleX="0.11"
-        android:scaleY="0.11"
-        android:translateX="26.5"
-        android:translateY="26.5">
+        android:scaleX="0.075"
+        android:scaleY="0.075"
+        android:translateX="15.6"
+        android:translateY="14.7">
+        <path
+            android:strokeColor="@color/accent"
+            android:strokeWidth="64"
+            android:pathData="M232 560A280 280 0 1 1 792 560A280 280 0 1 1 232 560Z" />
         <path
             android:fillColor="@color/accent"
-            android:pathData="M499.2 230H407.74C278.77 230 250 98.37 250 97.37C250 98.37 221.23 230 92.26 230H0.8A250 250 0 0 1 499.2 230ZM499.2 270A250 250 0 0 1 0.8 270H92.26C221.23 270 250 401.63 250 402.63C250 401.63 278.77 270 407.74 270Z" />
+            android:pathData="M470 176H554A18 18 0 0 1 572 194V230A18 18 0 0 1 554 248H470A18 18 0 0 1 452 230V194A18 18 0 0 1 470 176ZM490 236H534V296H490Z" />
+        <group
+            android:rotation="45"
+            android:pivotX="780"
+            android:pivotY="288">
+            <path
+                android:fillColor="@color/accent"
+                android:pathData="M756 262H804A14 14 0 0 1 818 276V300A14 14 0 0 1 804 314H756A14 14 0 0 1 742 300V276A14 14 0 0 1 756 262Z" />
+        </group>
+        <path
+            android:fillColor="@color/accent"
+            android:pathData="M512 410Q539 533 662 560Q539 587 512 710Q485 587 362 560Q485 533 512 410Z" />
     </group>
 </vector>
