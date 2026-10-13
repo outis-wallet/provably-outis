@@ -24,5 +24,13 @@ final class Prover {
      */
     static native void cancel();
 
+    /**
+     * Turns the GPU on or off for the proofs from now on (the striped commitments on Vulkan, lean:
+     * see MainActivity's environment). Returns {"ok": adapter} when on, {"ok": null} when off, or
+     * {"error": why} when there is no GPU to use (the proofs then stay on the CPU). The first call
+     * that turns it on creates the device, about a second.
+     */
+    static native String setGpu(boolean enabled);
+
     private Prover() {}
 }

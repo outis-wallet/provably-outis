@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.res.AssetManager;
 import android.net.Uri;
 import android.os.Build;
@@ -52,6 +53,7 @@ public class MainActivity extends Activity {
      */
     private String pendingAction;
     private int pendingThreads;
+    private String pendingEngine;
     private boolean startedFromIntent;
 
     @Override
@@ -61,8 +63,16 @@ public class MainActivity extends Activity {
         // Rust picks /data/local/tmp, which apps can't write: Android 10 doesn't set it for apps.
         try {
             Os.setenv("TMPDIR", getCacheDir().getAbsolutePath(), true);
+            // The GPU (read when it's first turned on): Vulkan, the lean commitments (for a phone's
+            // shared memory), and the compiled kernels kept in the app's cache.
+            File kernels = new File(getCacheDir(), "outis-gpu-kernels");
+            if (!kernels.isDirectory() && !kernels.mkdirs()) Log.w(TAG, "can't create " + kernels);
+            Os.setenv("OUTIS_GPU_KERNEL_DIR", kernels.getAbsolutePath(), true);
+            Os.setenv("XDG_CACHE_HOME", getCacheDir().getAbsolutePath(), true);
+            Os.setenv("WGPU_BACKEND", "vulkan", true);
+            Os.setenv("STWO_GPU_LEAN", "1", true);
         } catch (ErrnoException exception) {
-            Log.w(TAG, "can't set TMPDIR", exception);
+            Log.w(TAG, "can't set the environment", exception);
         }
         webView = new WebView(this);
         webView.setBackgroundColor(PAGE);
@@ -117,13 +127,19 @@ public class MainActivity extends Activity {
         public boolean canCancel() {
             return true;
         }
+
+        /** The GPU this app can prove on (bridge.ts): {available, reason?}. */
+        @JavascriptInterface
+        public String gpuJson() {
+            return Device.gpuJson(MainActivity.this);
+        }
     }
 
     private void receive(String json) {
         try {
             JSONObject message = new JSONObject(json);
             switch (message.optString("type")) {
-                case "prove": prove(message.optString("action"), message.optInt("threads", 0)); break;
+                case "prove": prove(message.optString("action"), message.optInt("threads", 0), message.optString("engine", "cpu")); break;
                 case "cancel": cancel(); break;
                 case "ready": startFromIntent(); break;
                 default: break;
@@ -132,12 +148,16 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Proves a bundled capture on a thread of its own; the prover's events go to the page as they come. */
-    private void prove(String action, int threads) {
+    /**
+     * Proves a bundled capture on a thread of its own, on the CPU or with the GPU ({@code engine}
+     * "gpu"); the prover's events go to the page as they come.
+     */
+    private void prove(String action, int threads, String engine) {
         if (proving) {
             if (cancelling) {
                 pendingAction = action;
                 pendingThreads = threads;
+                pendingEngine = engine;
             }
             return;
         }
@@ -153,6 +173,8 @@ public class MainActivity extends Activity {
         Thread prover = new Thread(null, () -> {
             String report;
             try {
+                // The GPU for this proof, or not: it stays on the CPU if there is none to use.
+                Log.i(TAG, "GPU " + ("gpu".equals(engine) ? "on" : "off") + ": " + Prover.setGpu("gpu".equals(engine)));
                 File capture = Captures.unpack(this, action);
                 report = Prover.prove(capture.getPath(), Math.max(threads, 0),
                         event -> main.post(() -> {
@@ -187,7 +209,7 @@ public class MainActivity extends Activity {
             if (pendingAction != null) {
                 String action = pendingAction;
                 pendingAction = null;
-                prove(action, pendingThreads);
+                prove(action, pendingThreads, pendingEngine);
             }
             return;
         }
@@ -202,22 +224,28 @@ public class MainActivity extends Activity {
             return;
         }
         // The report goes on as the prover wrote it, so its numbers keep their precision, with the
-        // build its score is stored under (docs/RESULTS.md) put in front.
-        String withBuild = "{\"build\":" + JSONObject.quote(BUILD) + "," + report.trim().substring(1);
+        // build its score is stored under (docs/RESULTS.md) and the engine that proved it put in
+        // front: "gpu" when the GPU made a commitment (its report's gpu lines), else "cpu".
+        String engine = Device.ranOnGpu(report) ? "gpu" : "cpu";
+        String withBuild = "{\"build\":" + JSONObject.quote(BUILD) + ",\"engine\":" + JSONObject.quote(engine) + "," + report.trim().substring(1);
         sendJson("{\"type\":\"result\",\"report\":" + withBuild + ",\"conditions\":" + conditions + "}");
         webView.performHapticFeedback(HapticFeedbackConstants.CONFIRM);
     }
 
     /**
-     * Extras {@code prove} (an action) and {@code threads} start a proof once the page is ready:
-     * {@code adb shell am start -S -n dev.provablyoutis.showcase/.MainActivity --es prove pay --ei threads 8}.
+     * Extras {@code prove} (an action), {@code threads} and {@code engine} ("cpu" or "gpu", set as
+     * if picked) start a proof once the page is ready:
+     * {@code adb shell am start -S -n dev.provablyoutis.showcase/.MainActivity --es prove pay --ei threads 8 --es engine gpu}.
      */
     private void startFromIntent() {
         String action = getIntent().getStringExtra("prove");
         if (startedFromIntent || action == null) return;
         startedFromIntent = true;
         try {
-            send(new JSONObject().put("type", "auto").put("action", action).put("threads", getIntent().getIntExtra("threads", 0)));
+            JSONObject auto = new JSONObject().put("type", "auto").put("action", action).put("threads", getIntent().getIntExtra("threads", 0));
+            String engine = getIntent().getStringExtra("engine");
+            if (engine != null) auto.put("engine", engine);
+            send(auto);
         } catch (JSONException ignored) {
         }
     }
@@ -326,6 +354,37 @@ public class MainActivity extends Activity {
             } catch (JSONException impossible) {
                 throw new IllegalStateException(impossible);
             }
+        }
+
+        /**
+         * The GPU the page may offer (bridge.ts gpuJson): one with Vulkan 1.1 or later, which the
+         * prover's wgpu needs. Whether it really works shows at the first GPU proof: if it
+         * doesn't, the proof stays on the CPU and reports engine "cpu".
+         */
+        static String gpuJson(Context context) {
+            boolean vulkan = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION, 0x401000);
+            try {
+                JSONObject gpu = new JSONObject().put("available", vulkan);
+                if (!vulkan) gpu.put("reason", "This phone has no Vulkan 1.1, so proofs use the CPU only.");
+                return gpu.toString();
+            } catch (JSONException impossible) {
+                throw new IllegalStateException(impossible);
+            }
+        }
+
+        /** Whether a report's gpu lines (the prover's) show a commitment made on the GPU. */
+        static boolean ranOnGpu(String report) {
+            try {
+                org.json.JSONArray lines = new JSONObject(report).optJSONArray("gpu");
+                if (lines == null) return false;
+                for (int index = 0; index < lines.length(); index++) {
+                    String line = lines.optString(index);
+                    if (line.startsWith("commitment #") && line.contains(": GPU ")) return true;
+                }
+            } catch (JSONException unreadable) {
+                return false;
+            }
+            return false;
         }
 
         /** Android's thermal status in the iOS app's words, which the page shows. */

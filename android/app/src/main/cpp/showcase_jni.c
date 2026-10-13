@@ -8,6 +8,8 @@ typedef void (*tx_progress_callback)(void *context, const char *event_json);
 char *tx_prove_replay(const char *capture_dir, uint32_t threads, tx_progress_callback progress, void *context);
 void tx_prove_replay_cancel(void);
 void tx_prove_free(char *answer);
+// The library's `gpu` feature (android/build-rust.sh builds it in).
+char *tx_prove_set_gpu(uint32_t enabled);
 
 static JavaVM *java_vm;
 
@@ -55,4 +57,11 @@ JNIEXPORT jstring JNICALL Java_dev_provablyoutis_showcase_Prover_prove(JNIEnv *e
 
 JNIEXPORT void JNICALL Java_dev_provablyoutis_showcase_Prover_cancel(JNIEnv *env, jclass prover) {
     tx_prove_replay_cancel();
+}
+
+JNIEXPORT jstring JNICALL Java_dev_provablyoutis_showcase_Prover_setGpu(JNIEnv *env, jclass prover, jboolean enabled) {
+    char *answer = tx_prove_set_gpu(enabled ? 1 : 0);
+    jstring result = (*env)->NewStringUTF(env, answer ? answer : "{\"error\": \"The prover gave no answer.\"}");
+    tx_prove_free(answer);
+    return result;
 }
