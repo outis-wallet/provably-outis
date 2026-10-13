@@ -44,6 +44,14 @@ public class MainActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
     private WebView webView;
     private boolean proving;
+    /** The page stopped the proof under way: nothing more of it goes to the page. */
+    private boolean cancelling;
+    /**
+     * A proof the page started while the stopped one was still ending: it starts when that ends,
+     * so two proofs never run (and take their memory) at once.
+     */
+    private String pendingAction;
+    private int pendingThreads;
     private boolean startedFromIntent;
 
     @Override
@@ -103,6 +111,12 @@ public class MainActivity extends Activity {
         public String deviceJson() {
             return Device.json(MainActivity.this);
         }
+
+        /** The page may stop a proof here ({type: "cancel"}). */
+        @JavascriptInterface
+        public boolean canCancel() {
+            return true;
+        }
     }
 
     private void receive(String json) {
@@ -110,6 +124,7 @@ public class MainActivity extends Activity {
             JSONObject message = new JSONObject(json);
             switch (message.optString("type")) {
                 case "prove": prove(message.optString("action"), message.optInt("threads", 0)); break;
+                case "cancel": cancel(); break;
                 case "ready": startFromIntent(); break;
                 default: break;
             }
@@ -119,7 +134,13 @@ public class MainActivity extends Activity {
 
     /** Proves a bundled capture on a thread of its own; the prover's events go to the page as they come. */
     private void prove(String action, int threads) {
-        if (proving) return;
+        if (proving) {
+            if (cancelling) {
+                pendingAction = action;
+                pendingThreads = threads;
+            }
+            return;
+        }
         // An action names one of the bundled captures (captures/<id>), nothing else.
         if (!action.matches("[a-z]+") || !Captures.exists(getAssets(), action)) {
             send(error("No capture for " + action + "."));
@@ -134,7 +155,9 @@ public class MainActivity extends Activity {
             try {
                 File capture = Captures.unpack(this, action);
                 report = Prover.prove(capture.getPath(), Math.max(threads, 0),
-                        event -> main.post(() -> sendJson("{\"type\":\"event\",\"event\":" + event + "}")));
+                        event -> main.post(() -> {
+                            if (!cancelling) sendJson("{\"type\":\"event\",\"event\":" + event + "}");
+                        }));
             } catch (IOException exception) {
                 report = error(exception.toString()).toString();
             }
@@ -145,10 +168,29 @@ public class MainActivity extends Activity {
         prover.start();
     }
 
+    /**
+     * The page stopped the proof (its logo, or back): the prover stops at its next step, and the
+     * page hears nothing more of this proof.
+     */
+    private void cancel() {
+        if (!proving || cancelling) return;
+        cancelling = true;
+        Prover.cancel();
+    }
+
     private void finish(String report, String conditions) {
         proving = false;
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         Log.i(TAG, "SHOWCASE_RESULT " + report);
+        if (cancelling) {
+            cancelling = false;
+            if (pendingAction != null) {
+                String action = pendingAction;
+                pendingAction = null;
+                prove(action, pendingThreads);
+            }
+            return;
+        }
         try {
             JSONObject parsed = new JSONObject(report);
             if (parsed.has("error")) {

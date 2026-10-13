@@ -6,6 +6,7 @@
 
 typedef void (*tx_progress_callback)(void *context, const char *event_json);
 char *tx_prove_replay(const char *capture_dir, uint32_t threads, tx_progress_callback progress, void *context);
+void tx_prove_replay_cancel(void);
 void tx_prove_free(char *answer);
 
 static JavaVM *java_vm;
@@ -50,4 +51,8 @@ JNIEXPORT jstring JNICALL Java_dev_provablyoutis_showcase_Prover_prove(JNIEnv *e
     jstring report = (*env)->NewStringUTF(env, answer ? answer : "{\"error\": \"The prover gave no answer.\"}");
     tx_prove_free(answer);
     return report;
+}
+
+JNIEXPORT void JNICALL Java_dev_provablyoutis_showcase_Prover_cancel(JNIEnv *env, jclass prover) {
+    tx_prove_replay_cancel();
 }

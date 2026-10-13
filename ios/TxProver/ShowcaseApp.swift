@@ -30,12 +30,17 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     let webView: WKWebView
     private var proving = false
+    /// The page stopped the proof under way: nothing more of it goes to the page.
+    fileprivate var cancelling = false
+    /// A proof the page started while the stopped one was still ending: it starts when that ends,
+    /// so two proofs never run (and take their memory) at once.
+    private var pending: (action: String, threads: Int)?
     private var startedFromArguments = false
 
     override init() {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.addUserScript(WKUserScript(
-            source: "window.provablyOutisNative = \(Self.json(["device": Device.info, "build": Device.build]));",
+            source: "window.provablyOutisNative = \(Self.json(["device": Device.info, "build": Device.build, "canCancel": true]));",
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -57,6 +62,7 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         switch type {
         case "prove": prove(action: body["action"] as? String ?? "", threads: body["threads"] as? Int ?? 0)
+        case "cancel": cancel()
         case "ready": startFromArguments()
         default: break
         }
@@ -64,7 +70,10 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     /// Proves a bundled capture on a thread of its own; the prover's events go to the page as they come.
     private func prove(action: String, threads: Int) {
-        guard !proving else { return }
+        guard !proving else {
+            if cancelling { pending = (action, threads) }
+            return
+        }
         // An action names one of the bundled captures (captures/<id>), nothing else.
         guard !action.isEmpty, action.allSatisfy({ $0.isASCII && $0.isLowercase }),
               let capture = Bundle.main.url(forResource: action, withExtension: nil, subdirectory: "captures") else {
@@ -91,10 +100,26 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         thread.start()
     }
 
+    /// The page stopped the proof (its logo, back to the start): the prover stops at its next step,
+    /// and the page hears nothing more of this proof.
+    private func cancel() {
+        guard proving, !cancelling else { return }
+        cancelling = true
+        tx_prove_replay_cancel()
+    }
+
     private func finish(report: String, conditions: [String: Any]) {
         proving = false
         UIApplication.shared.isIdleTimerDisabled = false
         print("SHOWCASE_RESULT \(report)")
+        if cancelling {
+            cancelling = false
+            if let next = pending {
+                pending = nil
+                prove(action: next.action, threads: next.threads)
+            }
+            return
+        }
         let parsed = (try? JSONSerialization.jsonObject(with: Data(report.utf8))) as? [String: Any]
         if let error = parsed?["error"] as? String {
             send(["type": "error", "message": error])
@@ -147,7 +172,9 @@ private let progressToPage: tx_progress_callback = { context, eventJson in
     guard let context, let eventJson else { return }
     let showcase = Unmanaged<Showcase>.fromOpaque(context).takeUnretainedValue()
     let event = String(cString: eventJson)
-    DispatchQueue.main.async { showcase.sendJSON(#"{"type":"event","event":"# + event + "}") }
+    DispatchQueue.main.async {
+        if !showcase.cancelling { showcase.sendJSON(#"{"type":"event","event":"# + event + "}") }
+    }
 }
 
 enum Device {

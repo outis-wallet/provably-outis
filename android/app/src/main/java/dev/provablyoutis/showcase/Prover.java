@@ -17,5 +17,12 @@ final class Prover {
      */
     static native String prove(String captureDir, int threads, Listener listener);
 
+    /**
+     * Asks the proof under way to stop, from any thread: {@link #prove} then returns
+     * {"error": "cancelled", "cancelled": true}, within about a second and a half (a few seconds
+     * in the proof's last part).
+     */
+    static native void cancel();
+
     private Prover() {}
 }

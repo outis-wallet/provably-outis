@@ -8,4 +8,7 @@ typedef void (*tx_progress_callback)(void *context, const char *event_json);
 /// Replays the capture in `capture_dir` on `threads` threads (0: one per core); returns the report
 /// as JSON, or {"error": ...}. `progress` may be NULL. Free the answer with tx_prove_free.
 char *tx_prove_replay(const char *capture_dir, uint32_t threads, tx_progress_callback progress, void *context);
+/// Asks the replay under way to stop (from any thread): it answers {"error": "cancelled",
+/// "cancelled": true} within about a second and a half, or a few seconds in the proof's last part.
+void tx_prove_replay_cancel(void);
 void tx_prove_free(char *answer);
