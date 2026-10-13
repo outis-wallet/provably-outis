@@ -12,3 +12,16 @@ char *tx_prove_replay(const char *capture_dir, uint32_t threads, tx_progress_cal
 /// "cancelled": true} within about a second and a half, or a few seconds in the proof's last part.
 void tx_prove_replay_cancel(void);
 void tx_prove_free(char *answer);
+
+// EXPERIMENT (ios-gpu): the GPU prover's switches (prover/crates/os_wasm_probe/src/native.rs, in a
+// library built with the gpu feature), process-wide, for the proofs from now on. Each returns
+// {"ok": ...} or {"error": ...}; free it with tx_prove_free. tx_prove_set_gpu(1) creates the GPU
+// device on its first call (and returns {"ok": adapter}); the stages take 0 off, 1 on, 2 shadow.
+char *tx_prove_set_gpu(uint32_t enabled);
+char *tx_prove_set_gpu_composition(uint32_t mode);
+char *tx_prove_set_gpu_decommit(uint32_t mode);
+char *tx_prove_set_gpu_ood(uint32_t mode);
+char *tx_prove_set_gpu_fri(uint32_t mode);
+
+// os_proc_available_memory(): what the app may still allocate before jetsam ends it.
+#include <os/proc.h>

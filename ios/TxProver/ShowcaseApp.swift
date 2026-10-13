@@ -7,12 +7,22 @@ import WebKit
 
 @main
 struct ShowcaseApp: App {
+    // EXPERIMENT (ios-gpu): the GPU modes' panel (GpuLab.swift).
+    @ObservedObject private var lab = GpuLab.shared
+
+    init() {
+        // Before any GPU device exists (the first GPU proof).
+        GpuEnvironment.configure()
+    }
+
     var body: some Scene {
         WindowGroup {
             ShowcaseView()
                 .ignoresSafeArea()
                 .background(Color(uiColor: Showcase.background))
                 .preferredColorScheme(.dark)
+                .overlay(alignment: .topTrailing) { GpuButton().padding(.trailing, 12) }
+                .sheet(isPresented: $lab.showPanel) { GpuPanel() }
         }
     }
 }
@@ -68,16 +78,22 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         }
     }
 
-    /// Proves a bundled capture on a thread of its own; the prover's events go to the page as they come.
-    private func prove(action: String, threads: Int) {
+    /// A proof from the GPU panel (GpuLab.swift): its action and threads, the page not told.
+    func proveFromPanel() {
+        prove(action: GpuLab.shared.action, threads: GpuLab.shared.threads, fromPage: false)
+    }
+
+    /// Proves a bundled capture on a thread of its own; the prover's events go to the page as they
+    /// come (when the page asked). The GPU panel's mode is applied first, and the proof logged there.
+    private func prove(action: String, threads: Int, fromPage: Bool = true) {
         guard !proving else {
-            if cancelling { pending = (action, threads) }
+            if cancelling && fromPage { pending = (action, threads) }
             return
         }
         // An action names one of the bundled captures (captures/<id>), nothing else.
         guard !action.isEmpty, action.allSatisfy({ $0.isASCII && $0.isLowercase }),
               let capture = Bundle.main.url(forResource: action, withExtension: nil, subdirectory: "captures") else {
-            send(["type": "error", "message": "No capture for \(action)."])
+            if fromPage { send(["type": "error", "message": "No capture for \(action)."]) }
             return
         }
         proving = true
@@ -85,16 +101,24 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         UIApplication.shared.isIdleTimerDisabled = true
         let thermalBefore = Device.thermalState
         let context = Unmanaged.passUnretained(self).toOpaque()
+        let run = GpuLab.shared.begin(action: action, threads: threads, source: fromPage ? "page" : "panel")
         let thread = Thread {
-            let answer = capture.path.withCString { tx_prove_replay($0, UInt32(clamping: threads), progressToPage, context) }
+            run.prepare()
+            let answer = capture.path.withCString {
+                tx_prove_replay($0, UInt32(clamping: threads), fromPage ? progressToPage : nil, fromPage ? context : nil)
+            }
             let report = answer.map { String(cString: $0) } ?? #"{"error": "The prover gave no answer."}"#
             tx_prove_free(answer)
+            run.complete(report: report)
             let conditions: [String: Any] = [
                 "thermal_before": thermalBefore,
                 "thermal_after": Device.thermalState,
                 "low_power_mode": ProcessInfo.processInfo.isLowPowerModeEnabled,
             ]
-            DispatchQueue.main.async { self.finish(report: report, conditions: conditions) }
+            DispatchQueue.main.async {
+                GpuLab.shared.end(run)
+                self.finish(report: report, conditions: conditions, toPage: fromPage)
+            }
         }
         thread.qualityOfService = .userInitiated
         thread.start()
@@ -108,7 +132,7 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         tx_prove_replay_cancel()
     }
 
-    private func finish(report: String, conditions: [String: Any]) {
+    private func finish(report: String, conditions: [String: Any], toPage: Bool = true) {
         proving = false
         UIApplication.shared.isIdleTimerDisabled = false
         print("SHOWCASE_RESULT \(report)")
@@ -120,6 +144,7 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             }
             return
         }
+        guard toPage else { return }
         let parsed = (try? JSONSerialization.jsonObject(with: Data(report.utf8))) as? [String: Any]
         if let error = parsed?["error"] as? String {
             send(["type": "error", "message": error])
@@ -130,10 +155,14 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
-    /// Launch arguments `--prove <action> [--threads N]` (devicectl, an Xcode scheme) start a proof
-    /// once the page is ready.
+    /// Launch arguments `--prove <action> [--threads N] [--mode cpu|lean|full]` (devicectl, an Xcode
+    /// scheme) start a proof once the page is ready, in that GPU mode.
     private func startFromArguments() {
         let arguments = CommandLine.arguments
+        if let flag = arguments.firstIndex(of: "--mode"), flag + 1 < arguments.count,
+           let mode = ProveMode(rawValue: arguments[flag + 1]) {
+            GpuLab.shared.mode = mode
+        }
         guard !startedFromArguments, let index = arguments.firstIndex(of: "--prove") else { return }
         startedFromArguments = true
         let action = index + 1 < arguments.count && !arguments[index + 1].hasPrefix("--") ? arguments[index + 1] : "pay"
@@ -232,7 +261,8 @@ enum Device {
         let commit = Bundle.main.url(forResource: "build", withExtension: "txt")
             .flatMap { try? String(contentsOf: $0, encoding: .utf8) }?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
-        let text = "ios-\(version)-\(commit)"
+        // -gpu: this build's scores may come from the GPU modes (branch ios-gpu).
+        let text = "ios-\(version)-\(commit)-gpu"
         return String(text.filter { $0.isASCII && ($0.isLetter || $0.isNumber || "._+-".contains($0)) }.prefix(64))
     }()
 
