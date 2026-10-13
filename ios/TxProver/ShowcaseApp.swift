@@ -155,8 +155,9 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
-    /// Launch arguments `--prove <action> [--threads N] [--mode cpu|lean|full]` (devicectl, an Xcode
-    /// scheme) start a proof once the page is ready, in that GPU mode.
+    /// Launch arguments `--prove <action> [--threads N] [--mode cpu|lean|full] [--native]
+    /// [--cancel-after S]` (devicectl, an Xcode scheme) start a proof once the page is ready, in that
+    /// GPU mode.
     private func startFromArguments() {
         let arguments = CommandLine.arguments
         if let flag = arguments.firstIndex(of: "--mode"), flag + 1 < arguments.count,
@@ -168,7 +169,22 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let action = index + 1 < arguments.count && !arguments[index + 1].hasPrefix("--") ? arguments[index + 1] : "pay"
         var threads = 0
         if let flag = arguments.firstIndex(of: "--threads"), flag + 1 < arguments.count { threads = Int(arguments[flag + 1]) ?? 0 }
+        // EXPERIMENT (ios-gpu) `--native`: <action> proved without the page (which proves its one
+        // transaction), logged in the GPU panel.
+        if arguments.contains("--native") {
+            prove(action: action, threads: threads, fromPage: false)
+            return
+        }
         send(["type": "auto", "action": action, "threads": threads])
+        // EXPERIMENT (ios-gpu) `--cancel-after S`: S seconds in, stop the proof and ask for the same
+        // again at once, as the page does (stop, then prove): the new one waits for the stopped one.
+        if let flag = arguments.firstIndex(of: "--cancel-after"), flag + 1 < arguments.count,
+           let seconds = Double(arguments[flag + 1]) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+                self.cancel()
+                self.prove(action: action, threads: threads)
+            }
+        }
     }
 
     func send(_ message: [String: Any]) { sendJSON(Self.json(message)) }

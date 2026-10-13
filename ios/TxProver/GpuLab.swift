@@ -206,7 +206,9 @@ final class ProofRun {
         let ram = String(format: "%.1f GiB RAM", info["ramGiB"] as? Double ?? 0)
         lines.append("\(Device.model) \(info["chip"] as? String ?? "") · \(info["os"] as? String ?? "") · \(ram) · low power \(ProcessInfo.processInfo.isLowPowerModeEnabled ? "on" : "off") · build \(Device.build)")
         if mode != .cpu { lines.append("GPU: \(gpu)\(mode == .lean && !zeroCopy ? " · zero-copy off" : "")") }
-        if let error = parsed["error"] as? String {
+        if parsed["cancelled"] as? Bool == true {
+            lines.append(String(format: "CANCELLED after %.1f s (stopped by the page)", Date().timeIntervalSince(started)))
+        } else if let error = parsed["error"] as? String {
             lines.append("ERROR: \(error)")
         } else {
             let prove = parsed["prove_s"] as? Double ?? 0
