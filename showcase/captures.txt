@@ -1,7 +1,0 @@
-# The transactions the apps prove: action id, then its capture directory under prover/captures/
-# (the prover submodule). The iOS build phase and the Android build bundle each one as
-# captures/<id>/ next to the web UI.
-register register
-deposit deposit
-pay pay
-withdraw withdraw
