@@ -39,9 +39,10 @@ Each app wraps the native build in a thin shell that runs the Rust prover.
   - `{type: "result", report, conditions}`: the `Report`, plus the thermal state before and after
     and Low Power Mode.
   - `{type: "error", message}`.
-  - `{type: "auto", action, threads, engine?}`: launch arguments `--prove <action> [--threads N]`
-    (Android: extras `prove`, `threads`, `engine`), for testing. The page proves that transaction,
-    and with `engine` (where the GPU is offered) sets the Hardware Type as if picked.
+  - `{type: "auto", action, threads, engine?}`: launch arguments
+    `--prove <action> [--threads N] [--engine cpu|gpu]` (Android: extras `prove`, `threads`,
+    `engine`), for testing. The page proves that transaction, and with `engine` (where the GPU is
+    offered) sets the Hardware Type as if picked.
 - Device info:
   - iOS sets `window.provablyOutisNative = {device, build}` before the page loads.
   - Android returns it from `ProvablyOutisAndroid.deviceJson()`.
@@ -54,7 +55,7 @@ Each app wraps the native build in a thin shell that runs the Rust prover.
   - The app proves with the GPU on (`tx_prove_set_gpu(1)`, lean commitments: `STWO_GPU_LEAN=1`) or
     off (`tx_prove_set_gpu(0)`), and puts `engine` in the Report: `"gpu"` when a commitment ran on
     the GPU (the Report's `gpu` lines), else `"cpu"`.
-  - Android since branch android-gpu (Vulkan 1.1 or later); iOS: the same, still to do.
+  - Both apps do it: Android with Vulkan 1.1 or later, iOS with a Metal device.
 - Android's back button calls `provablyOutis.back()`. It returns true when the page handled it.
 
 The prover's `Progress` events are `phase` (state, execute, os, prove, verify), `transaction`
@@ -88,7 +89,8 @@ checkout had uncommitted changes in the app). The web engine changes only when t
    (from `prover/captures/`) to `captures/<action>/`.
 3. Install and run:
    `xcrun devicectl device install app --device <udid> <DerivedData>/Build/Products/Release-iphoneos/TxProver.app`,
-   then `xcrun devicectl device process launch --device <udid> dev.provablyoutis.TxProver [--prove pay]`.
+   then `xcrun devicectl device process launch --device <udid> dev.provablyoutis.TxProver
+   [--prove pay [--threads N] [--engine cpu|gpu]]`.
    With `--console`, the report is printed after `SHOWCASE_RESULT`. Ending a `--console`
    session also ends the app.
 

@@ -12,3 +12,10 @@ char *tx_prove_replay(const char *capture_dir, uint32_t threads, tx_progress_cal
 /// "cancelled": true} within about a second and a half, or a few seconds in the proof's last part.
 void tx_prove_replay_cancel(void);
 void tx_prove_free(char *answer);
+
+/// Turns the GPU on or off for the proofs from now on, process-wide (the library's gpu feature,
+/// which ios/build-rust.sh builds in: prover/crates/os_wasm_probe/src/native.rs). Returns
+/// {"ok": adapter} when on, {"ok": null} when off, or {"error": why} when there is no GPU to use
+/// (the proofs then stay on the CPU); free it with tx_prove_free. The first call that turns it on
+/// creates the GPU device, about a second.
+char *tx_prove_set_gpu(uint32_t enabled);
