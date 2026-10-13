@@ -1,6 +1,7 @@
 // The showcase on iOS: the shared web UI (showcase/, bundled as web/) in a full-screen web view, and
 // the bridge from it to the Rust prover (os_wasm_probe::replay, linked as a static library). The
 // page/native contract is in outis/wallet/apps/prover/src/bridge.ts; the Android app implements the same one.
+import Metal
 import SwiftUI
 import UIKit
 import WebKit
@@ -44,13 +45,13 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     fileprivate var cancelling = false
     /// A proof the page started while the stopped one was still ending: it starts when that ends,
     /// so two proofs never run (and take their memory) at once.
-    private var pending: (action: String, threads: Int)?
+    private var pending: (action: String, threads: Int, engine: String?)?
     private var startedFromArguments = false
 
     override init() {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.addUserScript(WKUserScript(
-            source: "window.provablyOutisNative = \(Self.json(["device": Device.info, "build": Device.build, "canCancel": true]));",
+            source: "window.provablyOutisNative = \(Self.json(["device": Device.info, "build": Device.build, "canCancel": true, "gpu": Device.gpu]));",
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -71,7 +72,7 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         switch type {
-        case "prove": prove(action: body["action"] as? String ?? "", threads: body["threads"] as? Int ?? 0)
+        case "prove": prove(action: body["action"] as? String ?? "", threads: body["threads"] as? Int ?? 0, engine: body["engine"] as? String)
         case "cancel": cancel()
         case "ready": startFromArguments()
         default: break
@@ -84,10 +85,12 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     }
 
     /// Proves a bundled capture on a thread of its own; the prover's events go to the page as they
-    /// come (when the page asked). The GPU panel's mode is applied first, and the proof logged there.
-    private func prove(action: String, threads: Int, fromPage: Bool = true) {
+    /// come (when the page asked). The page's `engine` ("gpu": GPU lean, else the CPU) is applied
+    /// first, or the GPU panel's mode when the page sent none (an older UI), and the proof logged
+    /// in the panel.
+    private func prove(action: String, threads: Int, engine: String? = nil, fromPage: Bool = true) {
         guard !proving else {
-            if cancelling && fromPage { pending = (action, threads) }
+            if cancelling && fromPage { pending = (action, threads, engine) }
             return
         }
         // An action names one of the bundled captures (captures/<id>), nothing else.
@@ -101,7 +104,9 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         UIApplication.shared.isIdleTimerDisabled = true
         let thermalBefore = Device.thermalState
         let context = Unmanaged.passUnretained(self).toOpaque()
-        let run = GpuLab.shared.begin(action: action, threads: threads, source: fromPage ? "page" : "panel")
+        // The GPU for this proof, or not: it stays on the CPU if there is none to use.
+        let mode: ProveMode? = engine.map { $0 == "gpu" ? .lean : .cpu }
+        let run = GpuLab.shared.begin(action: action, threads: threads, source: fromPage ? "page" : "panel", mode: mode)
         let thread = Thread {
             run.prepare()
             let answer = capture.path.withCString {
@@ -135,29 +140,34 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private func finish(report: String, conditions: [String: Any], toPage: Bool = true) {
         proving = false
         UIApplication.shared.isIdleTimerDisabled = false
-        print("SHOWCASE_RESULT \(report)")
+        let parsed = (try? JSONSerialization.jsonObject(with: Data(report.utf8))) as? [String: Any]
+        // The report goes on as the prover wrote it, so its numbers keep their precision, with the
+        // engine that proved it put in front: "gpu" when the GPU made a commitment (its report's gpu
+        // lines), else "cpu".
+        var result = report
+        if let parsed, parsed["error"] == nil { result = Self.withEngine(report, Device.ranOnGpu(parsed) ? "gpu" : "cpu") }
+        print("SHOWCASE_RESULT \(result)")
         if cancelling {
             cancelling = false
             if let next = pending {
                 pending = nil
-                prove(action: next.action, threads: next.threads)
+                prove(action: next.action, threads: next.threads, engine: next.engine)
             }
             return
         }
         guard toPage else { return }
-        let parsed = (try? JSONSerialization.jsonObject(with: Data(report.utf8))) as? [String: Any]
         if let error = parsed?["error"] as? String {
             send(["type": "error", "message": error])
             return
         }
-        // The report goes on as the prover wrote it, so its numbers keep their precision.
-        sendJSON(#"{"type":"result","report":"# + report + #","conditions":"# + Self.json(conditions) + "}")
+        sendJSON(#"{"type":"result","report":"# + result + #","conditions":"# + Self.json(conditions) + "}")
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
-    /// Launch arguments `--prove <action> [--threads N] [--mode cpu|lean|full] [--native]
-    /// [--cancel-after S]` (devicectl, an Xcode scheme) start a proof once the page is ready, in that
-    /// GPU mode.
+    /// Launch arguments `--prove <action> [--threads N] [--engine cpu|gpu] [--mode cpu|lean|full]
+    /// [--native] [--cancel-after S]` (devicectl, an Xcode scheme) start a proof once the page is
+    /// ready: with `--engine`, the page sets its Hardware Type as if picked and proves with it;
+    /// `--mode` is the GPU panel's (for `--native`, or a page that sends no engine).
     private func startFromArguments() {
         let arguments = CommandLine.arguments
         if let flag = arguments.firstIndex(of: "--mode"), flag + 1 < arguments.count,
@@ -169,20 +179,24 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let action = index + 1 < arguments.count && !arguments[index + 1].hasPrefix("--") ? arguments[index + 1] : "pay"
         var threads = 0
         if let flag = arguments.firstIndex(of: "--threads"), flag + 1 < arguments.count { threads = Int(arguments[flag + 1]) ?? 0 }
+        var engine: String?
+        if let flag = arguments.firstIndex(of: "--engine"), flag + 1 < arguments.count { engine = arguments[flag + 1] }
         // EXPERIMENT (ios-gpu) `--native`: <action> proved without the page (which proves its one
         // transaction), logged in the GPU panel.
         if arguments.contains("--native") {
             prove(action: action, threads: threads, fromPage: false)
             return
         }
-        send(["type": "auto", "action": action, "threads": threads])
+        var auto: [String: Any] = ["type": "auto", "action": action, "threads": threads]
+        if let engine { auto["engine"] = engine }
+        send(auto)
         // EXPERIMENT (ios-gpu) `--cancel-after S`: S seconds in, stop the proof and ask for the same
         // again at once, as the page does (stop, then prove): the new one waits for the stopped one.
         if let flag = arguments.firstIndex(of: "--cancel-after"), flag + 1 < arguments.count,
            let seconds = Double(arguments[flag + 1]) {
             DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
                 self.cancel()
-                self.prove(action: action, threads: threads)
+                self.prove(action: action, threads: threads, engine: engine)
             }
         }
     }
@@ -195,6 +209,12 @@ final class Showcase: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     static func json(_ object: [String: Any]) -> String {
         String(decoding: (try? JSONSerialization.data(withJSONObject: object)) ?? Data("{}".utf8), as: UTF8.self)
+    }
+
+    /// A report (a JSON object, as the prover wrote it) with `engine` ("cpu" or "gpu") put in front.
+    static func withEngine(_ report: String, _ engine: String) -> String {
+        let rest = report.trimmingCharacters(in: .whitespacesAndNewlines).dropFirst()
+        return #"{"engine":"\#(engine)""# + (rest.hasPrefix("}") ? "" : ",") + String(rest)
     }
 
     // Only the bundled page; a link out opens in the browser.
@@ -293,6 +313,21 @@ enum Device {
         "iPhone18,1": "A19 Pro", "iPhone18,2": "A19 Pro",
         "iPad13,16": "Apple M1", "iPad13,17": "Apple M1",
     ]
+
+    /// The GPU the page may offer (bridge.ts `gpu`): a Metal device, which the prover's wgpu needs.
+    /// Whether it really works shows at the first GPU proof: if it doesn't, the proof stays on the
+    /// CPU and reports engine "cpu".
+    static var gpu: [String: Any] {
+        MTLCreateSystemDefaultDevice() != nil
+            ? ["available": true]
+            : ["available": false, "reason": "This device has no Metal GPU, so proofs use the CPU only."]
+    }
+
+    /// Whether a report's gpu lines (the prover's) show a commitment made on the GPU.
+    static func ranOnGpu(_ report: [String: Any]) -> Bool {
+        let lines = (report["gpu"] as? [Any] ?? []).compactMap { $0 as? String }
+        return lines.contains { $0.hasPrefix("commitment #") && $0.contains(": GPU ") }
+    }
 
     private static func sysctlInt(_ name: String) -> Int? {
         var value: Int32 = 0

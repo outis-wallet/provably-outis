@@ -279,8 +279,10 @@ final class GpuLab: ObservableObject {
         showPanel = CommandLine.arguments.contains("--panel")
     }
 
-    /// A proof starting (on the main thread): its run, numbered.
-    func begin(action: String, threads: Int, source: String) -> ProofRun {
+    /// A proof starting (on the main thread): its run, numbered. It runs in `mode` when given (the
+    /// page's Hardware Type), else in the panel's.
+    func begin(action: String, threads: Int, source: String, mode: ProveMode? = nil) -> ProofRun {
+        let mode = mode ?? self.mode
         count += 1
         UserDefaults.standard.set(count, forKey: Key.count)
         let run = ProofRun(number: count, mode: mode, action: action, threads: threads, source: source, zeroCopy: zeroCopy)
