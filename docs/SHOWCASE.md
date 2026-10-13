@@ -30,7 +30,8 @@ Each app wraps the native build in a thin shell that runs the Rust prover.
 
 ## The contract (outis/wallet/apps/prover/src/bridge.ts)
 
-- Page to native: `{type: "prove", action, threads}` and `{type: "ready"}`.
+- Page to native: `{type: "prove", action, threads, engine?}` and `{type: "ready"}`.
+  - `engine` (`"cpu"` or `"gpu"`) comes only to an app that offers its GPU (below).
   - iOS receives them on `webkit.messageHandlers.prover`.
   - Android receives them on `ProvablyOutisAndroid.postMessage(json)`.
 - Native to page: `provablyOutis.receive(message)`, with one of:
@@ -38,12 +39,24 @@ Each app wraps the native build in a thin shell that runs the Rust prover.
   - `{type: "result", report, conditions}`: the `Report`, plus the thermal state before and after
     and Low Power Mode.
   - `{type: "error", message}`.
-  - `{type: "auto", action, threads}`: launch arguments `--prove <action> [--threads N]`, for
-    testing.
+  - `{type: "auto", action, threads, engine?}`: launch arguments
+    `--prove <action> [--threads N] [--engine cpu|gpu]` (Android: extras `prove`, `threads`,
+    `engine`), for testing. The page proves that transaction, and with `engine` (where the GPU is
+    offered) sets the Hardware Type as if picked.
 - Device info:
   - iOS sets `window.provablyOutisNative = {device, build}` before the page loads.
   - Android returns it from `ProvablyOutisAndroid.deviceJson()`.
   - Fields: `{platform, model, os, cores, ramGiB}`, and the optional ones of docs/RESULTS.md.
+- The GPU, for an app that can prove on it:
+  - iOS sets `provablyOutisNative.gpu`; Android returns it from `ProvablyOutisAndroid.gpuJson()`.
+  - It's `{available, reason?}`; `reason` says why it can't be used.
+  - The page then shows the Hardware Type choice (CPU or GPU) in the settings, remembered, and sends
+    it as the prove message's `engine`.
+  - The app proves with the GPU on (`tx_prove_set_gpu(1)`, lean commitments: `STWO_GPU_LEAN=1`) or
+    off (`tx_prove_set_gpu(0)`), and puts `engine` in the Report: `"gpu"` when a commitment ran on
+    the GPU (the Report's `gpu` lines), else `"cpu"`.
+  - Android since branch android-gpu (Vulkan 1.1 or later); iOS since branch ios-gpu-toggle (a Metal
+    device).
 - Android's back button calls `provablyOutis.back()`. It returns true when the page handled it.
 
 The prover's `Progress` events are `phase` (state, execute, os, prove, verify), `transaction`
