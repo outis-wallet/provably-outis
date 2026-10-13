@@ -90,7 +90,8 @@ checkout had uncommitted changes in the app). The web engine changes only when t
    (from `prover/captures/`) to `captures/<action>/`.
 3. Install and run:
    `xcrun devicectl device install app --device <udid> <DerivedData>/Build/Products/Release-iphoneos/TxProver.app`,
-   then `xcrun devicectl device process launch --device <udid> dev.provablyoutis.TxProver [--prove pay]`.
+   then `xcrun devicectl device process launch --device <udid> dev.provablyoutis.TxProver
+   [--prove pay [--threads N] [--engine cpu|gpu]]`.
    With `--console`, the report is printed after `SHOWCASE_RESULT`. Ending a `--console`
    session also ends the app.
 

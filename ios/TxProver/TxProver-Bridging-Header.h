@@ -13,15 +13,9 @@ char *tx_prove_replay(const char *capture_dir, uint32_t threads, tx_progress_cal
 void tx_prove_replay_cancel(void);
 void tx_prove_free(char *answer);
 
-// EXPERIMENT (ios-gpu): the GPU prover's switches (prover/crates/os_wasm_probe/src/native.rs, in a
-// library built with the gpu feature), process-wide, for the proofs from now on. Each returns
-// {"ok": ...} or {"error": ...}; free it with tx_prove_free. tx_prove_set_gpu(1) creates the GPU
-// device on its first call (and returns {"ok": adapter}); the stages take 0 off, 1 on, 2 shadow.
+/// Turns the GPU on or off for the proofs from now on, process-wide (the library's gpu feature,
+/// which ios/build-rust.sh builds in: prover/crates/os_wasm_probe/src/native.rs). Returns
+/// {"ok": adapter} when on, {"ok": null} when off, or {"error": why} when there is no GPU to use
+/// (the proofs then stay on the CPU); free it with tx_prove_free. The first call that turns it on
+/// creates the GPU device, about a second.
 char *tx_prove_set_gpu(uint32_t enabled);
-char *tx_prove_set_gpu_composition(uint32_t mode);
-char *tx_prove_set_gpu_decommit(uint32_t mode);
-char *tx_prove_set_gpu_ood(uint32_t mode);
-char *tx_prove_set_gpu_fri(uint32_t mode);
-
-// os_proc_available_memory(): what the app may still allocate before jetsam ends it.
-#include <os/proc.h>
